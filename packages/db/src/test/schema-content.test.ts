@@ -24,8 +24,9 @@ describe("content schema", () => {
   it("denies client access to server-only tables", async () => {
     const { client } = await makeUser("schema-a@test.local");
     for (const table of ["note_chunks", "ingest_inbox"]) {
-      const { data } = await client.from(table).select("id");
-      expect(data ?? []).toHaveLength(0);      // RLS: no policies -> empty, never rows
+      const { data, error } = await client.from(table).select("id");
+      expect(error, `select on ${table} should be denied`).not.toBeNull();  // no grant -> 42501, never rows
+      expect(data, `select on ${table} should return no data`).toBeNull();
     }
     const { error } = await client.from("note_chunks").insert({ note_id: crypto.randomUUID(), chunk_index: 0, content: "x" });
     expect(error).not.toBeNull();              // insert denied

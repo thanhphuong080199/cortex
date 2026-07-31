@@ -89,15 +89,16 @@ alter table public.ingest_inbox enable row level security;  -- no policies: serv
 -- ============ Data API grants ============
 -- The local Supabase CLI (matching the hosted/cloud default) does not auto-expose new
 -- tables to the Data API roles; PostgREST needs table-level GRANTs before RLS is even
--- evaluated. RLS remains the actual access gate: note_chunks/ingest_inbox have RLS
--- enabled with no policies, so granting privileges here does not expose any rows to
--- authenticated/anon — every row-level access still resolves to "denied".
+-- evaluated. Grants and RLS are two independent layers: client-writable tables (notes,
+-- attachments) get both a grant AND a matching RLS policy. Server-only tables
+-- (note_chunks, ingest_inbox) get NO grant at all for authenticated — access is denied
+-- at the privilege layer before RLS is ever evaluated, so a future policy accidentally
+-- added to one of those tables cannot expose rows to authenticated on its own.
 grant select, insert, update, delete on public.notes to authenticated;
-grant select, insert, update, delete on public.note_chunks to authenticated;
 grant select, insert, update, delete on public.attachments to authenticated;
-grant select, insert, update, delete on public.ingest_inbox to authenticated;
 
 -- service_role bypasses RLS but still needs table-level grants to be routed by PostgREST.
+-- All four tables, including the server-only ones, are server-managed via service_role.
 grant select, insert, update, delete on public.notes to service_role;
 grant select, insert, update, delete on public.note_chunks to service_role;
 grant select, insert, update, delete on public.attachments to service_role;
