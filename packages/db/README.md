@@ -1,0 +1,1 @@
+Migrations live in `/supabase/migrations` (Supabase CLI convention). This package holds the RLS/schema test suite and, later, typed query helpers. Run `supabase start`, copy `.env.example` → `.env` with keys from `supabase status`, then `pnpm test`.

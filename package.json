@@ -2,7 +2,9 @@
   "name": "cortex",
   "private": true,
   "packageManager": "pnpm@11.3.0",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
@@ -10,10 +12,11 @@
     "test": "turbo run test"
   },
   "devDependencies": {
+    "eslint": "^9.20.0",
+    "prettier": "^3.4.0",
+    "supabase": "^2.110.0",
     "turbo": "^2.5.0",
     "typescript": "^5.6.0",
-    "eslint": "^9.20.0",
-    "typescript-eslint": "^8.20.0",
-    "prettier": "^3.4.0"
+    "typescript-eslint": "^8.20.0"
   }
 }
