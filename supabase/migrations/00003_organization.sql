@@ -1,6 +1,6 @@
 create table public.tags (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id),
+  user_id uuid not null references auth.users(id) on delete cascade,
   name text not null,
   color text,
   created_by text not null default 'user' check (created_by in ('user','ai')),
@@ -14,7 +14,7 @@ create policy tags_own on public.tags for all to authenticated
 
 create table public.note_tags (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id),
+  user_id uuid not null references auth.users(id) on delete cascade,
   note_id uuid not null references public.notes(id) on delete cascade,
   tag_id uuid not null references public.tags(id) on delete cascade,
   source text not null check (source in ('user','ai')),
@@ -31,7 +31,7 @@ create policy note_tags_own on public.note_tags for all to authenticated
 
 create table public.links (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id),
+  user_id uuid not null references auth.users(id) on delete cascade,
   from_note_id uuid not null references public.notes(id) on delete cascade,
   to_note_id uuid not null references public.notes(id) on delete cascade,
   kind text not null default 'semantic' check (kind in ('semantic','manual','reference')),

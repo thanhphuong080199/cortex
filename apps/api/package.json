@@ -16,7 +16,8 @@
     "@nestjs/platform-express": "^11.0.0",
     "jose": "^5.9.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@cortex/config": "workspace:*",

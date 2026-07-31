@@ -29,8 +29,19 @@ create trigger check_email_allowed_trigger
 -- ============ Data API grants ============
 -- allowed_emails is server-only: it holds the invite allow-list, never client data.
 -- Grants and RLS are two independent layers (see 00002_content.sql). Here authenticated
--- gets NO table-level grant at all, so PostgREST denies access at the privilege layer
--- before RLS is ever evaluated -- a future policy accidentally added to this table
--- cannot expose it to clients on its own. Only service_role (used by makeUser/tests and
--- by Task 12's seeding) can read or write it.
+-- gets no DML grant (select/insert/update/delete) at all, so PostgREST denies access at
+-- the privilege layer before RLS is ever evaluated -- a future policy accidentally added
+-- to this table cannot expose it to clients on its own. Only service_role (used by
+-- makeUser/tests and by Task 12's seeding) can read or write it. (Supabase's default ACL
+-- separately grants TRUNCATE/REFERENCES/TRIGGER/MAINTAIN to authenticated on every new
+-- table; see 00009_revoke_default_grants.sql, which revokes those.)
 grant select, insert, update, delete on public.allowed_emails to service_role;
+
+-- check_email_allowed() is security definer and only ever invoked by the
+-- check_email_allowed_trigger above (fired by auth.users inserts, which run as
+-- supabase_auth_admin). It has no legitimate direct caller from the Data API, so strip
+-- the default PUBLIC execute grant Postgres attaches to every new function -- unlike
+-- strip_markdown() (00001_extensions_helpers.sql), which backs a generated column that
+-- `authenticated` genuinely needs to read/recompute, this function must not be directly
+-- invocable by anon/authenticated/PUBLIC at all.
+revoke execute on function public.check_email_allowed() from public;

@@ -70,7 +70,7 @@ which runs as a privileged role:
 
 ```sql
 insert into public.allowed_emails (email, note) values
-  ('phuong011999vn@gmail.com', 'owner');
+  ('<your-google-email>', 'owner');
 ```
 
 **Do this before attempting any Google login.** If you skip it, the very first

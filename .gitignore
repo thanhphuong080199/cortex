@@ -5,6 +5,8 @@ dist/
 .expo/
 .env
 .env.local
+.env.*
+!.env.example
 *.tsbuildinfo
 next-env.d.ts
 expo-env.d.ts
