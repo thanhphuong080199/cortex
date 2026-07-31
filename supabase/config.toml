@@ -334,6 +334,14 @@ skip_nonce_check = false
 # If enabled, it will allow the user to successfully authenticate when the provider does not return an email address.
 email_optional = false
 
+# Google sign-in. No real Google OAuth client exists on this dev machine yet; the hosted
+# end-to-end round-trip (real client id/secret, real redirect) is verified in Task 12.
+# Locally, sign-in is exercised via email/password (see packages/db/src/test/clients.ts).
+[auth.external.google]
+enabled = true
+client_id = "env(GOOGLE_OAUTH_CLIENT_ID)"
+secret = "env(GOOGLE_OAUTH_CLIENT_SECRET)"
+
 # Allow Solana wallet holders to sign in to your project via the Sign in with Solana (SIWS, EIP-4361) standard.
 # You can configure "web3" rate limit in the [auth.rate_limit] section and set up [auth.captcha] if self-hosting.
 [auth.web3.solana]
