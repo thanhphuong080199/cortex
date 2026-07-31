@@ -15,12 +15,19 @@ export async function signInWithGoogle(): Promise<void> {
   if (error) throw error;
 
   const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
-  if (result.type !== "success") return;
+  // The user closing the browser sheet themselves is a deliberate choice, not
+  // a failure — return quietly so the caller can reset to an idle (not error) state.
+  if (result.type === "cancel" || result.type === "dismiss") return;
+  if (result.type !== "success") {
+    throw new Error(`Sign-in did not complete (${result.type}).`);
+  }
 
   const { params, errorCode } = QueryParams.getQueryParams(result.url);
   if (errorCode) throw new Error(errorCode);
   const { access_token, refresh_token } = params;
-  if (!access_token || !refresh_token) return;
+  if (!access_token || !refresh_token) {
+    throw new Error("Sign-in did not return a session. Please try again.");
+  }
 
   const { error: sessionError } = await supabase.auth.setSession({ access_token, refresh_token });
   if (sessionError) throw sessionError;

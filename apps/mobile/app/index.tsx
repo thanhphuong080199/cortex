@@ -1,17 +1,31 @@
 import type { Session } from "@supabase/supabase-js";
 import { useEffect, useState } from "react";
-import { Button, Text, View } from "react-native";
+import { ActivityIndicator, Button, Text, View } from "react-native";
 import { signInWithGoogle, signOut } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
     const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  async function handleSignIn() {
+    setLoading(true);
+    setError(null);
+    try {
+      await signInWithGoogle();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sign-in failed. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 16 }}>
@@ -21,7 +35,11 @@ export default function Home() {
           <Button title="Sign out" onPress={() => void signOut()} />
         </>
       ) : (
-        <Button title="Sign in with Google" onPress={() => void signInWithGoogle()} />
+        <>
+          <Button title="Sign in with Google" onPress={() => void handleSignIn()} disabled={loading} />
+          {loading ? <ActivityIndicator /> : null}
+          {error ? <Text style={{ color: "crimson" }}>{error}</Text> : null}
+        </>
       )}
     </View>
   );
