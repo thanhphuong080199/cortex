@@ -81,7 +81,7 @@ These are the places I think your spec is wrong or needs a decision changed. Eve
 | 5 | RLS as the only isolation mechanism | PowerSync replicates via logical replication, **bypassing RLS on reads**; isolation there comes from PowerSync **sync rules** (bucket per `user_id` from the JWT). RLS still governs all API-path access and client uploads. | Keep RLS everywhere *and* treat sync rules as a second, equally-audited isolation layer. Both are specified in §11. |
 | 6 | "Auto-applied PARA/Zettelkasten" | Research shows fully-automatic organization is either wrong or opaque (Mem), and users hate both. | Suggested-first with a **trust dial** (§2 gap 6): AI proposes PARA placement/tags/links; one-tap accept; per-category auto-apply once precision is proven to you personally. |
 | 7 | "Full completeness from the start" (implicitly: build everything) | Two features have poor cost/benefit **at the start**: contradiction detection (needs months of notes to be non-trivial) and codebase integration (you marked it nice-to-have). | Both stay in the plan (§13 phases 7 and 10) but late, where they have data to work with. Also added, because "complete" requires it: **cost controls and observability** for LLM spend (per-user budgets, dead-letter queue) — a real product has these. |
-| 8 | Web offline as co-equal with mobile | PowerSync's web SDK (OPFS/wa-sqlite) works, but browsers evict storage, multiple tabs complicate things, and iOS Safari is hostile. | Ship it (it's nearly free once mobile works), but define **mobile as the primary offline device**; web offline is best-effort. |
+| 8 | Web offline as co-equal with mobile | PowerSync's web SDK (OPFS/wa-sqlite) works, but browsers evict storage, multiple tabs complicate things, and iOS Safari is hostile. | **Web is online-only** (decided in review, 2026-07-31): web reads/writes via Supabase client + API directly (RLS-enforced), with Supabase Realtime for live updates. PowerSync runs on **mobile only** — offline-first is a mobile capability. Cuts sync complexity roughly in half. |
 
 Model choices for AI workloads (current lineup, verified against the Claude API reference):
 - **Reasoning tasks** (RAG chat, digests, memory updates, auto-drafting): `claude-opus-5` ($5/$25 per MTok), adaptive thinking, effort tuned per task (`high` for chat/memory, `medium` for digests).
@@ -96,10 +96,11 @@ Model choices for AI workloads (current lineup, verified against the Claude API 
 ```
 ┌─────────────┐   ┌─────────────┐   ┌──────────────┐  ┌──────────────┐
 │ Expo mobile │   │ Next.js web │   │ Web clipper  │  │ Claude       │
-│ (SQLite via │   │ (wa-sqlite  │   │ (extension)  │  │ Desktop/Code │
-│  PowerSync) │   │  PowerSync) │   └──────┬───────┘  └──────┬───────┘
-└──────┬──────┘   └──────┬──────┘          │ REST            │ MCP (HTTP)
-       │  sync stream    │                 ▼                 ▼
+│ (SQLite via │   │ (online-only│   │ (extension)  │  │ Desktop/Code │
+│  PowerSync) │   │  supabase-js│   └──────┬───────┘  │ (OPTIONAL)   │
+└──────┬──────┘   │  + Realtime)│          │ REST     └──────┬───────┘
+       │          └──────┬──────┘          ▼                 │ MCP (HTTP)
+       │  sync stream    │ RLS reads/writes + API            ▼
        ▼                 ▼          ┌─────────────────────────────────┐
 ┌─────────────────────────┐  writes │  NestJS service (Railway/Fly)   │
 │  PowerSync Service      │────────▶│  • REST API  • MCP endpoint     │
@@ -119,8 +120,8 @@ Model choices for AI workloads (current lineup, verified against the Claude API 
 
 Data-flow principles:
 
-1. **Reads are local.** Clients query their local SQLite (mobile) / wa-sqlite (web) replica. Lists, note bodies, tags, tasks, review queue — all offline-capable, instant.
-2. **Writes are local, then uploaded.** PowerSync queues local mutations; its `uploadData` hook posts them to the NestJS API, which writes to Postgres **as the user** (Supabase client with the user's JWT → RLS enforced on the write path).
+1. **Mobile reads are local.** The mobile app queries its local SQLite replica — lists, note bodies, tags, tasks, review queue all offline-capable and instant. **Web is online-only**: it reads/writes via supabase-js (RLS) and the API, with Supabase Realtime subscriptions for live updates.
+2. **Mobile writes are local, then uploaded.** PowerSync queues local mutations; its `uploadData` hook posts them to the NestJS API, which writes to Postgres **as the user** (Supabase client with the user's JWT → RLS enforced on the write path). Web writes hit the same path directly (supabase-js or API), no sync queue.
 3. **AI is server-side and asynchronous.** Note commits enqueue enrichment jobs (embed → tag → link → extract tasks). Results sync back down as ordinary rows — the client never calls an LLM directly.
 4. **Online-only features degrade gracefully.** Semantic search, RAG chat, and digest generation require the server; the UI falls back to local FTS when offline.
 5. **One core, many faces.** REST API, MCP tools, Telegram bot, and job workers all call the same `packages/core` services. No reimplementation anywhere.
@@ -344,7 +345,7 @@ All inbound channels write to `ingest_inbox` first (idempotency by `(channel, ex
 
 | Option | Verdict | Reasoning |
 |---|---|---|
-| **PowerSync** (chosen) | ✅ | Purpose-built for Postgres/Supabase ([official partner](https://supabase.com/partners/powersync)); mature SDKs for **both** React Native/Expo and Web ([RN SDK](https://docs.powersync.com/client-sdks/reference/react-native-and-expo), actively released through mid-2026); local SQLite you can query with plain SQL (reactive queries for UI); sync rules give server-controlled per-user partitioning; upload hook routes writes through our API (RLS-enforced); free cloud tier + open-source self-host escape hatch. The local replica being *real SQLite rows* (not CRDT blobs) means offline FTS and simple UI queries come free. |
+| **PowerSync** (chosen, **mobile only**) | ✅ | Purpose-built for Postgres/Supabase ([official partner](https://supabase.com/partners/powersync)); mature React Native/Expo SDK ([RN SDK](https://docs.powersync.com/client-sdks/reference/react-native-and-expo), actively released through mid-2026); local SQLite you can query with plain SQL (reactive queries for UI); sync rules give server-controlled per-user partitioning; upload hook routes writes through our API (RLS-enforced); free cloud tier + open-source self-host escape hatch. The local replica being *real SQLite rows* (not CRDT blobs) means offline FTS and simple UI queries come free. A web SDK exists if web offline is ever wanted later — but per review, web is online-only. |
 | ElectricSQL | ❌ for this project | Strong and coherent, but read-path–centric (shapes) with write-path patterns you assemble yourself; React Native support is less proven than its web story. Best current fit is web apps ([2026 comparison](https://cssauthor.com/offline-first-tech-stack/)); we're mobile-first. |
 | WatermelonDB / RxDB + custom backend | ❌ | Excellent client stores, but you hand-roll the entire sync protocol + backend (push/pull endpoints, changelogs, migrations of the protocol itself). That's the highest-maintenance quadrant: custom protocol *and* no CRDT guarantees. |
 | Fully custom local-first (SQLite + sync queue + **Yjs/Automerge**) | ❌ | Evaluated seriously per your request — rejected on four grounds. (1) **The problem doesn't demand it**: CRDTs shine for *concurrent intra-document* editing; a single author editing the same note on two offline devices simultaneously is a rare edge, and "conflict copy" handles it acceptably. (2) **Data opacity**: Yjs docs are binary state vectors; Postgres can no longer FTS/embed/tag/RLS the content without a materialization pipeline — every AI feature gets harder. (3) **You'd still need everything else**: auth-aware partial sync, tombstones, migrations, backpressure, checkpointing — the CRDT solves only merge, ~15% of the sync problem. (4) **Opportunity cost**: weeks of infra work that produces zero portfolio-visible features. Revisit only if real-time *collaborative* editing ever becomes a goal — then run Yjs per-note *on top of* PowerSync (store update log as rows), don't replace it. |
@@ -352,7 +353,7 @@ All inbound channels write to `ingest_inbox` first (idempotency by `(channel, ex
 
 ### 8.2 Sync design
 
-- **Topology**: Postgres is authoritative. PowerSync service tails logical replication → maintains per-user buckets (sync rules keyed on `request.user_id()` from the Supabase JWT) → streams to clients. Clients hold full replicas of their own synced tables (a personal corpus is small — even 50k notes of metadata is tens of MB; `note_chunks` excluded keeps it lean).
+- **Topology**: Postgres is authoritative. PowerSync service tails logical replication → maintains per-user buckets (sync rules keyed on `request.user_id()` from the Supabase JWT) → streams to **mobile clients** (web is online-only, §4.8). Each mobile device holds a full replica of the user's synced tables (a personal corpus is small — even 50k notes of metadata is tens of MB; `note_chunks` excluded keeps it lean).
 - **Writes**: client mutates local SQLite → PowerSync queues a CRUD batch → `uploadData` posts to `POST /sync/upload` on NestJS → server validates and writes via Supabase client **using the caller's JWT** (RLS is the enforcement, server code is not trusted with a service key on this path) → replication loops the authoritative row back to all the user's devices.
 - **Conflict resolution** (two same-user devices edited offline):
   - *Column-level last-write-wins* for scalar fields (`title`, `pinned`, `lifecycle`, task status…) using per-column `updated_at` comparison in the upload handler — device A renaming and device B pinning both survive.
@@ -508,7 +509,7 @@ cortex/
 │  │   │   └─ each: service.ts, jobs.ts, mcp-tools.ts, prompts/, index.ts (module manifest)
 │  │   └─ registry.ts    # collects module manifests → routes, job handlers, MCP tools
 │  ├─ db/                # Supabase migrations (SQL), typed query helpers, RLS tests
-│  ├─ sync/              # PowerSync schema (client tables), sync-rule source, client init for RN+web
+│  ├─ sync/              # PowerSync schema (client tables), sync-rule source, RN client init (mobile-only)
 │  ├─ shared/            # zod schemas, DTOs, enums, constants
 │  ├─ ai/                # provider clients (Claude, Voyage, Whisper) behind interfaces; prompt-cache-aware helpers
 │  ├─ ui/                # cross-platform primitives where cheap (Tamagui or plain RN + react-native-web); no forced 100% sharing
@@ -531,7 +532,7 @@ Each phase ends demoable (GIF-able) and shippable to your own daily use. Order o
 | # | Phase | Contents | Demo |
 |---|---|---|---|
 | 0 | **Foundations** (wk 1) | Monorepo, Supabase project, schema v1 + RLS, Google OAuth on web+mobile, invite gate, CI (typecheck/lint/RLS tests), deploy skeleton API | Log in on phone + web with the same Google account; cross-user read test provably empty |
-| 1 | **Notes + offline sync** (wk 2-3) | PowerSync wired (mobile SQLite + web OPFS), quick capture, edit/list/archive, tags (manual), local FTS, conflict handling, export endpoint | Airplane-mode capture on phone → edits on web → reconnect → merge; conflict-copy demo |
+| 1 | **Notes + offline sync** (wk 2-3) | PowerSync wired on mobile (local SQLite); web CRUD via supabase-js + Realtime (online-only); quick capture, edit/list/archive, tags (manual), local FTS on mobile, conflict handling, export endpoint | Airplane-mode capture on phone → edits on web → reconnect → merge; conflict-copy demo |
 | 2 | **AI enrichment v1** (wk 4-5) | pg-boss + `note.enrich`: chunk/embed (Voyage), auto-tag suggestions UI (accept/reject → feedback_events **from day one**), hybrid semantic search, usage ledger | Type "that idea about pricing psychology" → finds the note that never says "pricing psychology" |
 | 3 | **RAG chat** (wk 6-7) | Chat sessions, hybrid retrieval + recency weighting, streaming answers with tappable citations, offline fallback messaging | "What do I actually think about X?" answered with quotes from own notes |
 | 4 | **Capture everywhere** (wk 8-9) | Web clipper + auto-summary, voice notes + Whisper, Telegram bot, email-in, share sheet | One thought captured 5 ways, all landing enriched in the same inbox |
@@ -553,6 +554,6 @@ Dependencies worth noting: feedback capture (phase 2) intentionally predates the
 | PowerSync (managed) dependency | Open-source self-host edition exists; data is plain Postgres either way; sync layer isolated in `packages/sync` |
 | LLM cost creep | usage_ledger + per-user budgets from phase 2; Batches for background work; prompt caching for stable prefixes; debounced enrichment |
 | Memory layer proposes garbage | proposed-by-default + evidence-quote verification + caps; worst case it's an ignorable screen, not corrupted behavior |
-| Web offline flakiness (OPFS eviction, multi-tab) | mobile is the primary offline device (§4.8); web treats local store as cache with re-sync |
+| Two data-access paths (mobile local SQLite vs web network) | shared zod types + per-platform thin data hooks behind a common interface in `packages/core`; divergence contained to the hook layer |
 | Whisper/Voyage/provider churn | all providers behind `packages/ai` interfaces; embedding model+dims recorded per chunk to support migration re-embeds |
 | Solo-builder scope | phases are independently shippable; the plan survives stopping at any phase ≥3 with a coherent product |
