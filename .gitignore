@@ -1,0 +1,11 @@
+node_modules/
+.turbo/
+dist/
+.next/
+.expo/
+.env
+.env.local
+*.tsbuildinfo
+supabase/.temp/
+.superpowers/
+.claude/worktrees/
