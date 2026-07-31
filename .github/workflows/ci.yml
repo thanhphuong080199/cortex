@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: build, typecheck, lint, shared tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Turbo's own task graph (turbo.json) makes `test` depend on `^build`, which would
+      # pull in @cortex/db and @cortex/api here. Those need a live Supabase stack, so their
+      # tests run only in the db-tests job below — here we build+typecheck+lint everything,
+      # then unit-test only the package with no external dependencies.
+      - run: pnpm turbo run build typecheck lint
+
+      - run: pnpm --filter @cortex/shared test
+
+  db-tests:
+    name: db + api tests (against local Supabase stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Use the Supabase CLI pinned in package.json (devDependency) rather than
+      # supabase/setup-cli@v1, so CI runs the exact CLI version validated locally
+      # (`pnpm exec supabase --version`). That parity is the whole reason the CLI is a
+      # pinned devDependency instead of a global tool — `supabase status -o env` key
+      # names and the JWT format issued by `supabase start` have both changed across
+      # CLI versions, so drifting the CI version independently of the lockfile would
+      # silently invalidate the assumptions the tests below depend on.
+      #
+      # Exclude services the test suites never touch (storage, realtime, studio, the
+      # edge runtime, analytics/logflare, postgres-meta, vector, mailpit) to cut
+      # `supabase start` time — only postgres, gotrue (auth), postgrest (rest) and kong
+      # (api gateway) are needed to sign users in and hit the REST/Nest APIs under test.
+      - name: Start Supabase local stack
+        run: >
+          pnpm exec supabase start
+          -x realtime,storage-api,studio,edge-runtime,logflare,vector,postgres-meta,mailpit
+
+      # `supabase status -o env` wraps every value in double quotes (e.g.
+      # API_URL="http://127.0.0.1:54321"); those literal quotes must be stripped before
+      # writing to $GITHUB_ENV, otherwise downstream env vars end up with quote
+      # characters baked into the URL/JWT strings.
+      #
+      # Deliberately do NOT export SUPABASE_JWT_SECRET: as of Supabase CLI 2.x,
+      # `supabase start` issues asymmetric (ES256) access tokens even though
+      # `supabase status` still reports a legacy HS256 JWT_SECRET for backward
+      # compatibility. That legacy secret does not verify real tokens. Leaving it
+      # unset makes apps/api's SupabaseAuthGuard fall through to the JWKS verification
+      # path (see apps/api/src/auth/supabase-auth.guard.ts), which is also what
+      # production uses — so CI exercises the real code path, not a shortcut.
+      - name: Export local Supabase keys as app env vars
+        run: |
+          eval "$(pnpm exec supabase status -o env | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY)=')"
+          {
+            echo "SUPABASE_URL=$API_URL"
+            echo "SUPABASE_ANON_KEY=$ANON_KEY"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY"
+          } >> "$GITHUB_ENV"
+
+      # @cortex/db's tests are not idempotent across repeated runs against the same
+      # database (unique-constraint collisions on re-insert), but a freshly started CI
+      # Postgres is already at the post-migration/seed state `db reset` produces, so no
+      # reset is needed here.
+      - name: Run db tests (includes the RLS cross-user isolation suite)
+        run: pnpm --filter @cortex/db test
+
+      - name: Run api tests
+        run: pnpm --filter @cortex/api test
