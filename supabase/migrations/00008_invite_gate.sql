@@ -1,5 +1,7 @@
 create table public.allowed_emails (
-  email text primary key,
+  -- Trigger below compares case-insensitively; normalize storage too so an allow-list
+  -- entry can't silently fork into two rows ("Foo@Bar.com" vs "foo@bar.com").
+  email text primary key check (email = lower(email)),
   note text,
   created_at timestamptz not null default now()
 );
