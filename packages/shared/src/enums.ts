@@ -29,5 +29,7 @@ export const memoryCategory = z.enum([
 ]);
 export const memoryStatus = z.enum(["proposed", "active", "archived", "rejected"]);
 
-export const EMBEDDING_DIM = 1024;
-export const EMBEDDING_MODEL = "voyage-3.5";
+// Pinned by 00012_embedding_dims_gemini.sql and asserted against the live column width
+// by packages/db's embedding-dims test. Changing either side alone breaks that test.
+export const EMBEDDING_DIM = 1536;
+export const EMBEDDING_MODEL = "gemini-embedding-001";
