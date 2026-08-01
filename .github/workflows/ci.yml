@@ -88,21 +88,16 @@ jobs:
             echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY"
           } >> "$GITHUB_ENV"
 
-      # @cortex/shared and @cortex/core are consumed as compiled dist/, so the filtered
-      # test commands below cannot resolve them until they are built. The checks job
-      # builds in a separate runner, so its output is not available here.
-      - name: Build workspace packages the test suites import
-        run: pnpm turbo run build --filter=@cortex/shared --filter=@cortex/core
-
-      # @cortex/db's tests are not idempotent across repeated runs against the same
-      # database (unique-constraint collisions on re-insert), but a freshly started CI
-      # Postgres is already at the post-migration/seed state `db reset` produces, so no
-      # reset is needed here.
+      # ALWAYS `turbo run test --filter=...`, never `pnpm --filter ... test`:
+      # @cortex/shared and @cortex/core are consumed as compiled dist/, and only turbo's
+      # `test` -> `^build` dependency rebuilds them first. The pnpm-filtered form tests
+      # against whatever stale dist/ happens to be lying around, which reads as "my edit
+      # didn't take" (issue log A7/B5).
       - name: Run db tests (includes the RLS cross-user isolation suite)
-        run: pnpm --filter @cortex/db test
+        run: pnpm turbo run test --filter=@cortex/db
 
       - name: Run api tests
-        run: pnpm --filter @cortex/api test
+        run: pnpm turbo run test --filter=@cortex/api
 
       - name: Run core tests (NoteService / TagService / ExportService against RLS)
-        run: pnpm --filter @cortex/core test
+        run: pnpm turbo run test --filter=@cortex/core
