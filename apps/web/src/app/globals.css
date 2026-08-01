@@ -60,6 +60,19 @@ textarea, input[type="text"] {
 }
 textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+/* Check-in: the mood faces are the largest tap targets on the page, because one tap on
+   one of them is the entire interaction in the common case. */
+.checkin { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
+.checkin .moods { display: flex; gap: 4px; align-items: center; }
+.checkin .moods button { font-size: 20px; line-height: 1; padding: 5px 9px; }
+.checkin .moods button.more { font-size: 12.5px; color: var(--muted); padding: 6px 9px; }
+.checkin-more { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 13px; }
+.checkin-more > div { display: flex; gap: 4px; }
+.checkin-more button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.checkin-more input[type="text"] { width: 130px; padding: 5px 10px; }
+.checkin .hint, .checkin .error { margin: 0; }
+.checkin .hint button { border: none; background: none; padding: 0 2px; color: var(--accent); }
+
 .capture { margin-bottom: 8px; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 6px 2px 18px; }
 .error { color: var(--danger); font-size: 13.5px; }

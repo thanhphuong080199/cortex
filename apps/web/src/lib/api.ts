@@ -1,6 +1,7 @@
 import {
-  attachTagInput, createNoteInput, createTagInput, updateNoteInput,
-  type AttachTagInput, type CreateNoteInput, type CreateTagInput, type UpdateNoteInput,
+  attachTagInput, createCheckinInput, createNoteInput, createTagInput, logMediaInput, updateNoteInput,
+  type AttachTagInput, type CreateCheckinInput, type CreateNoteInput, type CreateTagInput,
+  type LogMediaInput, type UpdateNoteInput,
 } from "@cortex/shared";
 import type { ZodType } from "zod";
 
@@ -47,4 +48,9 @@ export const api = {
     send(`/notes/${noteId}/tags`, "POST", token, validated(attachTagInput, input)),
   detachTag: async (token: string, noteId: string, tagId: string) =>
     send(`/notes/${noteId}/tags/${tagId}`, "DELETE", token),
+  createCheckin: async (token: string, input: CreateCheckinInput) =>
+    send("/checkins", "POST", token, validated(createCheckinInput, input)) as Promise<{ id: string }>,
+  deleteCheckin: async (token: string, id: string) => send(`/checkins/${id}`, "DELETE", token),
+  logMedia: async (token: string, input: LogMediaInput) =>
+    send("/media-log", "POST", token, validated(logMediaInput, input)),
 };

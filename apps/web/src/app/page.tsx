@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { NOTE_VIEWS, VIEW_LABELS, parseView } from "@/lib/note-views";
+import { CheckinWidget } from "./checkin-widget";
 import { ExportButton } from "./export-button";
 import { NoteList, type NoteRow } from "./note-list";
 import { QuickCapture } from "./quick-capture";
@@ -58,6 +59,10 @@ export default async function Home(
         <ExportButton token={session.access_token} />
         <form action="/auth/signout" method="post"><button>Sign out</button></form>
       </div>
+
+      {/* Above capture on purpose: a check-in must be reachable without scrolling past a
+          textarea, which is the friction that kills mood logging (spec §3). */}
+      <CheckinWidget token={session.access_token} />
 
       <QuickCapture token={session.access_token} />
 
