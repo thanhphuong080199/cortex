@@ -36,7 +36,10 @@ Progress against the steps below:
 - [x] **Step 2** — Google Cloud OAuth client created and Supabase Google provider
       enabled; verified via `/auth/v1/settings` reporting `external.google = true`.
 - [x] **Step 3** — web login verified end-to-end with a real Google account.
-- [ ] **Step 4** — verify mobile login end-to-end (**human, device**)
+- [x] **Step 4** — mobile login verified on an EAS `preview` APK (**not** Expo Go —
+      see the step for why). Same Google account as web: `auth.users` still holds
+      exactly one row and its `last_sign_in_at` advanced from `03:08:34Z` (web) to
+      `05:04:17Z` (phone), which is the spec's "phone + web, same account" item.
 - [x] **Step 5** — API Dockerfile, built and verified locally
 - [ ] **Step 6** — deploy API to Railway (**human, browser login**)
 
