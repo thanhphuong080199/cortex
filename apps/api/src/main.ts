@@ -1,6 +1,7 @@
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module";
+import { CoreErrorFilter } from "./core-error.filter";
 import { parseApiEnv } from "./env";
 
 // Falls back to these when CORS_ORIGINS is unset — covers apps/web's dev server
@@ -19,6 +20,10 @@ async function bootstrap() {
   }
 
   const app = await NestFactory.create(AppModule);
+
+  // Maps packages/core's CoreError to 404/409/500 so PostgREST codes never reach
+  // clients (spec §6). The e2e suites register the same filter on their test app.
+  app.useGlobalFilters(new CoreErrorFilter());
 
   const origins = env.CORS_ORIGINS
     ? env.CORS_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)

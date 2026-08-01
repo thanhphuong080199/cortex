@@ -11,9 +11,12 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@cortex/core": "workspace:*",
+    "@cortex/shared": "workspace:*",
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
+    "@supabase/supabase-js": "^2.48.0",
     "jose": "^5.9.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
@@ -23,11 +26,14 @@
     "@cortex/config": "workspace:*",
     "@nestjs/cli": "^11.0.0",
     "@nestjs/testing": "^11.0.0",
-    "@supabase/supabase-js": "^2.48.0",
     "@swc/core": "^1.10.0",
+    "adm-zip": "^0.5.16",
     "dotenv": "^16.4.0",
     "supertest": "^7.0.0",
+    "yaml": "^2.6.0",
+    "@types/adm-zip": "^0.5.5",
     "@types/express": "^5.0.0",
+    "@types/superagent": "^8.1.0",
     "@types/supertest": "^6.0.0",
     "unplugin-swc": "^1.5.0",
     "vitest": "^3.0.0"

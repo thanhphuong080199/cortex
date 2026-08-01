@@ -17,13 +17,14 @@ COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY packages ./packages
 COPY apps/api ./apps/api
 
-# @cortex/api has no *runtime* workspace dependencies (its only workspace
-# dependency, @cortex/config, is a devDependency supplying tsconfig.base.json /
-# eslint.base.mjs -- build-time only, never imported by src/). Installing the
-# full dependency graph (incl. devDependencies) is still required here because
-# `nest build` itself, and apps/api/tsconfig.json's `extends`, need it.
+# As of Phase 1a @cortex/api DOES have runtime workspace dependencies: @cortex/core
+# (services) and @cortex/shared (zod DTOs). Both ship as compiled dist/ -- Node cannot
+# require TypeScript source -- so the build must cover them, not just apps/api. The
+# trailing "..." on the filter is what pulls dependencies into both commands; without it
+# `node dist/main.js` dies at startup on an unresolvable @cortex/core import.
+# (@cortex/config remains build-time only: tsconfig.base.json / eslint.base.mjs.)
 RUN pnpm install --frozen-lockfile --filter @cortex/api...
-RUN pnpm --filter @cortex/api build
+RUN pnpm --filter @cortex/api... build
 
 # pnpm v10+ refuses `deploy` from a shared workspace lockfile unless the
 # workspace has injected dependencies enabled (this repo doesn't); confirmed

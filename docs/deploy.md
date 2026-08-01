@@ -14,6 +14,12 @@ Console, and Railway — they cannot be scripted end-to-end by an agent. Step 5 
 API Dockerfile) is already implemented and verified locally; see
 [Local Docker verification](#local-docker-verification-already-done) at the bottom.
 
+> **Deploying an already-provisioned environment?** Steps 1-6 are one-time setup. For
+> shipping new code to the environment that already exists, jump to
+> [Is there CI/CD?](#is-there-cicd-no--deploys-are-manual) — nothing deploys on merge,
+> and the order (schema → env vars → app) matters. Phase 1a additionally requires
+> [its own checklist](#phase-1a--deploy-checklist-web-notes).
+
 ## Provisioned environment (current state)
 
 | Item | Value |
@@ -98,7 +104,10 @@ CLIs:
   (`supabase: ^2.110.0` in `package.json`). Do **not** install it globally; every
   command in this doc is invoked as `pnpm exec supabase ...` from the repo root,
   matching what `.github/workflows/ci.yml` does.
-- **Railway CLI** — **not installed on this machine**. Install it first:
+- **Railway CLI** — **installed globally** (`railway 5.30.3`, verified 2026-08-01 at
+  `~/AppData/Roaming/npm/railway.ps1`). It is deliberately *not* a repo dependency:
+  unlike the Supabase CLI it never runs in CI, only from a developer machine. On a
+  machine that lacks it:
   ```bash
   npm install -g @railway/cli
   # or, on Windows PowerShell:
@@ -554,15 +563,139 @@ deploy output (`package.json`, `node_modules`, `dist`) rather than copying the w
 `eslint.config.mjs`, and `.env.example` that `pnpm deploy` otherwise carries along —
 none of which belong in a runtime image.
 
-One thing verified and *not* changed: `@cortex/api`'s only workspace dependency is
-`@cortex/config` (a `devDependency` supplying `tsconfig.base.json`/`eslint.base.mjs`
-for build-time tooling — `apps/api/tsconfig.json` has
-`"extends": "@cortex/config/tsconfig.base.json"`). It is never imported by
-`apps/api/src/**`, so there was nothing to reconcile at runtime — the final image
-needs zero workspace packages, only the plain npm dependencies listed in
-`apps/api/package.json`'s `dependencies` (`@nestjs/common`, `@nestjs/core`,
-`@nestjs/platform-express`, `jose`, `reflect-metadata`, `rxjs`).
+> ⚠️ **Superseded by Phase 1a.** At Phase 0 this section read: "`@cortex/api`'s only
+> workspace dependency is `@cortex/config`… the final image needs zero workspace
+> packages." That is **no longer true.** Phase 1a added two *runtime* workspace
+> dependencies — `@cortex/core` (services) and `@cortex/shared` (zod DTOs) — and both
+> are imported by `apps/api/src/**`. See
+> [Workspace packages in the runtime image](#workspace-packages-in-the-runtime-image).
+
+`@cortex/config` remains build-time only (a `devDependency` supplying
+`tsconfig.base.json`/`eslint.base.mjs` — `apps/api/tsconfig.json` has
+`"extends": "@cortex/config/tsconfig.base.json"`), never imported by `apps/api/src/**`.
 
 `apps/api/tsconfig.build.json` (from Task 8) was also confirmed still doing its job
 inside the container: `rootDir: "src"` + `outDir: "dist"` compiles to `dist/main.js`
 directly, not `dist/src/main.js`, matching `CMD ["node", "dist/main.js"]`.
+
+---
+
+## Phase 1a — deploy checklist (web notes)
+
+Everything below is required for the Phase 1a build to work in production. Each item
+is here because it fails **silently or only in production** — the local stack passes
+without it.
+
+### 1. Push the new migrations
+
+```bash
+supabase db push        # applies 00010 + 00011 to the hosted project
+supabase migration list # confirm local == remote (should now show 00001..00011)
+```
+
+- `00010_realtime_publication.sql` adds `notes`, `tags`, `note_tags` to the
+  `supabase_realtime` publication. Supabase ships that publication **empty**, so
+  without this migration no `postgres_changes` event is ever broadcast — the live
+  note list silently degrades to "refresh to see changes" with no error anywhere.
+- `00011_note_tags_partial_unique.sql` replaces `note_tags`' total unique constraint
+  with a partial one (`where deleted_at is null`). Without it, removing a tag and
+  re-adding the same tag fails with `23505`.
+
+### 2. Railway environment variables (API)
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `SUPABASE_URL` | ✅ | Already set in Phase 0. |
+| `SUPABASE_ANON_KEY` | ✅ **new in 1a** | Phase 0 never needed it; every write now does. |
+| `SUPABASE_JWT_SECRET` | ❌ must stay **unset** | Setting it forces the HS256 branch, which rejects the project's real ES256 tokens — every request 401s. |
+| `SUPABASE_SERVICE_ROLE_KEY` | ❌ do **not** set | Tests only. No service-role key belongs on a request path; RLS is the enforcement (spec §4.1). |
+| `CORS_ORIGINS` | ✅ | Must list the deployed web origin, or the browser blocks every write. |
+
+> **`SUPABASE_ANON_KEY` is the one that bites.** `createUserClient()` builds each
+> per-request Supabase client from it, so if it is missing the API still boots, `/health`
+> still returns 200, and only *writes* fail. Local dev passes because the key is in
+> `apps/api/.env`. Verify after deploy with an authenticated `POST /notes`, not `/health`.
+
+### 3. Web deployment environment variables
+
+| Variable | Notes |
+| --- | --- |
+| `NEXT_PUBLIC_API_URL` | Base URL of the Railway API, **no trailing slash** (the client concatenates `/notes` directly). Missing → requests go to `undefined/notes`. |
+| `NEXT_PUBLIC_SUPABASE_URL` | Already set in Phase 0; also used by the Realtime socket. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Already set in Phase 0. |
+
+### Workspace packages in the runtime image
+
+Phase 1a added `@cortex/core` and `@cortex/shared` as **runtime** dependencies of
+`@cortex/api`. Both are TypeScript-source packages, so each now has a `build` script
+emitting `dist/` and points `main`/`types` there — Node cannot `require` a `.ts` file.
+
+Consequences, all already applied:
+
+- `apps/api/Dockerfile` builds with `pnpm --filter @cortex/api... build` (note the
+  trailing `...`, which pulls in dependencies). With a bare `--filter @cortex/api`, the
+  image builds successfully and then dies at startup on
+  `Cannot find module .../packages/core/src/supabase.js`.
+- `.github/workflows/ci.yml`'s `db-tests` job builds `@cortex/shared` and `@cortex/core`
+  before running the filtered test commands; that job runs on a different runner from
+  the `checks` job, so it cannot reuse its build output.
+- Verified locally end to end: `docker build -f apps/api/Dockerfile .` → `docker run` →
+  `/health` returns `{"status":"ok"}` with the notes/tags/export routes mapped in the
+  startup log.
+
+---
+
+## Is there CI/CD? (No — deploys are manual)
+
+**Merging to `main` deploys nothing.** Verified 2026-08-01 on both sides:
+
+| Layer | State | Evidence |
+| --- | --- | --- |
+| GitHub Actions | build / typecheck / lint / test only | `.github/workflows/ci.yml` defines exactly two jobs, `checks` and `db-tests`. There is no deploy job and no other workflow file. |
+| Railway → GitHub | **not connected** | `railway status --json` reports `source: {"image": null, "repo": null}` for `cortex-api`. With no repo attached there is no push trigger, so Railway never sees a merge. |
+| Database migrations | manual | `supabase db push` is run by a human. Nothing applies migrations automatically. |
+
+So a merge to `main` gives you green checks and **a hosted environment still running the
+previous code**. Shipping is three deliberate steps, in this order:
+
+```bash
+# 1. schema first -- new code usually assumes the new schema, not the reverse
+pnpm exec supabase db push
+pnpm exec supabase migration list          # confirm local == remote
+
+# 2. env vars BEFORE the deploy that needs them (see the phase 1a checklist above).
+#    --skip-deploys avoids redeploying the OLD code just to attach a new variable.
+railway variables --service cortex-api --set-from-stdin SUPABASE_ANON_KEY --skip-deploys
+
+# 3. ship the API
+railway up --service cortex-api --detach --yes
+```
+
+### Verify a deploy with a WRITE, not with `/health`
+
+`/health` touches no Supabase credential, so it returns `200` even when the API is
+completely unable to serve requests. Confirmed locally against the real build: with
+`SUPABASE_ANON_KEY` unset, `/health` answers `200` while an authenticated
+`POST /notes` returns `500 {"message":"Internal error"}` and the container logs
+`Error: supabaseKey is required.` Railway shows that deploy as healthy.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST "$API_URL/notes" -H "Authorization: Bearer <a real user JWT>" \
+  -H 'Content-Type: application/json' -d '{"content":"deploy smoke test"}'
+# 201 = genuinely working. 500 = env var missing. 404 = old code still deployed.
+```
+
+That last case is a useful signal on its own: because Phase 0 had no `/notes` route,
+`404` vs `401` on an *unauthenticated* `POST /notes` tells you at a glance whether the
+running container predates Phase 1a.
+
+### If you want real CD later
+
+Attach the GitHub repo to the Railway service (Railway dashboard → service → Settings →
+Source) and it will deploy on push to `main`. Two caveats before enabling it:
+
+- Migrations still would not run. `supabase db push` would need its own workflow step,
+  gated to run *before* the app deploy, or a deploy will land on an older schema.
+- `apps/api/Dockerfile` expects the **repo root** as build context (it copies
+  `packages/`), which `railway.json` already encodes via `dockerfilePath`.

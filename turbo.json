@@ -2,8 +2,13 @@
   "$schema": "https://turbo.build/schema.json",
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", ".next/**"] },
-    "typecheck": { "dependsOn": ["^build"] },
+
+    // typecheck/test depend on the package's OWN build, not just upstream ones:
+    // `next build` regenerates .next/types/** (which apps/web/tsconfig.json includes),
+    // and tsc racing that rewrite fails with TS6053 "File not found" on files it
+    // globbed moments earlier.
+    "typecheck": { "dependsOn": ["^build", "build"] },
     "lint": {},
-    "test": { "dependsOn": ["^build"] }
+    "test": { "dependsOn": ["^build", "build"] }
   }
 }
