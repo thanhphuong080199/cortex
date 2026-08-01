@@ -237,13 +237,90 @@ EXPO_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
 EXPO_PUBLIC_SUPABASE_ANON_KEY=<hosted anon key — same value as web's>
 ```
 
+### Expo Go does NOT work for this project — use an EAS build
+
+The original draft of this step said "Expo Go or a dev build". **Expo Go is not an
+option here**, for two independent reasons, both established by testing rather than
+assumed:
+
+1. **SDK mismatch.** The app targets Expo SDK 57 (`expo ^57.0.9`,
+   `react-native 0.86.2`, `react 19.2.3`). Expo Go reports
+   `Project is incompatible with this version of Expo Go` and refuses to run the
+   current bundle — a stale cached bundle can still launch, which makes this look
+   like an intermittent bug rather than a hard incompatibility.
+2. **Supabase will not allow-list Expo Go's redirect URL.** In Expo Go,
+   `makeRedirectUri({ scheme: "cortex" })` resolves to `exp://<lan-ip>:8081/--/`
+   rather than `cortex://`, because Expo Go cannot register a third-party custom
+   scheme. Adding `exp://192.168.1.39:8081/**` to the Redirect URLs list **does not
+   work** — the entry saves fine but Supabase's matcher still rejects every
+   `exp://` form, falling back to the Site URL. Symptom: after Google consent the
+   browser lands on `http://localhost:3000` (the phone's own localhost, where
+   nothing is listening) and sign-in silently fails.
+
+How this was verified — `/auth/v1/authorize` is **not** a valid probe, because it
+echoes any `redirect_to` you hand it, including `https://evil.example.com/steal`.
+The admin `generate_link` endpoint *does* enforce the allow-list (note `redirect_to`
+is a **top-level** field, not nested under `options`):
+
 ```bash
-pnpm --filter @cortex/mobile exec expo start
+curl -X POST "https://<project-ref>.supabase.co/auth/v1/admin/generate_link" \
+  -H "apikey: $SERVICE_ROLE_KEY" -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"magiclink","email":"<you>","redirect_to":"cortex://"}'
 ```
 
-Open on a device (Expo Go or a dev build), sign in with **the same** Google account
-used in Step 3, confirm the email is shown. Together with Step 3 this satisfies the
+If the returned `action_link` echoes your `redirect_to` verbatim it is allow-listed;
+if it comes back as the Site URL it was rejected. Always run a known-good and a
+known-bad control alongside the candidate, or the probe proves nothing.
+
+Result on this project: `cortex://` and `http://localhost:3000/auth/callback` are
+**allowed**; every `exp://192.168.1.39:8081/...` form is **rejected**.
+
+### Build and install the APK
+
+`apps/mobile/eas.json` defines a `preview` profile — a standalone internal-distribution
+APK. It is deliberately not the `development` profile, which would additionally require
+the `expo-dev-client` package just to verify sign-in.
+
+`.env` is gitignored and **EAS Build does not upload gitignored files**, so the two
+`EXPO_PUBLIC_*` values must live as EAS environment variables or the build ships with
+them `undefined`. They are set on the `preview` environment, and the profile declares
+`"environment": "preview"` so they actually get injected:
+
+```bash
+cd apps/mobile
+eas login
+eas init                     # links the project, writes extra.eas.projectId into app.json
+eas env:create --name EXPO_PUBLIC_SUPABASE_URL      --value "https://<project-ref>.supabase.co" \
+  --environment preview --visibility plaintext --scope project --type string
+eas env:create --name EXPO_PUBLIC_SUPABASE_ANON_KEY --value "<hosted anon key>" \
+  --environment preview --visibility plaintext --scope project --type string
+eas build -p android --profile preview
+```
+
+Confirm the build log line `Environment variables ... loaded from the "preview"
+environment` appears — if it doesn't, the profile is missing `"environment"` and the
+app will crash on launch with an undefined Supabase URL.
+
+Install the resulting APK on the device, sign in with **the same** Google account used
+in Step 3, and confirm the email is shown. Together with Step 3 this satisfies the
 Phase 0 spec requirement: the same Google account signed in on both web and phone.
+
+### `expo start` rewrites `apps/mobile/tsconfig.json` — check before committing
+
+Running `expo start` reformats that file and **strips `.expo/types/**/*.ts` and
+`expo-env.d.ts` from `include`** (it logs only
+`TypeScript: The tsconfig.json#include property has been updated`). Those entries are
+committed on purpose; losing them can break `pnpm typecheck` in CI. Run
+`git diff apps/mobile/tsconfig.json` after any `expo start` and revert if it changed.
+
+### Do not run `supabase config push` to fix redirect URLs
+
+It pushes the local `supabase/config.toml`, which carries
+`site_url = "http://127.0.0.1:3000"`, `additional_redirect_urls = ["https://127.0.0.1:3000"]`,
+and an `[auth.external.google]` block reading env vars that are unset on a typical dev
+machine. Running it would overwrite the hosted Site URL and redirect allow-list and can
+disable the Google provider, wiping the client ID/secret configured in Step 2.
 
 ## Step 5 — API Dockerfile (already done — see verification below)
 
