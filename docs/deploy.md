@@ -554,15 +554,82 @@ deploy output (`package.json`, `node_modules`, `dist`) rather than copying the w
 `eslint.config.mjs`, and `.env.example` that `pnpm deploy` otherwise carries along —
 none of which belong in a runtime image.
 
-One thing verified and *not* changed: `@cortex/api`'s only workspace dependency is
-`@cortex/config` (a `devDependency` supplying `tsconfig.base.json`/`eslint.base.mjs`
-for build-time tooling — `apps/api/tsconfig.json` has
-`"extends": "@cortex/config/tsconfig.base.json"`). It is never imported by
-`apps/api/src/**`, so there was nothing to reconcile at runtime — the final image
-needs zero workspace packages, only the plain npm dependencies listed in
-`apps/api/package.json`'s `dependencies` (`@nestjs/common`, `@nestjs/core`,
-`@nestjs/platform-express`, `jose`, `reflect-metadata`, `rxjs`).
+> ⚠️ **Superseded by Phase 1a.** At Phase 0 this section read: "`@cortex/api`'s only
+> workspace dependency is `@cortex/config`… the final image needs zero workspace
+> packages." That is **no longer true.** Phase 1a added two *runtime* workspace
+> dependencies — `@cortex/core` (services) and `@cortex/shared` (zod DTOs) — and both
+> are imported by `apps/api/src/**`. See
+> [Workspace packages in the runtime image](#workspace-packages-in-the-runtime-image).
+
+`@cortex/config` remains build-time only (a `devDependency` supplying
+`tsconfig.base.json`/`eslint.base.mjs` — `apps/api/tsconfig.json` has
+`"extends": "@cortex/config/tsconfig.base.json"`), never imported by `apps/api/src/**`.
 
 `apps/api/tsconfig.build.json` (from Task 8) was also confirmed still doing its job
 inside the container: `rootDir: "src"` + `outDir: "dist"` compiles to `dist/main.js`
 directly, not `dist/src/main.js`, matching `CMD ["node", "dist/main.js"]`.
+
+---
+
+## Phase 1a — deploy checklist (web notes)
+
+Everything below is required for the Phase 1a build to work in production. Each item
+is here because it fails **silently or only in production** — the local stack passes
+without it.
+
+### 1. Push the new migrations
+
+```bash
+supabase db push        # applies 00010 + 00011 to the hosted project
+supabase migration list # confirm local == remote (should now show 00001..00011)
+```
+
+- `00010_realtime_publication.sql` adds `notes`, `tags`, `note_tags` to the
+  `supabase_realtime` publication. Supabase ships that publication **empty**, so
+  without this migration no `postgres_changes` event is ever broadcast — the live
+  note list silently degrades to "refresh to see changes" with no error anywhere.
+- `00011_note_tags_partial_unique.sql` replaces `note_tags`' total unique constraint
+  with a partial one (`where deleted_at is null`). Without it, removing a tag and
+  re-adding the same tag fails with `23505`.
+
+### 2. Railway environment variables (API)
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `SUPABASE_URL` | ✅ | Already set in Phase 0. |
+| `SUPABASE_ANON_KEY` | ✅ **new in 1a** | Phase 0 never needed it; every write now does. |
+| `SUPABASE_JWT_SECRET` | ❌ must stay **unset** | Setting it forces the HS256 branch, which rejects the project's real ES256 tokens — every request 401s. |
+| `SUPABASE_SERVICE_ROLE_KEY` | ❌ do **not** set | Tests only. No service-role key belongs on a request path; RLS is the enforcement (spec §4.1). |
+| `CORS_ORIGINS` | ✅ | Must list the deployed web origin, or the browser blocks every write. |
+
+> **`SUPABASE_ANON_KEY` is the one that bites.** `createUserClient()` builds each
+> per-request Supabase client from it, so if it is missing the API still boots, `/health`
+> still returns 200, and only *writes* fail. Local dev passes because the key is in
+> `apps/api/.env`. Verify after deploy with an authenticated `POST /notes`, not `/health`.
+
+### 3. Web deployment environment variables
+
+| Variable | Notes |
+| --- | --- |
+| `NEXT_PUBLIC_API_URL` | Base URL of the Railway API, **no trailing slash** (the client concatenates `/notes` directly). Missing → requests go to `undefined/notes`. |
+| `NEXT_PUBLIC_SUPABASE_URL` | Already set in Phase 0; also used by the Realtime socket. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Already set in Phase 0. |
+
+### Workspace packages in the runtime image
+
+Phase 1a added `@cortex/core` and `@cortex/shared` as **runtime** dependencies of
+`@cortex/api`. Both are TypeScript-source packages, so each now has a `build` script
+emitting `dist/` and points `main`/`types` there — Node cannot `require` a `.ts` file.
+
+Consequences, all already applied:
+
+- `apps/api/Dockerfile` builds with `pnpm --filter @cortex/api... build` (note the
+  trailing `...`, which pulls in dependencies). With a bare `--filter @cortex/api`, the
+  image builds successfully and then dies at startup on
+  `Cannot find module .../packages/core/src/supabase.js`.
+- `.github/workflows/ci.yml`'s `db-tests` job builds `@cortex/shared` and `@cortex/core`
+  before running the filtered test commands; that job runs on a different runner from
+  the `checks` job, so it cannot reuse its build output.
+- Verified locally end to end: `docker build -f apps/api/Dockerfile .` → `docker run` →
+  `/health` returns `{"status":"ok"}` with the notes/tags/export routes mapped in the
+  startup log.

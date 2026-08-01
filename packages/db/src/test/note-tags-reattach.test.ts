@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { makeUser } from "./clients";
+import { makeUser } from "./clients.js";
 
 describe("note_tags detach → re-attach", () => {
   it("allows re-attaching a tag after soft-deleting the link", async () => {

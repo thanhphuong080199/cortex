@@ -30,6 +30,11 @@ export default async function Home(
   query = view === "trash" ? query.not("deleted_at", "is", null) : query.is("deleted_at", null);
   if (view === "active") query = query.in("lifecycle", ["active", "evergreen"]);
   else if (view !== "trash") query = query.eq("lifecycle", view);
+  // The `config` is load-bearing, not cosmetic. With it, PostgREST emits
+  //   to_tsvector('english', content_text) @@ websearch_to_tsquery('english', q)
+  // which matches notes_fts_idx (verified: Bitmap Index Scan, custom AND generic plans).
+  // Drop it and PostgREST emits the bare `content_text @@ ...` form, which resolves to
+  // the default-config operator, matches no index, and silently sequential-scans.
   if (q) query = query.textSearch("content_text", q, { type: "websearch", config: "english" });
   if (tag) query = query.eq("note_tags.tag_id", tag).is("note_tags.deleted_at", null);
 

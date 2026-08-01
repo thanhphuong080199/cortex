@@ -88,6 +88,12 @@ jobs:
             echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY"
           } >> "$GITHUB_ENV"
 
+      # @cortex/shared and @cortex/core are consumed as compiled dist/, so the filtered
+      # test commands below cannot resolve them until they are built. The checks job
+      # builds in a separate runner, so its output is not available here.
+      - name: Build workspace packages the test suites import
+        run: pnpm turbo run build --filter=@cortex/shared --filter=@cortex/core
+
       # @cortex/db's tests are not idempotent across repeated runs against the same
       # database (unique-constraint collisions on re-insert), but a freshly started CI
       # Postgres is already at the post-migration/seed state `db reset` produces, so no
@@ -97,3 +103,6 @@ jobs:
 
       - name: Run api tests
         run: pnpm --filter @cortex/api test
+
+      - name: Run core tests (NoteService / TagService / ExportService against RLS)
+        run: pnpm --filter @cortex/core test
