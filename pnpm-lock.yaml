@@ -29,6 +29,12 @@ importers:
 
   apps/api:
     dependencies:
+      '@cortex/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@cortex/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       '@nestjs/common':
         specifier: ^11.0.0
         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -38,6 +44,9 @@ importers:
       '@nestjs/platform-express':
         specifier: ^11.0.0
         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+      '@supabase/supabase-js':
+        specifier: ^2.48.0
+        version: 2.111.0
       jose:
         specifier: ^5.9.0
         version: 5.10.0
@@ -60,18 +69,21 @@ importers:
       '@nestjs/testing':
         specifier: ^11.0.0
         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(@nestjs/platform-express@11.1.28)
-      '@supabase/supabase-js':
-        specifier: ^2.48.0
-        version: 2.111.0
       '@swc/core':
         specifier: ^1.10.0
         version: 1.15.47
+      '@types/adm-zip':
+        specifier: ^0.5.5
+        version: 0.5.8
       '@types/express':
         specifier: ^5.0.0
         version: 5.0.6
       '@types/supertest':
         specifier: ^6.0.0
         version: 6.0.3
+      adm-zip:
+        specifier: ^0.5.16
+        version: 0.5.18
       dotenv:
         specifier: ^16.4.0
         version: 16.6.1
@@ -84,6 +96,9 @@ importers:
       vitest:
         specifier: ^3.0.0
         version: 3.2.7(@types/node@22.20.1)(lightningcss@1.33.0)(terser@5.49.0)(yaml@2.9.0)
+      yaml:
+        specifier: ^2.6.0
+        version: 2.9.0
 
   apps/mobile:
     dependencies:
