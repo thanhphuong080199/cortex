@@ -11,5 +11,8 @@ export const logMediaInput = z.object({
   rating: z.number().int().min(1).max(5).optional(),
   impression: z.string().max(100_000).optional(),  // same ceiling as note content
   consumedAt: z.iso.date().optional(),
+  // Absent means "finished" (the service defaults it): the common case stays one tap,
+  // but a book 40 pages in is no longer asserted finished by omission.
+  status: z.enum(["finished", "in_progress", "abandoned"]).optional(),
 });
 export type LogMediaInput = z.infer<typeof logMediaInput>;

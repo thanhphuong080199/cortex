@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CreateTagInput } from "@cortex/shared";
 import { mapPostgrestError, notFound } from "../errors.js";
-import { escapeLike } from "../like.js";
+import { anchoredIRegex } from "../like.js";
 
 export interface Tag { id: string; user_id: string; name: string; color: string | null; created_by: string; created_at: string; deleted_at: string | null }
 export interface NoteTag { id: string; note_id: string; tag_id: string; source: string; status: string }
@@ -26,12 +26,14 @@ export class TagService {
 
   /** Live tag whose name matches case-insensitively, or null. */
   private async findLiveByName(name: string): Promise<Tag | null> {
+    // imatch (anchored, regex-escaped), not ilike: see like.ts for the wildcard bugs.
     const { data, error } = await this.client.from("tags")
-      .select().eq("user_id", this.userId).ilike("name", escapeLike(name))
+      .select().eq("user_id", this.userId)
+      .filter("name", "imatch", anchoredIRegex(name))
       .is("deleted_at", null);
     if (error) throw mapPostgrestError(error);
-    // The escaped ilike should already be a literal match; the lower() comparison is the
-    // authority, mirroring the tags_user_name_uidx index this find-or-create races with.
+    // The lower() comparison is the authority, mirroring the tags_user_name_uidx index
+    // this find-or-create races with.
     const target = name.toLowerCase();
     return (data as Tag[]).find((t) => t.name.toLowerCase() === target) ?? null;
   }

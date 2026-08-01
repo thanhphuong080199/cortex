@@ -12,9 +12,11 @@ import { ZodValidationPipe } from "./zod-validation.pipe";
 @Controller("media-log")
 @UseGuards(SupabaseAuthGuard)
 export class MediaController {
+  private svc(user: AuthedUser) { return new MediaService(createUserClient(user.token), user.id); }
+
   @Post()
   log(@CurrentUser() user: AuthedUser,
       @Body(new ZodValidationPipe(logMediaInput)) body: LogMediaInput) {
-    return new MediaService(createUserClient(user.token), user.id).logMedia(body);
+    return this.svc(user).logMedia(body);
   }
 }

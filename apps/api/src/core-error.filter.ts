@@ -1,8 +1,8 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Logger } from "@nestjs/common";
 import type { Response } from "express";
 
-const KINDS = new Set(["not_found", "conflict", "internal"]);
-const isCoreError = (e: unknown): e is { kind: string; cause?: unknown } =>
+const KINDS = new Set(["not_found", "conflict", "validation", "internal"]);
+const isCoreError = (e: unknown): e is { kind: string; cause?: unknown; message?: string } =>
   typeof e === "object" && e !== null && KINDS.has((e as { kind?: string }).kind ?? "");
 
 // Translates packages/core's CoreError into HTTP. not_found is deliberately returned
@@ -15,7 +15,12 @@ export class CoreErrorFilter implements ExceptionFilter {
     const res = host.switchToHttp().getResponse<Response>();
     if (isCoreError(exception)) {
       if (exception.kind === "not_found") return res.status(404).json({ message: "Not found" });
-      if (exception.kind === "conflict") return res.status(409).json({ message: "Conflict" });
+      // CoreError.message is caller-facing by contract (errors.ts) -- PostgREST detail
+      // stays in `cause`, which is never echoed.
+      if (exception.kind === "conflict")
+        return res.status(409).json({ message: exception.message ?? "Conflict" });
+      if (exception.kind === "validation")
+        return res.status(400).json({ message: exception.message ?? "Validation failed" });
       this.logger.error(JSON.stringify(exception.cause)); // logged, never echoed (spec §6)
       return res.status(500).json({ message: "Internal error" });
     }

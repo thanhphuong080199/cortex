@@ -11,8 +11,10 @@ export interface Note {
 
 // domain_meta and media_item_id are not part of createNoteInput: the HTTP surface only
 // takes `domain` (a one-tap chip), while structured meta comes from MediaService or, from
-// phase 2, enrichment. Keeping them out of the DTO stops a client inventing meta the
-// domain's schema never sanctioned.
+// phase 2, enrichment. This is defense-in-depth for the API path only, NOT enforcement:
+// the notes grant and RLS policy are row-scoped, so a row's owner can write arbitrary
+// domain_meta straight through PostgREST with their own JWT. Phase 2 must therefore
+// validate meta on READ and treat what it finds as untrusted.
 export interface CreateNoteOptions {
   domainMeta?: Record<string, unknown>;
   mediaItemId?: string;
@@ -54,6 +56,25 @@ export class NoteService {
     if (input.lifecycle !== undefined) patch.lifecycle = input.lifecycle;
     // `domain: null` clears a wrong domain; absent leaves it alone -- same asymmetry as title.
     if (input.domain !== undefined) patch.domain = input.domain;
+    // Moving a note to a new domain must not carry meta the new domain's schema rejects
+    // (a media note's {rating} patched to domain:"health" would otherwise persist a row
+    // phase 2 can never read back). Clearing the domain skips this: meta without a
+    // domain is dormant, and create() accepts that pairing too. Read-then-update race is
+    // acceptable -- meta is service-written only, and the authority is validate-on-read.
+    if (typeof input.domain === "string") {
+      const { data: current, error: readError } = await this.client.from("notes")
+        .select("domain_meta")
+        .eq("id", id).eq("user_id", this.userId).is("deleted_at", null).single();
+      if (readError) throw mapPostgrestError(readError);
+      const check = validateDomainMeta(input.domain, current.domain_meta ?? {});
+      if (!check.success) {
+        throw {
+          kind: "validation",
+          message: `existing domain_meta does not fit domain "${input.domain}"; clear the domain first or use a matching domain`,
+          cause: check.error,
+        } as const;
+      }
+    }
     const { data, error } = await this.client.from("notes")
       .update(patch)
       .eq("id", id).eq("user_id", this.userId).is("deleted_at", null)

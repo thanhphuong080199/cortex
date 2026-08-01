@@ -48,6 +48,30 @@ describe("MediaService.findOrCreateItem", () => {
     expect(item.year).toBe(2011);
     expect(item.creator).toBe("Kahneman");
   });
+
+  it("treats '*' as a literal (PostgREST maps '*' to '%' inside ilike patterns)", async () => {
+    // "MASH" matches the pattern M%A%S%H, so an ilike-based lookup for "M*A*S*H" scans
+    // wildcard-wide. The imatch lookup must both stay exact and round-trip the literal.
+    await svc.findOrCreateItem({ kind: "tv", title: "MASH" });
+    const star = await svc.findOrCreateItem({ kind: "tv", title: "M*A*S*H" });
+    expect(star.title).toBe("M*A*S*H");
+    const again = await svc.findOrCreateItem({ kind: "tv", title: "M*A*S*H" });
+    expect(again.id).toBe(star.id);
+  });
+
+  it("backfills a missing year on an existing item", async () => {
+    const bare = await svc.findOrCreateItem({ kind: "movie", title: "Stalker" });
+    expect(bare.year).toBeNull();
+    const dated = await svc.findOrCreateItem({ kind: "movie", title: "Stalker", year: 1979 });
+    expect(dated.id).toBe(bare.id);
+    expect(dated.year).toBe(1979);
+  });
+
+  it("rejects a contradicting year as a conflict instead of silently discarding it", async () => {
+    await svc.findOrCreateItem({ kind: "movie", title: "Solaris", year: 1972 });
+    await expect(svc.findOrCreateItem({ kind: "movie", title: "Solaris", year: 2002 }))
+      .rejects.toMatchObject({ kind: "conflict" });
+  });
 });
 
 describe("MediaService.logMedia", () => {
@@ -87,6 +111,36 @@ describe("MediaService.logMedia", () => {
     });
     expect(note.domain_meta).toMatchObject({ consumed_at: "2026-07-14" });
   });
+
+  it("carries an explicit status and defaults omitted status to finished", async () => {
+    const inProgress = await svc.logMedia({
+      kind: "book", title: "Gödel, Escher, Bach", status: "in_progress",
+    });
+    expect(inProgress.note.domain_meta).toMatchObject({ status: "in_progress" });
+    const defaulted = await svc.logMedia({ kind: "book", title: "Gödel, Escher, Bach" });
+    expect(defaulted.note.domain_meta).toMatchObject({ status: "finished" });
+  });
+
+  it("deletes a just-created item when the note insert fails (no orphan in the library)", async () => {
+    // rating 6 passes the (unvalidated-at-service-level) input type but fails
+    // domainMetaSchemas.media inside NoteService.create -- the note never lands.
+    await expect(svc.logMedia({
+      kind: "movie", title: "Orphan Probe", rating: 6 as never,
+    })).rejects.toMatchObject({ kind: "internal" });
+    const { data } = await alice.client.from("media_items")
+      .select("id").eq("user_id", alice.id).eq("title", "Orphan Probe");
+    expect(data).toEqual([]);
+  });
+
+  it("leaves a pre-existing item alone when the note insert fails", async () => {
+    const kept = await svc.findOrCreateItem({ kind: "movie", title: "Kept Item" });
+    await expect(svc.logMedia({
+      kind: "movie", title: "Kept Item", rating: 6 as never,
+    })).rejects.toMatchObject({ kind: "internal" });
+    const { data } = await alice.client.from("media_items")
+      .select("id").eq("id", kept.id);
+    expect(data).toHaveLength(1);
+  });
 });
 
 describe("NoteService carries domain", () => {
@@ -114,6 +168,23 @@ describe("NoteService carries domain", () => {
     expect(set.domain).toBe("finance");
     const cleared = await notes.update(note.id, { domain: null });
     expect(cleared.domain).toBeNull();
+  });
+
+  it("rejects a domain change that strands existing meta (B3)", async () => {
+    // A media log's {rating, status} meta fits no other domain's strict schema, so
+    // re-domaining the note must 400, not persist a row phase 2 can never read back.
+    const { note } = await svc.logMedia({ kind: "movie", title: "Domain Switch", rating: 3 });
+    const notes = new NoteService(createUserClient(alice.token), alice.id);
+    await expect(notes.update(note.id, { domain: "health" }))
+      .rejects.toMatchObject({ kind: "validation" });
+
+    // Clearing the domain stays allowed -- meta without a domain is dormant --
+    // and empty meta moves freely between domains.
+    const cleared = await notes.update(note.id, { domain: null });
+    expect(cleared.domain).toBeNull();
+    const plain = await notes.create({ content: "no meta" });
+    const moved = await notes.update(plain.id, { domain: "health" });
+    expect(moved.domain).toBe("health");
   });
 
   it("rejects meta that does not match its domain's shape", async () => {
