@@ -163,6 +163,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@cortex/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       '@supabase/ssr':
         specifier: ^0.6.0
         version: 0.6.1(@supabase/supabase-js@2.111.0)
@@ -178,6 +181,9 @@ importers:
       react-dom:
         specifier: ^19.0.0
         version: 19.2.8(react@19.2.8)
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
     devDependencies:
       '@cortex/config':
         specifier: workspace:*
@@ -191,6 +197,9 @@ importers:
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@22.20.1)(lightningcss@1.33.0)(terser@5.49.0)(yaml@2.9.0)
 
   packages/config: {}
 
