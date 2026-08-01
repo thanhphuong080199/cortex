@@ -74,6 +74,9 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
 .checkin .hint button { border: none; background: none; padding: 0 2px; color: var(--accent); }
 
 .capture { margin-bottom: 8px; }
+.capture-domains { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 7px; }
+.capture-domains button { font-size: 12.5px; padding: 3px 10px; border-radius: 999px; color: var(--muted); }
+.capture-domains button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 
 .media-panel { margin-bottom: 16px; }
 .media-form {
@@ -97,6 +100,13 @@ nav.views a {
   padding: 5px 11px; border-radius: 999px; border: 1px solid transparent;
 }
 nav.views a.on { color: var(--text); background: var(--panel); border-color: var(--line); }
+
+nav.domains { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 14px; }
+nav.domains a {
+  text-decoration: none; color: var(--muted); font-size: 12.5px;
+  padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line);
+}
+nav.domains a.on { color: var(--accent); border-color: var(--accent); }
 
 form.search { display: flex; gap: 8px; margin-bottom: 18px; }
 

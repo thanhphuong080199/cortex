@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { NOTE_VIEWS, VIEW_LABELS, parseView } from "@/lib/note-views";
+import { noteDomain } from "@cortex/shared";
+import { NOTE_VIEWS, VIEW_LABELS, parseDomain, parseView } from "@/lib/note-views";
 import { CheckinWidget } from "./checkin-widget";
 import { ExportButton } from "./export-button";
 import { MediaLogPanel } from "./media-log-panel";
@@ -16,6 +17,7 @@ export default async function Home(
   const view = parseView(one(params.view));
   const q = one(params.q)?.trim() ?? "";
   const tag = one(params.tag) ?? "";
+  const domain = parseDomain(one(params.domain));
 
   const supabase = await createClient();
   // getUser() authenticates against the auth server; getSession() supplies the access
@@ -39,6 +41,9 @@ export default async function Home(
   // the default-config operator, matches no index, and silently sequential-scans.
   if (q) query = query.textSearch("content_text", q, { type: "websearch", config: "english" });
   if (tag) query = query.eq("note_tags.tag_id", tag).is("note_tags.deleted_at", null);
+  // Backed by notes_user_domain_idx. matchesView applies the same narrowing to Realtime
+  // rows, so a live-patched note can never disagree with what a reload would show.
+  if (domain) query = query.eq("domain", domain);
 
   const { data, error } = await query;
   if (error) throw error; // rendered by error.tsx
@@ -49,6 +54,16 @@ export default async function Home(
     sp.set("view", v);
     if (q) sp.set("q", q);
     if (tag) sp.set("tag", tag);
+    if (domain) sp.set("domain", domain);
+    return `/?${sp.toString()}`;
+  };
+  // Clicking the active domain chip clears it, so the filter is its own toggle.
+  const domainHref = (d: string) => {
+    const sp = new URLSearchParams();
+    sp.set("view", view);
+    if (q) sp.set("q", q);
+    if (tag) sp.set("tag", tag);
+    if (d !== domain) sp.set("domain", d);
     return `/?${sp.toString()}`;
   };
 
@@ -75,15 +90,26 @@ export default async function Home(
         ))}
       </nav>
 
+      <nav className="domains" aria-label="Filter by domain">
+        {noteDomain.options.map((d) => (
+          <Link key={d} href={domainHref(d)} className={d === domain ? "on" : ""}
+                aria-current={d === domain ? "true" : undefined}>
+            {d}
+          </Link>
+        ))}
+      </nav>
+
       <form className="search" action="/" method="get">
         <input type="hidden" name="view" value={view} />
         {tag && <input type="hidden" name="tag" value={tag} />}
+        {domain && <input type="hidden" name="domain" value={domain} />}
         <input type="text" name="q" defaultValue={q} placeholder="Search notes…" aria-label="Search notes" />
         <button type="submit">Search</button>
-        {(q || tag) && <Link className="btn" href={`/?view=${view}`}>Clear</Link>}
+        {(q || tag || domain) && <Link className="btn" href={`/?view=${view}`}>Clear</Link>}
       </form>
 
-      <NoteList initialNotes={notes} view={view} userId={user.id} token={session.access_token} />
+      <NoteList initialNotes={notes} view={view} domain={domain}
+                userId={user.id} token={session.access_token} />
     </main>
   );
 }

@@ -8,12 +8,13 @@ import { matchesView, type NoteView } from "@/lib/note-views";
 export interface NoteRow {
   id: string; title: string | null; content: string;
   lifecycle: string; updated_at: string; deleted_at: string | null;
+  domain?: string | null;
 }
 
 const preview = (n: NoteRow) => n.title?.trim() || n.content.split("\n")[0]?.trim() || "(empty note)";
 
-export function NoteList({ initialNotes, view, userId, token }: {
-  initialNotes: NoteRow[]; view: NoteView; userId: string; token: string;
+export function NoteList({ initialNotes, view, domain, userId, token }: {
+  initialNotes: NoteRow[]; view: NoteView; domain?: string; userId: string; token: string;
 }) {
   const [notes, setNotes] = useState<NoteRow[]>(initialNotes);
   const [busy, setBusy] = useState<string | null>(null);
@@ -26,21 +27,22 @@ export function NoteList({ initialNotes, view, userId, token }: {
     const supabase = createClient();
     let q = supabase.from("notes").select("*").order("updated_at", { ascending: false });
     q = view === "trash" ? q.not("deleted_at", "is", null) : q.is("deleted_at", null);
+    if (domain) q = q.eq("domain", domain);
     const { data } = await q;
-    if (data) setNotes((data as NoteRow[]).filter((n) => matchesView(n, view)));
-  }, [view]);
+    if (data) setNotes((data as NoteRow[]).filter((n) => matchesView(n, view, domain)));
+  }, [view, domain]);
 
   useEffect(() => {
     const supabase = createClient();
     const channel = supabase
-      .channel(`notes-list-${view}`)
+      .channel(`notes-list-${view}-${domain ?? "all"}`)
       .on("postgres_changes",
         { event: "*", schema: "public", table: "notes", filter: `user_id=eq.${userId}` },
         (payload) => {
           setNotes((prev) => {
             const row = (payload.eventType === "DELETE" ? payload.old : payload.new) as NoteRow;
             const without = prev.filter((n) => n.id !== row.id); // dedupe by id -- own-write echo is a no-op
-            if (payload.eventType !== "DELETE" && matchesView(row, view)) {
+            if (payload.eventType !== "DELETE" && matchesView(row, view, domain)) {
               return [row, ...without].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
             }
             return without; // soft-deletes arrive as UPDATEs failing matchesView → drop (spec §5.4)
@@ -48,7 +50,7 @@ export function NoteList({ initialNotes, view, userId, token }: {
         })
       .subscribe((status) => { if (status === "SUBSCRIBED") void refetch(); });
     return () => { void supabase.removeChannel(channel); };
-  }, [userId, view, refetch]);
+  }, [userId, view, domain, refetch]);
 
   async function act(id: string, fn: () => Promise<unknown>) {
     setBusy(id);
