@@ -16,6 +16,19 @@
 -- extra_search_path, so this fails ONLY against the hosted project -- and only at deploy
 -- time. Qualifying is the fix 00001 itself prescribes; do not "simplify" it back.
 
+-- Guard: this file is only a pure type change while both embedding columns are empty.
+-- Against a database that already holds embeddings the right operation is a re-embed,
+-- not an `alter type` -- fail loudly instead of becoming a different migration.
+-- (Already-applied environments never re-run this; the guard exists for fresh replays
+-- and for anyone tempted to re-apply it by hand.)
+do $$
+begin
+  if exists (select 1 from public.note_chunks where embedding is not null)
+     or exists (select 1 from public.memory_facts where embedding is not null) then
+    raise exception '00012: embeddings already exist; this requires a re-embed, not a type change (see docs/deploy.md)';
+  end if;
+end $$;
+
 -- note_chunks: the HNSW index is bound to the column's dimension, so it must be dropped
 -- before the type change and rebuilt after. (hnsw supports up to 2000 dims; 1536 is fine.)
 drop index if exists public.note_chunks_embedding_idx;

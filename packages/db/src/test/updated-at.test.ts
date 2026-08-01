@@ -63,6 +63,28 @@ describe("updated_at triggers", () => {
     expect(new Date(updated!.updated_at).getTime()).toBeGreaterThan(new Date(updated!.created_at).getTime());
   });
 
+  it("checkins.updated_at advances on UPDATE (00014; soft-delete must move the sync cursor)", async () => {
+    const { client, id } = await makeUser("updated-at@test.local");
+    const { data: inserted } = await client.from("checkins")
+      .insert({ user_id: id, mood: 4 }).select("id, created_at, updated_at").single();
+    expect(inserted!.created_at).toBe(inserted!.updated_at);
+    await new Promise((r) => setTimeout(r, 1100));
+    const { data: updated } = await client.from("checkins")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", inserted!.id).select("created_at, updated_at").single();
+    expect(new Date(updated!.updated_at).getTime()).toBeGreaterThan(new Date(updated!.created_at).getTime());
+  });
+
+  it("flashcards.updated_at advances on UPDATE (00014; every review rewrites scheduling)", async () => {
+    const { client, id } = await makeUser("updated-at@test.local");
+    const { data: inserted } = await client.from("flashcards")
+      .insert({ user_id: id, front: "f", back: "b" }).select("id, created_at, updated_at").single();
+    await new Promise((r) => setTimeout(r, 1100));
+    const { data: updated } = await client.from("flashcards")
+      .update({ ease: 2.5, lapses: 1 }).eq("id", inserted!.id).select("created_at, updated_at").single();
+    expect(new Date(updated!.updated_at).getTime()).toBeGreaterThan(new Date(updated!.created_at).getTime());
+  });
+
   it("integrations.updated_at advances on UPDATE (via service_role)", async () => {
     const { id } = await makeUser("updated-at@test.local");
     // Idempotency: integrations has unique (user_id, provider, external_id), so this
