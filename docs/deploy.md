@@ -9,10 +9,78 @@ Everything in this doc uses placeholders (`<project-ref>`, `<org-id>`, ...). Nev
 commit the real values that fill them in — they belong in `.env.local` / `.env`
 files (already gitignored) or in the Supabase/Railway/Google dashboards.
 
-Steps 1-4 and 6 below require a human with browser access to Supabase, Google Cloud
+Steps 2-4 and 6 below require a human with browser access to Supabase, Google Cloud
 Console, and Railway — they cannot be scripted end-to-end by an agent. Step 5 (the
 API Dockerfile) is already implemented and verified locally; see
 [Local Docker verification](#local-docker-verification-already-done) at the bottom.
+
+## Provisioned environment (current state)
+
+| Item | Value |
+| --- | --- |
+| Supabase project name | `cortex` |
+| Project ref | `wilssluxogpdrbgffmzc` |
+| Region | `ap-southeast-1` (Singapore) |
+| Dashboard | https://supabase.com/dashboard/project/wilssluxogpdrbgffmzc |
+| API URL | `https://wilssluxogpdrbgffmzc.supabase.co` |
+
+The project ref and API URL are **not** secrets — they ship in every client bundle via
+`NEXT_PUBLIC_SUPABASE_URL`. The DB password, service_role key, and Google client secret
+**are** secrets and live only in a password manager and the dashboards.
+
+Progress against the steps below:
+
+- [x] **Step 1** — project created, linked, all 9 migrations pushed
+      (`00001`..`00009`, confirmed via `supabase migration list`: local == remote),
+      `allowed_emails` seeded with `phuong011999vn@gmail.com` (`owner`).
+- [x] **Step 2** — Google Cloud OAuth client created and Supabase Google provider
+      enabled; verified via `/auth/v1/settings` reporting `external.google = true`.
+- [x] **Step 3** — web login verified end-to-end with a real Google account.
+- [x] **Step 4** — mobile login verified on an EAS `preview` APK (**not** Expo Go —
+      see the step for why). Same Google account as web: `auth.users` still holds
+      exactly one row and its `last_sign_in_at` advanced from `03:08:34Z` (web) to
+      `05:04:17Z` (phone), which is the spec's "phone + web, same account" item.
+- [x] **Step 5** — API Dockerfile, built and verified locally
+- [x] **Step 6** — API deployed to Railway at
+      `https://cortex-api-production-8e4e.up.railway.app`; `/health` and `/me` both
+      verified against the live URL.
+
+> ⚠️ **The Railway deployment is on the free trial: $5 of credit, 30 days from
+> 2026-08-01, so it lapses around 2026-08-31.** When it does, `/health` stops
+> answering and the Phase 0 demo URL dies. Moving to the Hobby plan ($5/month,
+> includes $5 of usage credit) keeps it alive. Railway's Free plan grants only $1 of
+> monthly usage credit, which is not enough to keep an always-on container running.
+
+Local client env files are already written and gitignored, pointing at the hosted
+project: `apps/web/.env.local` and `apps/mobile/.env`.
+
+### Verified live against the hosted project after Step 1
+
+Run with the service_role and anon keys, against
+`https://wilssluxogpdrbgffmzc.supabase.co`:
+
+| Check | Result |
+| --- | --- |
+| Non-allow-listed signup (`stranger@example.com`, admin API) | `HTTP 500 {"code":"P0001","message":"Signup not allowed for stranger@example.com"}` — gate fires |
+| `anon` reads `allowed_emails` | `200 []` — server-only table invisible |
+| `anon` reads `notes` | `200 []` — RLS default-deny holds |
+
+This covers the "invite gate rejects non-allow-listed accounts" DoD item at the
+database layer. The trigger fires on `before insert on auth.users`, which is the
+same code path a Google signup takes, so a non-allow-listed Google account is
+rejected by the identical mechanism.
+
+### Verified live after Steps 2-3 (web login)
+
+| Check | Result |
+| --- | --- |
+| `/auth/v1/settings` → `external.google` | `true` |
+| `GET /` on the web app | `307 → /login` — route protection active |
+| `/auth/v1/authorize?provider=google&redirect_to=http://localhost:3000/auth/callback` | `302 → accounts.google.com` with the real `client_id`; `redirect_to` **preserved**, proving the URL is allow-listed (an unlisted value is silently replaced with the Site URL) |
+| `auth.users` after signing in with Google | 1 user, `identities: [{provider: "google"}]`, `app_metadata.provider = "google"` |
+
+Note the user count: the `stranger@example.com` gate probe above created no row,
+so the allowlist held under a real admin-API signup attempt.
 
 ## Prerequisites
 
@@ -180,13 +248,90 @@ EXPO_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
 EXPO_PUBLIC_SUPABASE_ANON_KEY=<hosted anon key — same value as web's>
 ```
 
+### Expo Go does NOT work for this project — use an EAS build
+
+The original draft of this step said "Expo Go or a dev build". **Expo Go is not an
+option here**, for two independent reasons, both established by testing rather than
+assumed:
+
+1. **SDK mismatch.** The app targets Expo SDK 57 (`expo ^57.0.9`,
+   `react-native 0.86.2`, `react 19.2.3`). Expo Go reports
+   `Project is incompatible with this version of Expo Go` and refuses to run the
+   current bundle — a stale cached bundle can still launch, which makes this look
+   like an intermittent bug rather than a hard incompatibility.
+2. **Supabase will not allow-list Expo Go's redirect URL.** In Expo Go,
+   `makeRedirectUri({ scheme: "cortex" })` resolves to `exp://<lan-ip>:8081/--/`
+   rather than `cortex://`, because Expo Go cannot register a third-party custom
+   scheme. Adding `exp://192.168.1.39:8081/**` to the Redirect URLs list **does not
+   work** — the entry saves fine but Supabase's matcher still rejects every
+   `exp://` form, falling back to the Site URL. Symptom: after Google consent the
+   browser lands on `http://localhost:3000` (the phone's own localhost, where
+   nothing is listening) and sign-in silently fails.
+
+How this was verified — `/auth/v1/authorize` is **not** a valid probe, because it
+echoes any `redirect_to` you hand it, including `https://evil.example.com/steal`.
+The admin `generate_link` endpoint *does* enforce the allow-list (note `redirect_to`
+is a **top-level** field, not nested under `options`):
+
 ```bash
-pnpm --filter @cortex/mobile exec expo start
+curl -X POST "https://<project-ref>.supabase.co/auth/v1/admin/generate_link" \
+  -H "apikey: $SERVICE_ROLE_KEY" -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"magiclink","email":"<you>","redirect_to":"cortex://"}'
 ```
 
-Open on a device (Expo Go or a dev build), sign in with **the same** Google account
-used in Step 3, confirm the email is shown. Together with Step 3 this satisfies the
+If the returned `action_link` echoes your `redirect_to` verbatim it is allow-listed;
+if it comes back as the Site URL it was rejected. Always run a known-good and a
+known-bad control alongside the candidate, or the probe proves nothing.
+
+Result on this project: `cortex://` and `http://localhost:3000/auth/callback` are
+**allowed**; every `exp://192.168.1.39:8081/...` form is **rejected**.
+
+### Build and install the APK
+
+`apps/mobile/eas.json` defines a `preview` profile — a standalone internal-distribution
+APK. It is deliberately not the `development` profile, which would additionally require
+the `expo-dev-client` package just to verify sign-in.
+
+`.env` is gitignored and **EAS Build does not upload gitignored files**, so the two
+`EXPO_PUBLIC_*` values must live as EAS environment variables or the build ships with
+them `undefined`. They are set on the `preview` environment, and the profile declares
+`"environment": "preview"` so they actually get injected:
+
+```bash
+cd apps/mobile
+eas login
+eas init                     # links the project, writes extra.eas.projectId into app.json
+eas env:create --name EXPO_PUBLIC_SUPABASE_URL      --value "https://<project-ref>.supabase.co" \
+  --environment preview --visibility plaintext --scope project --type string
+eas env:create --name EXPO_PUBLIC_SUPABASE_ANON_KEY --value "<hosted anon key>" \
+  --environment preview --visibility plaintext --scope project --type string
+eas build -p android --profile preview
+```
+
+Confirm the build log line `Environment variables ... loaded from the "preview"
+environment` appears — if it doesn't, the profile is missing `"environment"` and the
+app will crash on launch with an undefined Supabase URL.
+
+Install the resulting APK on the device, sign in with **the same** Google account used
+in Step 3, and confirm the email is shown. Together with Step 3 this satisfies the
 Phase 0 spec requirement: the same Google account signed in on both web and phone.
+
+### `expo start` rewrites `apps/mobile/tsconfig.json` — check before committing
+
+Running `expo start` reformats that file and **strips `.expo/types/**/*.ts` and
+`expo-env.d.ts` from `include`** (it logs only
+`TypeScript: The tsconfig.json#include property has been updated`). Those entries are
+committed on purpose; losing them can break `pnpm typecheck` in CI. Run
+`git diff apps/mobile/tsconfig.json` after any `expo start` and revert if it changed.
+
+### Do not run `supabase config push` to fix redirect URLs
+
+It pushes the local `supabase/config.toml`, which carries
+`site_url = "http://127.0.0.1:3000"`, `additional_redirect_urls = ["https://127.0.0.1:3000"]`,
+and an `[auth.external.google]` block reading env vars that are unset on a typical dev
+machine. Running it would overwrite the hosted Site URL and redirect allow-list and can
+disable the Google provider, wiping the client ID/secret configured in Step 2.
 
 ## Step 5 — API Dockerfile (already done — see verification below)
 
@@ -198,38 +343,55 @@ changes.
 
 ## Step 6 — Deploy the API to Railway
 
-```bash
-railway login
-railway init --name cortex-api
-```
+Verified against **railway CLI 5.30.3**. The earlier draft of this step guessed at
+flags; the sequence below is what actually ran.
 
-Run `railway init` from the **repo root** — the deployed service must build with the
-repo root as its build context, not `apps/api/`, because `apps/api/Dockerfile`
-copies `packages/`, `pnpm-lock.yaml`, and `pnpm-workspace.yaml` from above
-`apps/api/`. If Railway's project settings expose a "Root Directory" field, leave it
-at `/` (repo root) — do not set it to `apps/api`.
+`railway up --dockerfile <path>` **does not exist** on CLI 5.x. Build config comes
+from `railway.json` at the **repo root** (committed):
 
-Set environment variables (do **not** set `SUPABASE_JWT_SECRET` — see below):
-
-```bash
-railway variables --set "SUPABASE_URL=https://<project-ref>.supabase.co" --set "PORT=3001"
-```
-
-Deploy using the Dockerfile:
-
-```bash
-railway up --dockerfile apps/api/Dockerfile
-```
-
-(This CLI could not be installed/tested in the environment that wrote this doc — no
-network path to verify current flag names. If `--dockerfile` has changed in your
-installed CLI version, run `railway up --help` and/or configure a `railway.json` at
-the repo root instead:
 ```json
-{ "build": { "builder": "DOCKERFILE", "dockerfilePath": "apps/api/Dockerfile" } }
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": { "builder": "DOCKERFILE", "dockerfilePath": "apps/api/Dockerfile" },
+  "deploy": { "healthcheckPath": "/health", "restartPolicyType": "ON_FAILURE", "restartPolicyMaxRetries": 3 }
+}
 ```
-Either mechanism must end up building from the repo root with
-`apps/api/Dockerfile`.)
+
+Every command runs from the **repo root** — the build context must be the repo root,
+not `apps/api/`, because `apps/api/Dockerfile` copies `packages/`, `pnpm-lock.yaml`,
+and `pnpm-workspace.yaml` from above `apps/api/`. If Railway's settings expose a
+"Root Directory" field, leave it at `/`.
+
+```bash
+npm install -g @railway/cli
+railway login                      # opens a browser; cannot be scripted
+
+# `init` needs an explicit workspace when run non-interactively.
+railway whoami --json              # -> .workspaces[0].id
+railway init --name cortex-api --workspace <workspace-id> --json
+
+# `init` creates the project but NOT a service; variables need a service to attach to.
+railway add --service cortex-api --json
+
+railway variables --service cortex-api \
+  --set "SUPABASE_URL=https://<project-ref>.supabase.co" --set "PORT=3001"
+railway variables --service cortex-api --kv     # confirm both, and that SUPABASE_JWT_SECRET is ABSENT
+
+railway up --service cortex-api --detach --yes
+
+# Railway does NOT assign a public URL by default - generate one:
+railway domain --service cortex-api --port 3001 --json
+```
+
+Notes from the real run:
+
+- `railway variables --set ...` may print *"This session is missing Railway's agent
+  tooling ... `railway setup agent`"*. That is a **nudge, not a failure** — the
+  variables are still set. Confirm with `railway variables --kv` rather than
+  re-running or installing the agent tooling.
+- Without `railway domain`, the service builds and runs but is unreachable from the
+  internet, which looks like a broken deploy.
+- The deploy answered `/health` about 45 s after `railway up` returned.
 
 ### Why `SUPABASE_JWT_SECRET` must stay unset in production
 
@@ -253,32 +415,56 @@ is also literally the only variable this API needs beyond `SUPABASE_URL` and `PO
 
 ### Verify the Railway deployment
 
-```bash
-curl https://<railway-domain>/health
-# expect: {"status":"ok"}
-```
-
-For `/me`, grab a real access token from the hosted web session (Step 3): open
-DevTools on `http://localhost:3000` after signing in, run
-`await (await import('/*your supabase client path*/')).createClient().auth.getSession()`
-in the console (or simpler: Application/Storage tab → find the Supabase
-`sb-<project-ref>-auth-token` entry → the `access_token` field), then:
+You do **not** need to dig a token out of DevTools. A real ES256 access token can be
+minted server-side with the service_role key, without setting a password on a
+Google-only account: `generate_link` returns an `action_link`, and fetching that link
+*without following redirects* yields a `Location` header containing `#access_token=`.
 
 ```bash
-curl https://<railway-domain>/me -H "Authorization: Bearer <access_token>"
-# expect: {"id":"<your user id>","email":"<your email>"}
+# 1. mint (redirect_to must be an allow-listed URL)
+ACTION=$(curl -s -X POST "https://<project-ref>.supabase.co/auth/v1/admin/generate_link" \
+  -H "apikey: $SERVICE_ROLE_KEY" -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"magiclink","email":"<you>","redirect_to":"http://localhost:3000/auth/callback"}' \
+  | node -pe "JSON.parse(require('fs').readFileSync(0)).action_link")
+
+# 2. exchange for a token (do not follow the redirect)
+TOKEN=$(curl -s -i "$ACTION" | grep -i '^location:' | sed -E 's/.*access_token=([^&]+).*/\1/')
 ```
+
+Delete the token afterwards — it is a live credential.
+
+Actual results against `https://cortex-api-production-8e4e.up.railway.app`:
+
+| Request | Response |
+| --- | --- |
+| `GET /health` | `200 {"status":"ok"}` |
+| `GET /me` (no token) | `401 {"message":"Missing bearer token",...}` |
+| `GET /me` (garbage token) | `401 {"message":"Invalid token",...}` |
+| `GET /me` (real ES256 JWT) | `200 {"id":"5f9ef175-…","email":"phuong011999vn@gmail.com"}` |
+
+The minted token's header decoded to `alg: ES256`, confirming empirically that the
+project issues asymmetric tokens and that the JWKS path — not `SUPABASE_JWT_SECRET` —
+is the correct verification strategy. The returned `id` matches the `auth.users` row
+from Steps 3-4.
 
 ## Verification checklist (Phase 0 demo criteria)
 
-- [ ] `pnpm turbo run typecheck lint test` green locally and in CI
-- [ ] RLS isolation suite green (cross-user reads provably empty on every
-      client-visible table) — already covered by existing tests from earlier tasks
-- [ ] Invite gate: a Google account **not** in `allowed_emails` cannot sign up
-      (Step 3's negative check)
-- [ ] Same Google account signed in on web (hosted, Step 3) and phone (Step 4)
-- [ ] `curl https://<railway-domain>/health` → `{"status":"ok"}`
-- [ ] `curl https://<railway-domain>/me -H "Authorization: Bearer <token>"` →
+- [x] `pnpm turbo run typecheck lint test` — full suite green in CI (run
+      `30680043647` on `main`). `typecheck` + `lint` re-run locally after the
+      deploy-phase config changes: 10/10 tasks pass. The `test` task was **not**
+      re-run locally, because `@cortex/db` and `@cortex/api` need Docker for
+      `supabase start` and Docker was not running; those changes were config/docs
+      only and touch no test path.
+- [x] RLS isolation suite green (cross-user reads provably empty on every
+      client-visible table) — covered by the existing suite, run in CI
+- [x] Invite gate: a non-allow-listed account cannot sign up — the trigger fired on a
+      real admin-API signup attempt (`P0001 Signup not allowed for stranger@example.com`)
+      and created no row; `auth.users` still holds exactly one user
+- [x] Same Google account signed in on web (hosted, Step 3) and phone (Step 4) —
+      one `auth.users` row, `last_sign_in_at` advanced `03:08:34Z` → `05:04:17Z`
+- [x] `curl https://cortex-api-production-8e4e.up.railway.app/health` → `{"status":"ok"}`
+- [x] `curl .../me -H "Authorization: Bearer <token>"` →
       your real id + email
 
 ---
