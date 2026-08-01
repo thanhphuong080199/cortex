@@ -26,13 +26,17 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Turbo's own task graph (turbo.json) makes `test` depend on `^build`, which would
-      # pull in @cortex/db and @cortex/api here. Those need a live Supabase stack, so their
-      # tests run only in the db-tests job below — here we build+typecheck+lint everything,
-      # then unit-test only the package with no external dependencies.
       - run: pnpm turbo run build typecheck lint
 
-      - run: pnpm --filter @cortex/shared test
+      # @cortex/db and @cortex/api need a live Supabase stack, so their tests run only in
+      # the db-tests job below; here we unit-test the one package that needs no external
+      # services. `--filter` keeps that boundary: turbo's `test` -> `^build` edge pulls in
+      # only this package's own dependency builds (@cortex/config#build,
+      # @cortex/shared#build), never another package's `test`. Same rule as the db-tests
+      # job — always the turbo form, never `pnpm --filter @cortex/shared test`, which
+      # bypasses the graph and tests whatever stale dist/ is lying around (issue log
+      # A7/B5/E8).
+      - run: pnpm turbo run test --filter=@cortex/shared
 
   db-tests:
     name: db + api tests (against local Supabase stack)
@@ -88,21 +92,33 @@ jobs:
             echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY"
           } >> "$GITHUB_ENV"
 
-      # @cortex/shared and @cortex/core are consumed as compiled dist/, so the filtered
-      # test commands below cannot resolve them until they are built. The checks job
-      # builds in a separate runner, so its output is not available here.
-      - name: Build workspace packages the test suites import
-        run: pnpm turbo run build --filter=@cortex/shared --filter=@cortex/core
+      # Every vitest config sets `setupFiles: ["dotenv/config"]`, so a `.env` sitting in a
+      # package directory is loaded into the test process and silently backfills anything
+      # missing from the real environment. Developers have those files locally (gitignored);
+      # CI must not, or it stops testing the path production and this workflow actually use.
+      # That difference is exactly what hid the turbo strict-env-mode bug in E8: locally
+      # dotenv refilled SUPABASE_*, so the suites passed, and only CI — with no `.env` —
+      # failed. If a `.env` ever reaches a runner, these suites would start passing for the
+      # wrong reason, so fail loudly instead.
+      - name: Assert no .env files (they would mask missing turbo env declarations)
+        run: |
+          found=$(find . -name .env -not -path '*/node_modules/*')
+          if [ -n "$found" ]; then
+            echo "::error::.env file(s) present on the runner; CI must rely on real env vars, not dotenv:"
+            echo "$found"
+            exit 1
+          fi
 
-      # @cortex/db's tests are not idempotent across repeated runs against the same
-      # database (unique-constraint collisions on re-insert), but a freshly started CI
-      # Postgres is already at the post-migration/seed state `db reset` produces, so no
-      # reset is needed here.
+      # ALWAYS `turbo run test --filter=...`, never `pnpm --filter ... test`:
+      # @cortex/shared and @cortex/core are consumed as compiled dist/, and only turbo's
+      # `test` -> `^build` dependency rebuilds them first. The pnpm-filtered form tests
+      # against whatever stale dist/ happens to be lying around, which reads as "my edit
+      # didn't take" (issue log A7/B5).
       - name: Run db tests (includes the RLS cross-user isolation suite)
-        run: pnpm --filter @cortex/db test
+        run: pnpm turbo run test --filter=@cortex/db
 
       - name: Run api tests
-        run: pnpm --filter @cortex/api test
+        run: pnpm turbo run test --filter=@cortex/api
 
       - name: Run core tests (NoteService / TagService / ExportService against RLS)
-        run: pnpm --filter @cortex/core test
+        run: pnpm turbo run test --filter=@cortex/core

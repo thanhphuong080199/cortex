@@ -29,6 +29,10 @@ describe("domain schema", () => {
 
   it("memory_facts are read-only for clients", async () => {
     const { client, id } = await makeUser("schema-b@test.local");
+    // Idempotent across reruns without `supabase db reset` (same reason as the cleanup
+    // in rls-isolation.test.ts): the exact row count below is the assertion, so a
+    // leftover fact from a prior run turns a passing test into `expected 1, got 2`.
+    await admin.from("memory_facts").delete().eq("user_id", id);
     const { error: insertErr } = await client.from("memory_facts")
       .insert({ user_id: id, category: "preference", statement: "x", confidence: 0.5 });
     expect(insertErr).not.toBeNull();                       // no insert policy
@@ -50,6 +54,9 @@ describe("domain schema", () => {
 
   it("digests are read-only for clients", async () => {
     const { client, id } = await makeUser("schema-b@test.local");
+    // Idempotency: digests has unique (user_id, period, period_start), so the admin
+    // insert below is a 23505 on the second run, and the row count is the assertion.
+    await admin.from("digests").delete().eq("user_id", id);
     const { error: insertErr } = await client.from("digests")
       .insert({ user_id: id, period: "weekly", period_start: "2026-07-27", period_end: "2026-08-02" });
     expect(insertErr).not.toBeNull();                       // no insert policy / grant
@@ -62,6 +69,10 @@ describe("domain schema", () => {
 
   it("client-writable tables accept inserts across the FK chain", async () => {
     const { client, id } = await makeUser("schema-b@test.local");
+    // Idempotency: tags has unique (user_id, lower(name)) where deleted_at is null, so
+    // "chain-tag" collides on the second run. Deleting it cascades to note_tags
+    // (00003_organization.sql), clearing the rest of this test's fixtures with it.
+    await client.from("tags").delete().eq("name", "chain-tag");
 
     const { data: note, error: noteErr } = await client.from("notes")
       .insert({ user_id: id, content: "primary note" }).select("id").single();

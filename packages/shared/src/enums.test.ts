@@ -16,7 +16,7 @@ describe("shared enums", () => {
     expect(() => noteSourceType.parse("sms")).toThrow();
   });
   it("pins embedding contract", () => {
-    expect(EMBEDDING_DIM).toBe(1024);
-    expect(EMBEDDING_MODEL).toBe("voyage-3.5");
+    expect(EMBEDDING_DIM).toBe(1536);
+    expect(EMBEDDING_MODEL).toBe("gemini-embedding-001");
   });
 });

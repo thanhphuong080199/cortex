@@ -6,11 +6,15 @@ const CLIENT_TABLES = [
   "notes", "tags", "note_tags", "links", "tasks", "review_queue",
   "digests", "memory_facts", "chat_sessions", "chat_messages",
   "calendar_links", "attachments",
+  // Life-domain tables (00013). Spec §5 calls RLS the primary real protection for
+  // health/mood/finance rows, so these carry the same provable isolation as the rest.
+  "media_items", "checkins", "flashcards",
 ];
 
 let alice: { client: SupabaseClient; id: string };
 let bob: { client: SupabaseClient; id: string };
 let aliceNoteId: string;
+let aliceMediaItemId: string;
 
 beforeAll(async () => {
   alice = await makeUser("alice@test.local");
@@ -22,6 +26,20 @@ beforeAll(async () => {
     .insert({ user_id: alice.id, title: "secret", content: "alice only" })
     .select("id").single();
   aliceNoteId = data!.id;
+
+  // One Alice row per 00013 table: without these, bob's zero-rows assertion below
+  // passes vacuously for media_items/checkins/flashcards -- there'd be nothing to leak.
+  await alice.client.from("media_items").delete().eq("title", "rls-fixture");
+  const { data: media } = await alice.client.from("media_items")
+    .insert({ user_id: alice.id, kind: "movie", title: "rls-fixture" })
+    .select("id").single();
+  aliceMediaItemId = media!.id;
+  await alice.client.from("checkins").delete().eq("label", "rls-fixture");
+  await alice.client.from("checkins")
+    .insert({ user_id: alice.id, mood: 3, label: "rls-fixture" });
+  await alice.client.from("flashcards").delete().eq("front", "rls-fixture");
+  await alice.client.from("flashcards")
+    .insert({ user_id: alice.id, front: "rls-fixture", back: "b" });
 });
 
 describe("cross-user isolation", () => {
@@ -72,6 +90,23 @@ describe("cross-user isolation", () => {
     const { error } = await bob.client.from("notes")
       .insert({ user_id: alice.id, content: "forged" });
     expect(error).not.toBeNull();                      // with check blocks foreign user_id
+  });
+
+  it("bob cannot attach his note to alice's media item (owner-scoped FK, 00014)", async () => {
+    // FK checks bypass RLS, so the 00013 single-column FK would have accepted this.
+    // The composite (media_item_id, user_id) -> media_items (id, user_id) FK makes a
+    // cross-user reference a constraint violation, not a silent link.
+    const { error } = await bob.client.from("notes")
+      .insert({ user_id: bob.id, content: "x", media_item_id: aliceMediaItemId });
+    expect(error).not.toBeNull();
+    expect(error?.code).toBe("23503");                 // foreign_key_violation
+
+    // Positive control: the same-owner pairing still works.
+    const { error: ownError } = await alice.client.from("notes")
+      .insert({ user_id: alice.id, content: "x", media_item_id: aliceMediaItemId });
+    expect(ownError).toBeNull();
+    await alice.client.from("notes").delete()
+      .eq("user_id", alice.id).eq("media_item_id", aliceMediaItemId);
   });
 
   it("anonymous clients are denied at the grant layer (permission denied, not RLS)", async () => {

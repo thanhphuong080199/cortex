@@ -17,8 +17,9 @@ API Dockerfile) is already implemented and verified locally; see
 > **Deploying an already-provisioned environment?** Steps 1-6 are one-time setup. For
 > shipping new code to the environment that already exists, jump to
 > [Is there CI/CD?](#is-there-cicd-no--deploys-are-manual) — nothing deploys on merge,
-> and the order (schema → env vars → app) matters. Phase 1a additionally requires
-> [its own checklist](#phase-1a--deploy-checklist-web-notes).
+> and the order (schema → env vars → app) matters. Phases 1a and 1c additionally require
+> their own checklists ([1a](#phase-1a--deploy-checklist-web-notes),
+> [1c](#phase-1c--deploy-checklist-life-domain-capture)).
 
 ## Provisioned environment (current state)
 
@@ -636,12 +637,131 @@ Consequences, all already applied:
   trailing `...`, which pulls in dependencies). With a bare `--filter @cortex/api`, the
   image builds successfully and then dies at startup on
   `Cannot find module .../packages/core/src/supabase.js`.
-- `.github/workflows/ci.yml`'s `db-tests` job builds `@cortex/shared` and `@cortex/core`
-  before running the filtered test commands; that job runs on a different runner from
-  the `checks` job, so it cannot reuse its build output.
+- `.github/workflows/ci.yml`'s `db-tests` job runs its test steps through
+  `pnpm turbo run test --filter=...`, whose `test → ^build` dependency rebuilds
+  `@cortex/shared` / `@cortex/core` first (they are consumed as compiled `dist/`).
+  Never switch these back to `pnpm --filter <pkg> test` — that form tests against
+  whatever stale `dist/` exists (issue log A7/B5).
 - Verified locally end to end: `docker build -f apps/api/Dockerfile .` → `docker run` →
   `/health` returns `{"status":"ok"}` with the notes/tags/export routes mapped in the
   startup log.
+
+---
+
+## Phase 1c — deploy checklist (life-domain capture)
+
+### 1. Push the new migrations
+
+```bash
+pnpm exec supabase db push        # applies 00012 + 00013 to the hosted project
+pnpm exec supabase migration list # confirm local == remote (should now show 00001..00013)
+```
+
+- `00012_embedding_dims_gemini.sql` changes `note_chunks.embedding` and
+  `memory_facts.embedding` from `vector(1024)` to `vector(1536)` for
+  `gemini-embedding-001`, and rebuilds `note_chunks_embedding_idx` around the new
+  dimension. **Safe to run on the hosted project: both columns are empty**, because no
+  enrichment pipeline exists before phase 2. If this migration is ever re-run against a
+  database that *does* hold embeddings, it will fail — by then it needs a re-embed, not
+  an `alter type`.
+- `00013_life_domains.sql` adds `media_items`, `checkins`, `flashcards` and the
+  `notes.domain` / `domain_meta` / `media_item_id` columns, with RLS, grants, and the
+  three tables added to the `supabase_realtime` publication.
+
+> ⚠️ **Vector types must be schema-qualified in migrations — hosted-only failure.**
+> The first push of `00012` failed with:
+>
+> ```
+> LegacyDbPushApplyError ... At statement: 1
+> alter table public.note_chunks alter column embedding type vector(1536)
+> ```
+>
+> `supabase db push` logs `Initialising login role...` and applies migrations as a
+> dedicated role whose `search_path` does **not** include `extensions`, which is where
+> `00001` installs pgvector. Local `supabase db reset` resolves `vector` fine via
+> `config.toml`'s `extra_search_path`, so **this class of bug is invisible until the
+> hosted push** — and the CLI truncates the underlying Postgres error, so the message
+> above is all you get. Write `extensions.vector(1536)` and
+> `extensions.vector_cosine_ops`, exactly as `00001`'s own comment prescribes.
+>
+> The failed push rolled back cleanly (`note_chunks_embedding_idx` survived), so a
+> partial apply is not something to fix by hand — but check before assuming.
+>
+> Note `00002`/`00005` use *unqualified* `vector(1024)` and pushed successfully at phase
+> 0, so this is a behaviour change in the CLI's migration role, not a long-standing rule.
+> Qualify vector references in any new migration regardless.
+
+**Applied to the hosted project on 2026-08-01**, verified by querying the catalog:
+`note_chunks.embedding` and `memory_facts.embedding` are both `vector(1536)`; all three
+new tables report `relrowsecurity = true` with one policy and a `SELECT` grant to
+`authenticated`; `notes` has `domain, domain_meta, media_item_id`; and all three tables
+are in the `supabase_realtime` publication.
+
+> **The grant block in 00013 is load-bearing.** `00009_revoke_default_grants.sql`
+> changed the default privileges template, so tables created after it start with **no**
+> grants at all. Without the explicit `grant select, insert, update, delete ... to
+> authenticated`, `authenticated` never reaches RLS and every read returns
+> `42501 permission denied` — which looks like an RLS misconfiguration and is not one.
+
+### 2. Environment variables — nothing new in 1c
+
+**No new env vars.** 1c is pure CRUD on the 1a foundation; it calls no AI provider.
+
+> **Do not add `GEMINI_API_KEY` (or any provider key) yet.** The provider switch in
+> `00012` is a *schema* change only — `EMBEDDING_MODEL` in `@cortex/shared` names the
+> model that phase 2 will call. Adding the key now puts an unused live credential in
+> Railway. Phase 2 introduces it, together with its entry-checklist item: **verify the
+> Gemini project is on the paid tier**, because free-tier prompts are used for training
+> and health/mood/finance content flows through this API (life-domains spec §5).
+
+### 3. Redeploy the API
+
+1c adds two routes (`POST /checkins`, `DELETE /checkins/:id`, `POST /media-log`), so the
+running container must be replaced or they 404:
+
+```bash
+railway up --service cortex-api --detach --yes
+```
+
+Verify with a write, not `/health` (see [the section below](#verify-a-deploy-with-a-write-not-with-health)):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST "$API_URL/checkins" -H "Authorization: Bearer <a real user JWT>" \
+  -H 'Content-Type: application/json' -d '{"mood":4}'
+# 201 = working. 404 = old code still deployed. 500 = env var missing.
+```
+
+### 4. Web deployment
+
+No new variables. Redeploy so the check-in widget, media log form, and domain filter
+ship; the domain filter reads `?domain=` and queries `notes.domain`, which requires
+`00013` to already be applied (step 1 before step 4, as always).
+
+### 5. Post-review hardening — `00014` (applied 2026-08-01)
+
+The phase-1c issue-log review produced `00014_phase1c_hardening.sql`, pushed the same
+day (local == remote through `00014`):
+
+- **`checkins` / `flashcards` get `updated_at` + `moddatetime`** per `00002`'s rule —
+  PowerSync's incremental cursor (phase 1b) needs `updated_at` to advance on every
+  UPDATE, and both tables mutate (soft-deletes; SM-2 scheduling rewrites).
+- **`notes.media_item_id` is now a composite FK** `(media_item_id, user_id) →
+  media_items (id, user_id)` with PG15's `on delete set null (media_item_id)`. FK checks
+  bypass RLS, so the old single-column FK accepted a reference to another user's item.
+- **`00012` now carries a fail-fast guard**: if either embedding column holds data, it
+  raises instead of silently being a different operation (the alter-type is only valid
+  on empty columns; populated columns need a re-embed). The edit is to an
+  already-applied migration, which is safe here — applied environments never re-run it,
+  and fresh replays hit the guard while the columns are still empty.
+
+### Not in 1c — PowerSync sync rules
+
+`media_items`, `checkins` and `flashcards` must be added to the PowerSync sync rules so
+they reach the mobile replica. That is a **phase 1b** item (life-domains spec §7): no
+PowerSync service exists yet, so there is nothing to configure here. When 1b lands, the
+sync rules and the RLS policies for these three tables get reviewed in the same PR —
+they are two independent isolation layers over the same rows (parent spec §11).
 
 ---
 
