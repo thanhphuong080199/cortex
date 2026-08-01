@@ -74,6 +74,20 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
 .checkin .hint button { border: none; background: none; padding: 0 2px; color: var(--accent); }
 
 .capture { margin-bottom: 8px; }
+
+.media-panel { margin-bottom: 16px; }
+.media-form {
+  display: flex; flex-direction: column; gap: 9px; margin-top: 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px 13px;
+}
+.media-row { display: flex; gap: 8px; align-items: center; }
+.media-row input[type="text"] { flex: 1; }
+.media-form select {
+  font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px;
+}
+.media-form button.star { border: none; background: none; padding: 2px 3px; font-size: 17px; color: var(--accent); }
+.media-form .media-row:last-of-type { justify-content: space-between; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 6px 2px 18px; }
 .error { color: var(--danger); font-size: 13.5px; }
 

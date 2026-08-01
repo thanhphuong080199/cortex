@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { NOTE_VIEWS, VIEW_LABELS, parseView } from "@/lib/note-views";
 import { CheckinWidget } from "./checkin-widget";
 import { ExportButton } from "./export-button";
+import { MediaLogPanel } from "./media-log-panel";
 import { NoteList, type NoteRow } from "./note-list";
 import { QuickCapture } from "./quick-capture";
 
@@ -65,6 +66,8 @@ export default async function Home(
       <CheckinWidget token={session.access_token} />
 
       <QuickCapture token={session.access_token} />
+
+      <MediaLogPanel token={session.access_token} />
 
       <nav className="views">
         {NOTE_VIEWS.map((v) => (
