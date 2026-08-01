@@ -15,7 +15,10 @@ export function TagChips({ token, noteId, initialTags }: {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Bounded: same reasoning as the media autocomplete -- an unbounded picker query
+    // grows with the library forever.
     void createClient().from("tags").select("id, name").is("deleted_at", null)
+      .order("name").limit(200)
       .then(({ data }) => setAll((data as TagRow[] | null) ?? []));
   }, []);
 

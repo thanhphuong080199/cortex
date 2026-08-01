@@ -64,7 +64,9 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
    one of them is the entire interaction in the common case. */
 .checkin { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
 .checkin .moods { display: flex; gap: 4px; align-items: center; }
-.checkin .moods button { font-size: 20px; line-height: 1; padding: 5px 9px; }
+/* min 44px: these ARE the one-tap mobile interaction, so they get the platform
+   touch-target guideline, not just the 24px WCAG floor. */
+.checkin .moods button { font-size: 22px; line-height: 1; padding: 9px 11px; min-width: 44px; min-height: 44px; }
 .checkin .moods button.more { font-size: 12.5px; color: var(--muted); padding: 6px 9px; }
 .checkin-more { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 13px; }
 .checkin-more > div { display: flex; gap: 4px; }
@@ -89,7 +91,14 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
   font: inherit; color: var(--text); background: var(--bg);
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px;
 }
-.media-form button.star { border: none; background: none; padding: 2px 3px; font-size: 17px; color: var(--accent); }
+/* 24x24 minimum with spacing (WCAG 2.5.8): a mis-tap here doesn't just set the wrong
+   star -- re-tapping the current star CLEARS the rating, so cramped targets silently
+   produce "no rating". */
+.media-form button.star {
+  border: none; background: none; font-size: 19px; color: var(--accent);
+  min-width: 28px; min-height: 28px; padding: 3px;
+}
+.media-form [role="radiogroup"] { display: flex; gap: 4px; }
 .media-form .media-row:last-of-type { justify-content: space-between; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 6px 2px 18px; }
 .error { color: var(--danger); font-size: 13.5px; }

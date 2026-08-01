@@ -1,9 +1,18 @@
 "use client";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { api } from "@/lib/api";
 import { buildCheckinPayload } from "@/lib/checkin";
 
-const MOODS = ["😞", "😕", "😐", "🙂", "😄"];   // 1..5
+// 1..5. The valence word goes into the accessible name: the emoji is the only visual
+// carrier of meaning and aria-label suppresses it, so "Mood 2 of 5" alone would leave a
+// screen-reader user picking blind.
+const MOODS = [
+  { face: "😞", word: "very bad" },
+  { face: "😕", word: "bad" },
+  { face: "😐", word: "neutral" },
+  { face: "🙂", word: "good" },
+  { face: "😄", word: "very good" },
+];
 
 /**
  * Two taps maximum, and one is the common case (spec §3): tapping a face logs the mood
@@ -20,6 +29,17 @@ export function CheckinWidget({ token }: { token: string }) {
   const [label, setLabel] = useState("");
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
+  const energyLabelId = useId();
+
+  function toggleMore() {
+    // Collapsing discards the hidden state: a face tapped after "less" must log ONLY the
+    // mood, not an energy/label the user believes they dismissed and can no longer see.
+    if (expanded) {
+      setEnergy(undefined);
+      setLabel("");
+    }
+    setExpanded(!expanded);
+  }
 
   async function log(mood?: number) {
     if (busy) return;
@@ -34,43 +54,50 @@ export function CheckinWidget({ token }: { token: string }) {
       setLabel("");
       setExpanded(false);
     } catch {
-      setError(true);                         // state is kept, so tapping again just works
+      // Input state is kept so tapping again just works -- but the PREVIOUS check-in's
+      // undo affordance must go: "logged ✓ undo" next to "couldn't log" reads as undoing
+      // the failure, and would actually delete the earlier good check-in.
+      setLastId(null);
+      setError(true);
     } finally {
       setBusy(false);
     }
   }
 
   async function undo() {
-    if (!lastId) return;
+    if (!lastId || busy) return;
     const id = lastId;
     setLastId(null);                          // optimistic: undo must feel instant
+    setError(false);
+    setBusy(true);
     try {
       await api.deleteCheckin(token, id);
     } catch {
       setLastId(id);                          // put the affordance back so it can be retried
       setError(true);
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
     <div className="checkin" aria-label="Mood check-in">
       <div className="moods" role="group" aria-label="Mood">
-        {MOODS.map((face, i) => (
+        {MOODS.map(({ face, word }, i) => (
           <button key={face} type="button" disabled={busy}
-                  aria-label={`Mood ${i + 1} of 5`} onClick={() => void log(i + 1)}>
+                  aria-label={`Mood ${i + 1} of 5 — ${word}`} onClick={() => void log(i + 1)}>
             {face}
           </button>
         ))}
-        <button type="button" className="more" aria-expanded={expanded}
-                onClick={() => setExpanded((v) => !v)}>
+        <button type="button" className="more" aria-expanded={expanded} onClick={toggleMore}>
           {expanded ? "less" : "more"}
         </button>
       </div>
 
       {expanded && (
         <div className="checkin-more">
-          <span id="energy-label">Energy</span>
-          <div role="group" aria-labelledby="energy-label">
+          <span id={energyLabelId}>Energy</span>
+          <div role="group" aria-labelledby={energyLabelId}>
             {[1, 2, 3, 4, 5].map((n) => (
               <button key={n} type="button" aria-pressed={energy === n}
                       onClick={() => setEnergy(energy === n ? undefined : n)}>
@@ -88,8 +115,11 @@ export function CheckinWidget({ token }: { token: string }) {
       )}
 
       {lastId && (
-        <span role="status" className="hint">
-          logged ✓ <button type="button" onClick={() => void undo()}>undo</button>
+        <span className="hint">
+          {/* role="status" wraps only the text: some screen readers re-announce an entire
+              live region on update, and the undo button doesn't belong in that. */}
+          <span role="status">logged ✓</span>{" "}
+          <button type="button" disabled={busy} onClick={() => void undo()}>undo</button>
         </span>
       )}
       {error && <span role="alert" className="error">couldn&apos;t log — tap again</span>}

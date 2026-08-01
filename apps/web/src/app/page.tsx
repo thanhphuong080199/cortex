@@ -109,6 +109,7 @@ export default async function Home(
       </form>
 
       <NoteList initialNotes={notes} view={view} domain={domain}
+                q={q || undefined} tag={tag || undefined}
                 userId={user.id} token={session.access_token} />
     </main>
   );

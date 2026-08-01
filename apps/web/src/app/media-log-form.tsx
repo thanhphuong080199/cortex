@@ -4,7 +4,13 @@ import { mediaKind, type LogMediaInput } from "@cortex/shared";
 import { api } from "@/lib/api";
 import { createClient } from "@/lib/supabase/client";
 
-interface MediaItemOption { title: string; kind: string }
+interface MediaItemOption { title: string }
+
+const STATUSES: { value: NonNullable<LogMediaInput["status"]>; label: string }[] = [
+  { value: "finished", label: "finished" },
+  { value: "in_progress", label: "in progress" },
+  { value: "abandoned", label: "abandoned" },
+];
 
 /**
  * The item is an entity, the log is a note (spec §2.2). Find-or-create runs server-side,
@@ -18,16 +24,28 @@ export function MediaLogForm({ token, onDone }: { token: string; onDone: () => v
   const [kind, setKind] = useState<LogMediaInput["kind"]>("movie");
   const [title, setTitle] = useState("");
   const [rating, setRating] = useState<number | undefined>();
+  const [status, setStatus] = useState<NonNullable<LogMediaInput["status"]>>("finished");
   const [impression, setImpression] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [items, setItems] = useState<MediaItemOption[]>([]);
+  const [itemsFailed, setItemsFailed] = useState(false);
 
   useEffect(() => {
     // Reads go straight to Supabase under RLS; only the write goes through the API.
-    void createClient().from("media_items").select("title, kind").is("deleted_at", null)
-      .then(({ data }) => setItems((data as MediaItemOption[] | null) ?? []));
-  }, []);
+    // Narrowed server-side (kind + limit) so this stays cheap as the library grows;
+    // the same title in two kinds is two different items, so cross-kind rows are noise.
+    let stale = false;
+    void createClient().from("media_items").select("title")
+      .eq("kind", kind).is("deleted_at", null)
+      .order("title").limit(200)
+      .then(({ data, error: fetchError }) => {
+        if (stale) return;
+        setItemsFailed(fetchError !== null);
+        setItems((data as MediaItemOption[] | null) ?? []);
+      });
+    return () => { stale = true; };
+  }, [kind]);
 
   async function submit() {
     if (!title.trim() || saving) return;
@@ -35,7 +53,7 @@ export function MediaLogForm({ token, onDone }: { token: string; onDone: () => v
     setError(null);
     try {
       await api.logMedia(token, {
-        kind, title,
+        kind, title, status,
         ...(rating ? { rating } : {}),
         ...(impression.trim() ? { impression } : {}),
       });
@@ -59,26 +77,33 @@ export function MediaLogForm({ token, onDone }: { token: string; onDone: () => v
                aria-label="Title" disabled={saving} maxLength={500}
                onChange={(e) => setTitle(e.target.value)} />
         <datalist id="media-titles">
-          {/* Filtered by kind: the same title in two kinds is two different items. */}
-          {items.filter((i) => i.kind === kind).map((i) => <option key={i.title} value={i.title} />)}
+          {items.map((i) => <option key={i.title} value={i.title} />)}
         </datalist>
       </div>
 
       <div className="media-row">
-        <div role="group" aria-label="Rating">
+        {/* Single-select semantics: radios, not toggle buttons -- with aria-pressed the
+            filled-but-unpressed stars 1..(n-1) contradicted what a sighted user sees. */}
+        <div role="radiogroup" aria-label="Rating">
           {[1, 2, 3, 4, 5].map((n) => (
             <button type="button" key={n} className="star" disabled={saving}
-                    aria-label={`${n} star${n > 1 ? "s" : ""}`} aria-pressed={rating === n}
+                    role="radio" aria-checked={rating === n}
+                    aria-label={`${n} star${n > 1 ? "s" : ""}`}
                     onClick={() => setRating(rating === n ? undefined : n)}>
               {n <= (rating ?? 0) ? "★" : "☆"}
             </button>
           ))}
         </div>
+        <select value={status} aria-label="Status" disabled={saving}
+                onChange={(e) => setStatus(e.target.value as NonNullable<LogMediaInput["status"]>)}>
+          {STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+        </select>
         <button type="submit" disabled={saving || !title.trim()}>{saving ? "Logging…" : "Log"}</button>
       </div>
 
       <textarea rows={3} value={impression} placeholder="impressions…" aria-label="Impressions"
                 disabled={saving} onChange={(e) => setImpression(e.target.value)} />
+      {itemsFailed && <p className="hint">Couldn&apos;t load your library for autocomplete — logging still works.</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </form>
   );
