@@ -159,6 +159,10 @@ compensated with a hand-maintained build step. CI now runs
 `pnpm turbo run test --filter=<pkg>` and the manual build step is gone. The rule is
 recorded in `ci.yml` itself and in `docs/deploy.md`. Commit `2e99f6d`.
 
+**Superseded in part by E8:** this fix broke CI (turbo's strict env mode strips undeclared
+env vars) and its "no external dependencies" justification for exempting `@cortex/shared`
+was wrong. Both corrected there.
+
 ### B6. `00012` becomes unsafe once embeddings exist — RESOLVED
 
 `00012` now opens with a fail-fast guard: if either embedding column holds a non-null
@@ -249,6 +253,30 @@ targets (a mis-tap on the current star *clears* the rating, so cramped targets s
 produced "no rating"). Mood buttons carry valence in their labels ("Mood 1 of 5 — very
 bad") and 44px targets; hardcoded `id="energy-label"` → `useId`; `role="status"` no
 longer wraps the undo button.
+
+### E8. B5's fix broke CI: turbo strict env mode stripped `SUPABASE_*` — FIXED
+
+| | |
+|---|---|
+| **Symptom** | PR #4's `db + api tests` job failed on every suite at import time with `Error: supabaseUrl is required` (`packages/db/src/test/clients.ts:7`). The `build, typecheck, lint` job was green. Nothing in the diff touched Supabase wiring. |
+| **Cause** | B5 (`2e99f6d`) moved the CI test steps to `pnpm turbo run test --filter=<pkg>`. **Turbo 2.x runs tasks in strict env mode**: a task process only receives env vars declared in `turbo.json`, and it declared none. The `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` the workflow writes to `$GITHUB_ENV` were stripped before vitest started. Confirmed via `turbo … --dry-run=json`: `envMode: strict`, `specified.env: []`. |
+| **Why it passed locally** | Every `vitest.config.ts` sets `setupFiles: ["dotenv/config"]` and each package carries a gitignored `.env`. dotenv refilled the vars *inside* the test process, so the stripping was invisible on a dev machine — the bug was only reachable where no `.env` exists. Reproduced locally only by moving the three `.env` files aside. |
+| **Fix** | `turbo.json`'s `test` task now declares `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET`, `CORS_ORIGINS`, `PORT` under `env` (not `passThroughEnv`, so the values fold into the task hash and re-pointing at another stack invalidates the cache). Commit `f3c6a86`. |
+| **Guard** | CI now fails if any `.env` reaches a runner, so these suites can never start passing via dotenv instead of the real environment. No `.env` is tracked and all are gitignored, so a clean checkout has none. |
+| **Status** | **Fixed.** Both PR #4 checks green. |
+
+**Lesson.** B5's rule ("always the turbo form") is right, but routing a step through turbo
+silently changes its environment contract as well as its dependency graph. Any env var a
+workflow exports for a turbo-run task must be declared in `turbo.json` or it does not
+exist to that task.
+
+*Correction to B5's note below:* it justified running `@cortex/shared` outside turbo as
+"the package with no external dependencies". `@cortex/shared` does have a workspace
+dependency (`@cortex/config`) and ships compiled `dist/`, so it was subject to the same
+A7 staleness the rule exists to prevent. The `--filter` form pulls in only that package's
+own dependency builds (`@cortex/config#build`, `@cortex/shared#build`) and never another
+package's `test`, so the stated reason for the exception did not hold; that step is now
+`pnpm turbo run test --filter=@cortex/shared` and the last bypass is gone.
 
 ### Accepted / logged, not fixed
 
