@@ -6,6 +6,9 @@ const CLIENT_TABLES = [
   "notes", "tags", "note_tags", "links", "tasks", "review_queue",
   "digests", "memory_facts", "chat_sessions", "chat_messages",
   "calendar_links", "attachments",
+  // Life-domain tables (00013). Spec §5 calls RLS the primary real protection for
+  // health/mood/finance rows, so these carry the same provable isolation as the rest.
+  "media_items", "checkins", "flashcards",
 ];
 
 let alice: { client: SupabaseClient; id: string };

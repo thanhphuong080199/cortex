@@ -11,6 +11,9 @@ import { z } from "zod";
 //   taskStatus        <-> tasks.status_check
 //   memoryCategory    <-> memory_facts.category_check
 //   memoryStatus      <-> memory_facts.status_check
+//   noteDomain        <-> notes.domain_check
+//   mediaKind         <-> media_items.kind_check
+//   flashcardStatus   <-> flashcards.status_check
 //
 // links.status ('suggested'|'accepted'|'dismissed') and notes.para_status
 // ('none'|'suggested'|'accepted') are DELIBERATELY distinct vocabularies (design spec
@@ -28,6 +31,14 @@ export const memoryCategory = z.enum([
   "habit", "opinion", "skill", "relationship",
 ]);
 export const memoryStatus = z.enum(["proposed", "active", "archived", "rejected"]);
+
+// Life-domain vocabulary (life-domains spec §2.1). `domain` is nullable on notes --
+// these are the values a domained note may carry, not a requirement that it have one.
+export const noteDomain = z.enum(["media", "health", "life", "learning", "finance", "reflection"]);
+export const mediaKind = z.enum(["movie", "tv", "book", "game", "podcast"]);
+// Deliberately NOT suggestionStatus: a card's lifecycle ends in 'suspended' (stop
+// scheduling it), which is not the same act as rejecting a suggestion.
+export const flashcardStatus = z.enum(["suggested", "active", "suspended"]);
 
 // Pinned by 00012_embedding_dims_gemini.sql and asserted against the live column width
 // by packages/db's embedding-dims test. Changing either side alone breaks that test.
