@@ -14,6 +14,12 @@ Console, and Railway — they cannot be scripted end-to-end by an agent. Step 5 
 API Dockerfile) is already implemented and verified locally; see
 [Local Docker verification](#local-docker-verification-already-done) at the bottom.
 
+> **Deploying an already-provisioned environment?** Steps 1-6 are one-time setup. For
+> shipping new code to the environment that already exists, jump to
+> [Is there CI/CD?](#is-there-cicd-no--deploys-are-manual) — nothing deploys on merge,
+> and the order (schema → env vars → app) matters. Phase 1a additionally requires
+> [its own checklist](#phase-1a--deploy-checklist-web-notes).
+
 ## Provisioned environment (current state)
 
 | Item | Value |
@@ -98,7 +104,10 @@ CLIs:
   (`supabase: ^2.110.0` in `package.json`). Do **not** install it globally; every
   command in this doc is invoked as `pnpm exec supabase ...` from the repo root,
   matching what `.github/workflows/ci.yml` does.
-- **Railway CLI** — **not installed on this machine**. Install it first:
+- **Railway CLI** — **installed globally** (`railway 5.30.3`, verified 2026-08-01 at
+  `~/AppData/Roaming/npm/railway.ps1`). It is deliberately *not* a repo dependency:
+  unlike the Supabase CLI it never runs in CI, only from a developer machine. On a
+  machine that lacks it:
   ```bash
   npm install -g @railway/cli
   # or, on Windows PowerShell:
@@ -633,3 +642,60 @@ Consequences, all already applied:
 - Verified locally end to end: `docker build -f apps/api/Dockerfile .` → `docker run` →
   `/health` returns `{"status":"ok"}` with the notes/tags/export routes mapped in the
   startup log.
+
+---
+
+## Is there CI/CD? (No — deploys are manual)
+
+**Merging to `main` deploys nothing.** Verified 2026-08-01 on both sides:
+
+| Layer | State | Evidence |
+| --- | --- | --- |
+| GitHub Actions | build / typecheck / lint / test only | `.github/workflows/ci.yml` defines exactly two jobs, `checks` and `db-tests`. There is no deploy job and no other workflow file. |
+| Railway → GitHub | **not connected** | `railway status --json` reports `source: {"image": null, "repo": null}` for `cortex-api`. With no repo attached there is no push trigger, so Railway never sees a merge. |
+| Database migrations | manual | `supabase db push` is run by a human. Nothing applies migrations automatically. |
+
+So a merge to `main` gives you green checks and **a hosted environment still running the
+previous code**. Shipping is three deliberate steps, in this order:
+
+```bash
+# 1. schema first -- new code usually assumes the new schema, not the reverse
+pnpm exec supabase db push
+pnpm exec supabase migration list          # confirm local == remote
+
+# 2. env vars BEFORE the deploy that needs them (see the phase 1a checklist above).
+#    --skip-deploys avoids redeploying the OLD code just to attach a new variable.
+railway variables --service cortex-api --set-from-stdin SUPABASE_ANON_KEY --skip-deploys
+
+# 3. ship the API
+railway up --service cortex-api --detach --yes
+```
+
+### Verify a deploy with a WRITE, not with `/health`
+
+`/health` touches no Supabase credential, so it returns `200` even when the API is
+completely unable to serve requests. Confirmed locally against the real build: with
+`SUPABASE_ANON_KEY` unset, `/health` answers `200` while an authenticated
+`POST /notes` returns `500 {"message":"Internal error"}` and the container logs
+`Error: supabaseKey is required.` Railway shows that deploy as healthy.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST "$API_URL/notes" -H "Authorization: Bearer <a real user JWT>" \
+  -H 'Content-Type: application/json' -d '{"content":"deploy smoke test"}'
+# 201 = genuinely working. 500 = env var missing. 404 = old code still deployed.
+```
+
+That last case is a useful signal on its own: because Phase 0 had no `/notes` route,
+`404` vs `401` on an *unauthenticated* `POST /notes` tells you at a glance whether the
+running container predates Phase 1a.
+
+### If you want real CD later
+
+Attach the GitHub repo to the Railway service (Railway dashboard → service → Settings →
+Source) and it will deploy on push to `main`. Two caveats before enabling it:
+
+- Migrations still would not run. `supabase db push` would need its own workflow step,
+  gated to run *before* the app deploy, or a deploy will land on an older schema.
+- `apps/api/Dockerfile` expects the **repo root** as build context (it copies
+  `packages/`), which `railway.json` already encodes via `dockerfilePath`.
