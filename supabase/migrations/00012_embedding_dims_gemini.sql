@@ -3,24 +3,33 @@
 -- 3072-dim output at half the storage). No enrichment pipeline exists yet, so both
 -- columns are empty and this is a pure type change -- no re-embedding, no backfill.
 --
--- `vector` lives in the `extensions` schema (00001); the unqualified reference below
--- resolves through the `extra_search_path` configured in supabase/config.toml, exactly
--- as the original `vector(1024)` declarations in 00002/00005 do.
+-- `vector` and `vector_cosine_ops` are SCHEMA-QUALIFIED here, unlike the unqualified
+-- `vector(1024)` in 00002/00005. This is not style -- it is the failure 00001's comment
+-- predicted, hit for real on the first hosted push of this file:
+--
+--   LegacyDbPushApplyError ... At statement: 1
+--   alter table public.note_chunks alter column embedding type vector(1536)
+--
+-- `supabase db push` logs "Initialising login role..." and applies migrations as a
+-- dedicated role whose search_path does NOT include `extensions`, where 00001 installs
+-- pgvector. Local `supabase db reset` resolves it fine via config.toml's
+-- extra_search_path, so this fails ONLY against the hosted project -- and only at deploy
+-- time. Qualifying is the fix 00001 itself prescribes; do not "simplify" it back.
 
 -- note_chunks: the HNSW index is bound to the column's dimension, so it must be dropped
 -- before the type change and rebuilt after. (hnsw supports up to 2000 dims; 1536 is fine.)
 drop index if exists public.note_chunks_embedding_idx;
 alter table public.note_chunks
-  alter column embedding type vector(1536);
+  alter column embedding type extensions.vector(1536);
 create index note_chunks_embedding_idx on public.note_chunks
-  using hnsw (embedding vector_cosine_ops);
+  using hnsw (embedding extensions.vector_cosine_ops);
 
 -- memory_facts has NO index on `embedding` (00005 creates only memory_facts_user_status_idx)
 -- and nothing queries it until the phase-8 memory layer. Adding one here would be new
 -- schema smuggled into a type-change migration, so this stays a bare column alter; the
 -- index belongs in the phase that first does vector search over facts.
 alter table public.memory_facts
-  alter column embedding type vector(1536);
+  alter column embedding type extensions.vector(1536);
 
 -- ============ Test-support introspection helper (service_role only) ============
 -- Third of the narrow SECURITY DEFINER readers described in 00001. packages/db's tests

@@ -666,6 +666,35 @@ pnpm exec supabase migration list # confirm local == remote (should now show 000
   `notes.domain` / `domain_meta` / `media_item_id` columns, with RLS, grants, and the
   three tables added to the `supabase_realtime` publication.
 
+> ⚠️ **Vector types must be schema-qualified in migrations — hosted-only failure.**
+> The first push of `00012` failed with:
+>
+> ```
+> LegacyDbPushApplyError ... At statement: 1
+> alter table public.note_chunks alter column embedding type vector(1536)
+> ```
+>
+> `supabase db push` logs `Initialising login role...` and applies migrations as a
+> dedicated role whose `search_path` does **not** include `extensions`, which is where
+> `00001` installs pgvector. Local `supabase db reset` resolves `vector` fine via
+> `config.toml`'s `extra_search_path`, so **this class of bug is invisible until the
+> hosted push** — and the CLI truncates the underlying Postgres error, so the message
+> above is all you get. Write `extensions.vector(1536)` and
+> `extensions.vector_cosine_ops`, exactly as `00001`'s own comment prescribes.
+>
+> The failed push rolled back cleanly (`note_chunks_embedding_idx` survived), so a
+> partial apply is not something to fix by hand — but check before assuming.
+>
+> Note `00002`/`00005` use *unqualified* `vector(1024)` and pushed successfully at phase
+> 0, so this is a behaviour change in the CLI's migration role, not a long-standing rule.
+> Qualify vector references in any new migration regardless.
+
+**Applied to the hosted project on 2026-08-01**, verified by querying the catalog:
+`note_chunks.embedding` and `memory_facts.embedding` are both `vector(1536)`; all three
+new tables report `relrowsecurity = true` with one policy and a `SELECT` grant to
+`authenticated`; `notes` has `domain, domain_meta, media_item_id`; and all three tables
+are in the `supabase_realtime` publication.
+
 > **The grant block in 00013 is load-bearing.** `00009_revoke_default_grants.sql`
 > changed the default privileges template, so tables created after it start with **no**
 > grants at all. Without the explicit `grant select, insert, update, delete ... to
