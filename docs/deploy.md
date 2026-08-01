@@ -9,10 +9,52 @@ Everything in this doc uses placeholders (`<project-ref>`, `<org-id>`, ...). Nev
 commit the real values that fill them in — they belong in `.env.local` / `.env`
 files (already gitignored) or in the Supabase/Railway/Google dashboards.
 
-Steps 1-4 and 6 below require a human with browser access to Supabase, Google Cloud
+Steps 2-4 and 6 below require a human with browser access to Supabase, Google Cloud
 Console, and Railway — they cannot be scripted end-to-end by an agent. Step 5 (the
 API Dockerfile) is already implemented and verified locally; see
 [Local Docker verification](#local-docker-verification-already-done) at the bottom.
+
+## Provisioned environment (current state)
+
+| Item | Value |
+| --- | --- |
+| Supabase project name | `cortex` |
+| Project ref | `wilssluxogpdrbgffmzc` |
+| Region | `ap-southeast-1` (Singapore) |
+| Dashboard | https://supabase.com/dashboard/project/wilssluxogpdrbgffmzc |
+| API URL | `https://wilssluxogpdrbgffmzc.supabase.co` |
+
+The project ref and API URL are **not** secrets — they ship in every client bundle via
+`NEXT_PUBLIC_SUPABASE_URL`. The DB password, service_role key, and Google client secret
+**are** secrets and live only in a password manager and the dashboards.
+
+Progress against the steps below:
+
+- [x] **Step 1** — project created, linked, all 9 migrations pushed
+      (`00001`..`00009`, confirmed via `supabase migration list`: local == remote),
+      `allowed_emails` seeded with `phuong011999vn@gmail.com` (`owner`).
+- [ ] **Step 2** — Google Cloud OAuth client + Supabase provider config (**human, browser**)
+- [ ] **Step 3** — verify web login end-to-end (blocked on Step 2)
+- [ ] **Step 4** — verify mobile login end-to-end (blocked on Step 2)
+- [x] **Step 5** — API Dockerfile, built and verified locally
+- [ ] **Step 6** — deploy API to Railway (**human, browser login**)
+
+Local client env files are already written and gitignored, pointing at the hosted
+project: `apps/web/.env.local` and `apps/mobile/.env`.
+
+### Verified live against the hosted project after Step 1
+
+Run with the service_role and anon keys, against
+`https://wilssluxogpdrbgffmzc.supabase.co`:
+
+| Check | Result |
+| --- | --- |
+| Non-allow-listed signup (`stranger@example.com`, admin API) | `HTTP 500 {"code":"P0001","message":"Signup not allowed for stranger@example.com"}` — gate fires |
+| `anon` reads `allowed_emails` | `200 []` — server-only table invisible |
+| `anon` reads `notes` | `200 []` — RLS default-deny holds |
+
+This covers the "invite gate rejects non-allow-listed accounts" DoD item at the
+database layer; Step 3 re-confirms it through the real Google OAuth flow.
 
 ## Prerequisites
 
