@@ -104,86 +104,161 @@ Two things worth keeping:
 
 ---
 
-## B. Open
+## B. Open → resolved 2026-08-01 (second pass)
 
-### B1. The API has not been redeployed — new routes 404 in production
+All of section B except B2's interactive click-through and B4 (a billing decision) was
+resolved in the review pass of 2026-08-01. Each entry keeps its original symptom for
+context; resolution appended.
 
-**This is the one that matters.** The hosted schema is now ahead of the hosted code.
+### B1. The API has not been redeployed — RESOLVED
 
-`POST /checkins`, `DELETE /checkins/:id` and `POST /media-log` do not exist on the running
-container. The web UI built in this phase cannot work against production until:
+`POST /checkins`, `DELETE /checkins/:id` and `POST /media-log` did not exist on the
+running container. Redeployed via `railway up` after 00014 was pushed, and verified with
+**writes** against production, per `docs/deploy.md` (never `/health`, which returns 200
+even when the API cannot serve a request):
 
-```bash
-railway up --service cortex-api --detach --yes
-```
+| Request | Result |
+|---|---|
+| `POST /checkins {"mood":4}` | **201** (row deleted again afterwards, 200) |
+| `POST /media-log` incl. new `status: "in_progress"` | **201** |
+| `PATCH /notes/:id {"domain":"health"}` on that media note | **400** — the B3 fix, live |
 
-Verify with a **write**, not `/health` — `/health` touches no Supabase credential and
-returns 200 even when the API cannot serve a single request:
+Verification rows cleaned up (checkin deleted via API; note purged; media item removed
+via service-role PostgREST).
 
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' \
-  -X POST "$API_URL/checkins" -H "Authorization: Bearer <a real user JWT>" \
-  -H 'Content-Type: application/json' -d '{"mood":4}'
-# 201 = working · 404 = old code still deployed · 500 = env var missing
-```
+### B2. No browser click-through of the three web flows — OPEN (user step)
 
-Schema-ahead-of-code is the safe direction (the reverse breaks live users), so there is
-no urgency beyond wanting to use the feature.
+Everything short of a human in a browser is now verified: unit/integration logic, API
+e2e against the deployed container (above), a clean production build, and the dev server
+rendering against the hosted project (`/` 307s to `/login`, `/login` 200). The
+interactive click-through still needs a Google-signed-in human: run
+`pnpm --filter @cortex/web dev`, sign in at `http://localhost:3000`, then exercise (1)
+mood tap → logged ✓ → undo, (2) media log with autocomplete/stars/status, (3) domain
+chips on capture + `?domain=` filter + realtime arrival of a new note.
 
-### B2. No browser click-through of the three web flows
+### B3. `domain_meta` is not re-validated when `domain` changes — RESOLVED
 
-Verified: unit/integration logic, API e2e, and a clean production build (7 routes).
-**Not verified: that any of it renders and behaves correctly in a browser.**
+`NoteService.update` now re-validates existing meta against the new domain and throws
+the new `validation` CoreError kind, which `CoreErrorFilter` maps to **400** with a
+caller-facing message. Clearing the domain (`domain: null`) stays allowed — meta without
+a domain is dormant. Covered by a service test and verified against production (table
+above). Commit `fc9279d`.
 
-Blocked because `apps/web/.env.local` points at the hosted Supabase project *and* the
-Railway API, while the login page offers Google OAuth only — so pointing it at the local
-stack has no sign-in path. Unblocking needs either B1 (redeploy, then click through
-production) or a local email/password sign-in path for dev.
+### B4. Railway free trial lapses around 2026-08-31 — OPEN (user decision)
 
-Affected: mood widget, media log form + autocomplete, domain chips and `?domain=` filter.
+$5 of credit, 30 days from 2026-08-01. When it lapses the API stops answering and every
+1c write path dies with it. Hobby is $5/month; the Free plan's $1/month credit will not
+keep an always-on container running. **Decision + payment needed this month.**
 
-### B3. `domain_meta` is not re-validated when `domain` changes
+### B5. Shared-package `dist/` staleness has no guard — RESOLVED (with a correction)
 
-**Latent, no impact yet.** `NoteService.create` validates `domain_meta` against its
-domain's schema. `update` passes `domain` through but does not re-check existing meta
-against the new domain — so a media note carrying `{rating: 5}`, patched to
-`domain: "health"`, keeps meta that the health schema would reject.
+The candidate fix this log originally proposed (`test` dependsOn `^build` in
+`turbo.json`) **was already in place** — the actual gap was that CI and local habit ran
+`pnpm --filter <pkg> test`, which bypasses turbo and its dependency graph entirely; CI
+compensated with a hand-maintained build step. CI now runs
+`pnpm turbo run test --filter=<pkg>` and the manual build step is gone. The rule is
+recorded in `ci.yml` itself and in `docs/deploy.md`. Commit `2e99f6d`.
 
-Harmless today: nothing reads `domain_meta` before phase 2, and `domain_meta` is not
-settable over HTTP at all (deliberately — only `MediaService` and, later, enrichment
-write it). It becomes real when phase 2 starts extracting and reading meta.
+### B6. `00012` becomes unsafe once embeddings exist — RESOLVED
 
-Options when it matters: clear meta on domain change, re-validate and 400, or make the
-pair updatable together. Not decided.
+`00012` now opens with a fail-fast guard: if either embedding column holds a non-null
+value it raises, naming the re-embed requirement, instead of silently being a different
+operation. Editing an already-applied migration is safe here — applied environments
+never re-run it, and fresh replays hit the guard while the columns are still empty.
+Commit `84397eb`.
 
-### B4. Railway free trial lapses around 2026-08-31
+### B7. Media autocomplete fetches the whole library — RESOLVED
 
-$5 of credit, 30 days from 2026-08-01 (`docs/deploy.md`). When it lapses the API stops
-answering and every 1c write path dies with it — check-ins, media logs, and note
-creation. Hobby is $5/month; the Free plan's $1/month credit will not keep an always-on
-container running. **This month.**
+The query now pushes `kind` server-side, orders by title, caps at 200 rows, refetches
+when the kind changes, and surfaces a fetch failure instead of silently rendering an
+empty library. The tag picker in `tag-chips.tsx` had the identical unbounded shape and
+got the same bound. (The 200 cap is a cap, not a search — a library past 200 titles per
+kind wants a typeahead query; deferred until that's a real number.) Commit `c63bfc0`.
 
-### B5. Shared-package `dist/` staleness has no guard
+---
 
-A7 will recur. Nothing fails loudly when a dependent package tests against a stale build
-of `@cortex/shared`/`@cortex/core` — the assertion just reports the old value, which
-reads as "my edit didn't work". Candidate fixes: a `test` task `dependsOn: ["^build"]` in
-`turbo.json`, or pointing the dependent packages' vitest at source. Not attempted here —
-it touches build config for every package.
+## E. Second-pass findings (2026-08-01 review of this log)
 
-### B6. `00012` becomes unsafe once embeddings exist
+Auditing the branch for issues *not* in this log found the following. All fixed the same
+day unless marked accepted.
 
-`alter column ... type vector(1536)` works today only because both columns hold zero
-rows. Any environment that already has 1024-dim embeddings needs a re-embed, not a type
-change. Applies to any new environment provisioned after phase 2 replays migrations from
-scratch — the file will not fail, but it also will not be the same operation. Noted in
-`docs/deploy.md`.
+### E1. `domain_meta` / `media_item_id` are client-writable through PostgREST — ACCEPTED, comment fixed, FK hardened
 
-### B7. Media autocomplete fetches the whole library
+The comment in `notes/service.ts` claimed keeping these out of the DTO "stops a client
+inventing meta". False: the `notes` grant and RLS policy are row-scoped, so a row's
+owner can `PATCH` arbitrary `domain_meta` through PostgREST with their own JWT. Column
+grants can't close it — the API writes with the user's JWT (no service_role on the write
+path, spec §4.1), so revoking columns from `authenticated` would break `MediaService`.
 
-`MediaLogForm` selects every live `media_items` row for its `<datalist>`, unbounded and
-on every mount. Fine at a few hundred items, wasteful past that. No limit, no search,
-no caching.
+Decision: **accept** (self-owned rows only; phase 2 must validate meta on read and treat
+it as untrusted), fix the lying comment, and harden the part that *was* closable at the
+DB: `notes.media_item_id` is now a composite FK `(media_item_id, user_id) →
+media_items (id, user_id)` — FK checks bypass RLS, so the single-column FK accepted
+references to other users' items. Regression test: cross-user insert → `23503`.
+
+### E2. `checkins`/`flashcards` lacked `updated_at` — FIXED (00014)
+
+`00002`'s rule: PowerSync ordering depends on `updated_at` advancing on every UPDATE.
+Both tables mutate (soft-deletes via UPDATE; SM-2 scheduling rewrites in phase 6) and
+had no column at all — an incremental sync cursor would have had nothing to order on,
+and retrofitting a synced table later costs more. Both now have the column + moddatetime
+trigger, with tests. `media_items` deliberately stays without one (append-mostly, same
+as `tags`/`links`).
+
+### E3. RLS isolation tests were vacuous for the three new tables — FIXED
+
+`rls-isolation.test.ts` asserted "bob reads zero rows" from `media_items` / `checkins` /
+`flashcards` — but Alice had no rows there either, so dropping a policy entirely kept
+the suite green. One Alice fixture row per table now makes the assertions real.
+
+### E4. Check-in widget state bugs — FIXED
+
+- Collapsing "more" kept hidden `energy`/`label`, so a later face tap silently logged
+  values the user believed dismissed. Collapsing now discards them.
+- A failed log kept the *previous* check-in's "logged ✓ / undo" on screen next to the
+  error — and that undo deleted the previous, correct check-in. Failure now clears the
+  undo affordance. `undo` also gained a busy guard.
+
+### E5. `NoteList.refetch` dropped `q`/`tag` — FIXED (pre-existing on main)
+
+The realtime refetch (every `SUBSCRIBED` transition, including ~1s after mount) applied
+only the lifecycle/domain narrowings, so `/?q=...` briefly showed 3 search results and
+then silently replaced them with the whole inbox. Refetch now mirrors every SSR
+narrowing; while `q`/`tag` are active, realtime events trigger a refetch instead of a
+local patch (FTS and tag membership can't be evaluated client-side).
+
+### E6. `findOrCreateItem` residual sharp edges — FIXED
+
+- **PostgREST maps `*` to `%` inside like/ilike operands**, so even the A3-escaped
+  pattern wildcarded on `*` ("M\*A\*S\*H" scanned as `M%A%S%H`). The lookup no longer
+  uses ilike at all: anchored, regex-escaped `imatch`, shared by `TagService` and
+  `MediaService` (`like.ts`, now directly unit-tested).
+- **`year` was accepted and silently discarded** when the item existed. Now: backfills a
+  null year; a contradicting year is a 409 naming the existing value.
+- **A failed note insert stranded a just-created item** in the library forever (no
+  delete surface exists for `media_items`). `logMedia` now compensates by deleting the
+  item it created; pre-existing items are left alone.
+- **`status: "finished"` was hardcoded** into every log. `logMediaInput` gained optional
+  `status` (default finished at the service); the web form has a selector.
+
+### E7. Accessibility — FIXED
+
+Star rating was toggle-buttons (`aria-pressed`) where filled-but-unselected stars
+contradicted the visual state → now a radiogroup with `aria-checked` and ≥28px spaced
+targets (a mis-tap on the current star *clears* the rating, so cramped targets silently
+produced "no rating"). Mood buttons carry valence in their labels ("Mood 1 of 5 — very
+bad") and 44px targets; hardcoded `id="energy-label"` → `useId`; `role="status"` no
+longer wraps the undo button.
+
+### Accepted / logged, not fixed
+
+- **E1's PostgREST write path** (above) — validate-on-read is phase 2's entry gate.
+- **The note list itself is unbounded** (`page.tsx` / `note-list.tsx` fetch every
+  matching note). Same class as B7, pre-existing since 1a, needs pagination rather than
+  a cap; deferred.
+- **No UI path edits a note's domain** after capture (`updateNoteInput.domain` is
+  `.nullable()` precisely for clearing a wrong domain, and the API path is tested, but
+  no control reaches it). Deferred to the next UI pass.
 
 ---
 
@@ -204,17 +279,17 @@ no caching.
 
 ---
 
-## D. Verification state at time of writing
+## D. Verification state (updated 2026-08-01, after the second pass)
 
 | Check | Result |
 |---|---|
-| `pnpm turbo run typecheck lint test` | 232 tests, 21/21 tasks green |
-| `@cortex/db` | 72/72, green twice back-to-back without a reset |
-| `@cortex/core` | 48/48 |
+| `pnpm turbo run typecheck lint test` | 21/21 tasks green |
+| `@cortex/db` | 75/75 (was 72; +updated_at ×2, +cross-user FK) |
+| `@cortex/core` | 57/57 (was 48; +like.ts unit, +B3, +year, +orphan, +status, +`*` literal) |
 | `@cortex/api` | 56/56 |
 | `@cortex/shared` | 27/27 |
 | `@cortex/web` | 29/29 |
-| Web production build | clean, 7 routes |
-| Hosted migrations `00012`+`00013` | applied and verified against the catalog |
-| Hosted API redeploy | **not done** (B1) |
-| Browser click-through | **not done** (B2) |
+| Full test gate rerun without reset | green twice back-to-back |
+| Hosted migrations through `00014` | applied; `migration list` local == remote |
+| Hosted API redeploy | **done** — verified by writes (B1 table) incl. the B3 400 path |
+| Browser click-through | **open** — needs a Google-signed-in human (B2) |

@@ -637,9 +637,11 @@ Consequences, all already applied:
   trailing `...`, which pulls in dependencies). With a bare `--filter @cortex/api`, the
   image builds successfully and then dies at startup on
   `Cannot find module .../packages/core/src/supabase.js`.
-- `.github/workflows/ci.yml`'s `db-tests` job builds `@cortex/shared` and `@cortex/core`
-  before running the filtered test commands; that job runs on a different runner from
-  the `checks` job, so it cannot reuse its build output.
+- `.github/workflows/ci.yml`'s `db-tests` job runs its test steps through
+  `pnpm turbo run test --filter=...`, whose `test → ^build` dependency rebuilds
+  `@cortex/shared` / `@cortex/core` first (they are consumed as compiled `dist/`).
+  Never switch these back to `pnpm --filter <pkg> test` — that form tests against
+  whatever stale `dist/` exists (issue log A7/B5).
 - Verified locally end to end: `docker build -f apps/api/Dockerfile .` → `docker run` →
   `/health` returns `{"status":"ok"}` with the notes/tags/export routes mapped in the
   startup log.
@@ -735,6 +737,23 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 No new variables. Redeploy so the check-in widget, media log form, and domain filter
 ship; the domain filter reads `?domain=` and queries `notes.domain`, which requires
 `00013` to already be applied (step 1 before step 4, as always).
+
+### 5. Post-review hardening — `00014` (applied 2026-08-01)
+
+The phase-1c issue-log review produced `00014_phase1c_hardening.sql`, pushed the same
+day (local == remote through `00014`):
+
+- **`checkins` / `flashcards` get `updated_at` + `moddatetime`** per `00002`'s rule —
+  PowerSync's incremental cursor (phase 1b) needs `updated_at` to advance on every
+  UPDATE, and both tables mutate (soft-deletes; SM-2 scheduling rewrites).
+- **`notes.media_item_id` is now a composite FK** `(media_item_id, user_id) →
+  media_items (id, user_id)` with PG15's `on delete set null (media_item_id)`. FK checks
+  bypass RLS, so the old single-column FK accepted a reference to another user's item.
+- **`00012` now carries a fail-fast guard**: if either embedding column holds data, it
+  raises instead of silently being a different operation (the alter-type is only valid
+  on empty columns; populated columns need a re-embed). The edit is to an
+  already-applied migration, which is safe here — applied environments never re-run it,
+  and fresh replays hit the guard while the columns are still empty.
 
 ### Not in 1c — PowerSync sync rules
 
