@@ -65,6 +65,9 @@ describe("updated_at triggers", () => {
 
   it("integrations.updated_at advances on UPDATE (via service_role)", async () => {
     const { id } = await makeUser("updated-at@test.local");
+    // Idempotency: integrations has unique (user_id, provider, external_id), so this
+    // insert is a 23505 on any rerun without `supabase db reset`.
+    await admin.from("integrations").delete().eq("user_id", id).eq("provider", "telegram");
     const { data: inserted } = await admin.from("integrations")
       .insert({ user_id: id, provider: "telegram", external_id: "ext-1" })
       .select("id, created_at, updated_at").single();
