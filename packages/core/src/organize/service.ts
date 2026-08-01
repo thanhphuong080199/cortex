@@ -1,15 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CreateTagInput } from "@cortex/shared";
 import { mapPostgrestError, notFound } from "../errors.js";
+import { escapeLike } from "../like.js";
 
 export interface Tag { id: string; user_id: string; name: string; color: string | null; created_by: string; created_at: string; deleted_at: string | null }
 export interface NoteTag { id: string; note_id: string; tag_id: string; source: string; status: string }
-
-// `%`, `_` and `\` are LIKE metacharacters. Unescaped, a tag named "a_c" would match an
-// existing "abc" and findOrCreate would return the WRONG tag.
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
-}
 
 export class TagService {
   constructor(private client: SupabaseClient, private userId: string) {}
