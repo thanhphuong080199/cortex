@@ -1,0 +1,15 @@
+node_modules/
+.turbo/
+dist/
+.next/
+.expo/
+.env
+.env.local
+.env.*
+!.env.example
+*.tsbuildinfo
+next-env.d.ts
+expo-env.d.ts
+supabase/.temp/
+.superpowers/
+.claude/worktrees/

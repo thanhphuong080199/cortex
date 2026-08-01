@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Cortex",
+    "slug": "cortex",
+    "scheme": "cortex",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": { "bundleIdentifier": "app.cortex.mobile", "supportsTablet": false },
+    "android": { "package": "app.cortex.mobile" },
+    "plugins": ["expo-router", "expo-web-browser"]
+  }
+}

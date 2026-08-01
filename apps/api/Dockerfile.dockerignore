@@ -1,0 +1,16 @@
+# Read by BuildKit as the ignore file for apps/api/Dockerfile even though the build
+# context is the repo root (docker build -f apps/api/Dockerfile -t cortex-api .).
+# A file at apps/api/.dockerignore is NOT read in that configuration -- verified
+# locally -- so this file is the one that actually keeps secrets and local
+# node_modules out of the build context. See the comment at the top of Dockerfile.
+**/node_modules
+**/dist
+**/.turbo
+**/.next
+**/.expo
+**/.env
+**/.env.local
+.git
+supabase/.temp
+.superpowers
+.claude/worktrees
