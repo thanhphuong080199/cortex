@@ -9,6 +9,25 @@
     // globbed moments earlier.
     "typecheck": { "dependsOn": ["^build", "build"] },
     "lint": {},
-    "test": { "dependsOn": ["^build", "build"] }
+
+    // Turbo runs tasks in strict env mode: a task process only sees the env vars listed
+    // here, so anything the CI job exports (see .github/workflows/ci.yml, "Export local
+    // Supabase keys as app env vars") is stripped before vitest starts unless it is named
+    // below. Omitting them made every @cortex/db suite die at import time with
+    // "Error: supabaseUrl is required" from createClient() in src/test/clients.ts.
+    // Declaring them in `env` (rather than `passThroughEnv`) also folds their values into
+    // the task hash, so pointing the suites at a different Supabase stack correctly
+    // invalidates the cache instead of replaying results from the previous one.
+    "test": {
+      "dependsOn": ["^build", "build"],
+      "env": [
+        "SUPABASE_URL",
+        "SUPABASE_ANON_KEY",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_JWT_SECRET",
+        "CORS_ORIGINS",
+        "PORT"
+      ]
+    }
   }
 }
