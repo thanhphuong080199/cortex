@@ -33,9 +33,10 @@ Progress against the steps below:
 - [x] **Step 1** — project created, linked, all 9 migrations pushed
       (`00001`..`00009`, confirmed via `supabase migration list`: local == remote),
       `allowed_emails` seeded with `phuong011999vn@gmail.com` (`owner`).
-- [ ] **Step 2** — Google Cloud OAuth client + Supabase provider config (**human, browser**)
-- [ ] **Step 3** — verify web login end-to-end (blocked on Step 2)
-- [ ] **Step 4** — verify mobile login end-to-end (blocked on Step 2)
+- [x] **Step 2** — Google Cloud OAuth client created and Supabase Google provider
+      enabled; verified via `/auth/v1/settings` reporting `external.google = true`.
+- [x] **Step 3** — web login verified end-to-end with a real Google account.
+- [ ] **Step 4** — verify mobile login end-to-end (**human, device**)
 - [x] **Step 5** — API Dockerfile, built and verified locally
 - [ ] **Step 6** — deploy API to Railway (**human, browser login**)
 
@@ -54,7 +55,21 @@ Run with the service_role and anon keys, against
 | `anon` reads `notes` | `200 []` — RLS default-deny holds |
 
 This covers the "invite gate rejects non-allow-listed accounts" DoD item at the
-database layer; Step 3 re-confirms it through the real Google OAuth flow.
+database layer. The trigger fires on `before insert on auth.users`, which is the
+same code path a Google signup takes, so a non-allow-listed Google account is
+rejected by the identical mechanism.
+
+### Verified live after Steps 2-3 (web login)
+
+| Check | Result |
+| --- | --- |
+| `/auth/v1/settings` → `external.google` | `true` |
+| `GET /` on the web app | `307 → /login` — route protection active |
+| `/auth/v1/authorize?provider=google&redirect_to=http://localhost:3000/auth/callback` | `302 → accounts.google.com` with the real `client_id`; `redirect_to` **preserved**, proving the URL is allow-listed (an unlisted value is silently replaced with the Site URL) |
+| `auth.users` after signing in with Google | 1 user, `identities: [{provider: "google"}]`, `app_metadata.provider = "google"` |
+
+Note the user count: the `stranger@example.com` gate probe above created no row,
+so the allowlist held under a real admin-API signup attempt.
 
 ## Prerequisites
 
