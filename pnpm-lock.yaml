@@ -275,6 +275,28 @@ importers:
         specifier: ^3.0.0
         version: 3.2.7(@types/node@22.20.1)(lightningcss@1.33.0)(terser@5.49.0)(yaml@2.9.0)
 
+  packages/sync:
+    dependencies:
+      '@cortex/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@powersync/common':
+        specifier: ^1.57.0
+        version: 1.57.2
+    devDependencies:
+      '@cortex/config':
+        specifier: workspace:*
+        version: link:../config
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      dotenv:
+        specifier: ^16.4.0
+        version: 16.6.1
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@22.20.1)(lightningcss@1.33.0)(terser@5.49.0)(yaml@2.9.0)
+
 packages:
 
   '@adobe/css-tools@4.5.0':
@@ -1594,6 +1616,9 @@ packages:
   '@pkgjs/parseargs@0.11.0':
     resolution: {integrity: sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg==}
     engines: {node: '>=14'}
+
+  '@powersync/common@1.57.2':
+    resolution: {integrity: sha512-cOsmvBFBK0yvpwjaI46Lm3xCMRaTaydQQ4RolED3Upj6/kawGZHhkh4Guve3nmOSQ/0sGCuiFOcl4Gv9Mp6dOA==}
 
   '@radix-ui/primitive@1.1.7':
     resolution: {integrity: sha512-rqWnm76nYT8HoNNqEjpgJ7Pw/DrBj5iBTrmEPo6HTX5+VJyBNOqTdv4g89G63HuR5g0AaENoAcH7Is5fF2kZ8Q==}
@@ -3869,6 +3894,9 @@ packages:
 
   jose@6.2.5:
     resolution: {integrity: sha512-2E5L2yRp03FnwreJLJX8/r7mHiZICCf8kG7fAsTWkSQTDAcc46NIZoQLKy+EJ8sPoJlxyS4OQR5H70LjIZZlIQ==}
+
+  js-logger@1.6.1:
+    resolution: {integrity: sha512-yTgMCPXVjhmg28CuUH8CKjU+cIKL/G+zTu4Fn4lQxs8mRFH/03QTNvEFngcxfg/gRDiQAOoyCKmMTOm9ayOzXA==}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -7064,6 +7092,10 @@ snapshots:
   '@pkgjs/parseargs@0.11.0':
     optional: true
 
+  '@powersync/common@1.57.2':
+    dependencies:
+      js-logger: 1.6.1
+
   '@radix-ui/primitive@1.1.7': {}
 
   '@radix-ui/react-collection@1.1.15(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.3))(react@19.2.3)':
@@ -9442,6 +9474,8 @@ snapshots:
   jose@5.10.0: {}
 
   jose@6.2.5: {}
+
+  js-logger@1.6.1: {}
 
   js-tokens@4.0.0: {}
 

@@ -1,0 +1,73 @@
+import { column, Schema, Table } from "@powersync/common";
+
+/**
+ * Imported from @powersync/common, the platform-neutral core package, not
+ * @powersync/react-native: this package only declares a schema, it never opens a
+ * database, and @powersync/react-native pulls in React Native's native modules, which
+ * fail to load under plain Node (the schema test's environment) with a syntax error, not
+ * a schema error. @powersync/common ships a dedicated "node" export condition and
+ * re-exports the same column/Schema/Table primitives, so nothing here changes for the
+ * mobile app, which still imports @powersync/react-native at the app layer to get a
+ * concrete PowerSyncDatabase.
+ *
+ * The client-side mirror of the synced Postgres tables (phase 1b spec §4).
+ *
+ * PowerSync's local schema is a VIEW over its internal storage, so a column missing here
+ * is simply invisible on the device -- it is not an error. Adding a column later is
+ * cheap; the tables listed are the contract, and they must stay identical to
+ * SYNC_TABLES in @cortex/shared, which the API's upload allow-list also reads.
+ */
+const notes = new Table({
+  title: column.text,
+  content: column.text,
+  source_type: column.text,
+  lifecycle: column.text,
+  domain: column.text,
+  domain_meta: column.text,      // jsonb arrives as a JSON string
+  media_item_id: column.text,
+  pinned: column.integer,
+  created_at: column.text,
+  updated_at: column.text,
+  deleted_at: column.text,
+});
+
+const tags = new Table({
+  name: column.text, created_at: column.text, deleted_at: column.text,
+});
+
+const note_tags = new Table({
+  note_id: column.text, tag_id: column.text,
+  created_at: column.text, deleted_at: column.text,
+});
+
+const links = new Table({
+  from_note_id: column.text, to_note_id: column.text,
+  kind: column.text, status: column.text, similarity: column.real,
+  rationale: column.text, created_at: column.text, deleted_at: column.text,
+});
+
+const media_items = new Table({
+  kind: column.text, title: column.text, year: column.integer,
+  creator: column.text, external_meta: column.text,
+  created_at: column.text, deleted_at: column.text,
+});
+
+const checkins = new Table({
+  mood: column.integer, energy: column.integer, label: column.text,
+  created_at: column.text, updated_at: column.text, deleted_at: column.text,
+});
+
+/**
+ * Local-only: the notes.updated_at each in-progress local edit was based on. It is the
+ * input to the server's conflict-copy check (spec §6.2) and is meaningless anywhere but
+ * this device, so it must never sync -- hence localOnly, which also keeps it out of the
+ * upload queue entirely.
+ */
+const note_edit_base = new Table(
+  { note_id: column.text, base_updated_at: column.text },
+  { localOnly: true },
+);
+
+export const AppSchema = new Schema({
+  notes, tags, note_tags, links, media_items, checkins, note_edit_base,
+});
