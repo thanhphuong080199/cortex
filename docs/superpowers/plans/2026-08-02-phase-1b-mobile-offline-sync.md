@@ -775,8 +775,17 @@ git commit -m "feat(core): resolveNoteMediaLink - server-side item identity for 
     applied: string[];                                    // op_ids
     failed: { op_id: string; kind: CoreErrorKind; message?: string }[];
     conflict_copies: { op_id: string; note_id: string }[];
+    resolved_media: { op_id: string; note_id: string }[];
+    link_failures: string[];                              // copy written, link was not
+    media_unresolved: { op_id: string; note_id: string; kind: CoreErrorKind }[];
   }
   ```
+
+  **`applied` means the row was written, not that every follow-up succeeded.** A note
+  whose write lands but whose media resolution then fails is `applied` plus an entry in
+  `media_unresolved` — never `failed`. Reporting it `failed` would make PowerSync resend
+  the op, and the resend cannot help: the note already exists. Same shape as
+  `link_failures`, for the same reason.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -917,7 +926,9 @@ Expected: FAIL — every request 404s, because no `/sync` route is registered.
 ```ts
 // apps/api/src/sync/router.ts
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { CheckinService, MediaService, NoteService, type CoreErrorKind } from "@cortex/core";
+import {
+  CheckinService, MediaService, NoteService, mapPostgrestError, type CoreErrorKind,
+} from "@cortex/core";
 import type { SyncOp } from "@cortex/shared";
 
 export interface SyncUploadResult {
@@ -956,6 +967,7 @@ export async function applySyncOps(
 
   const result: SyncUploadResult = {
     applied: [], failed: [], conflict_copies: [], resolved_media: [],
+    link_failures: [], media_unresolved: [],
   };
 
   for (const op of ops) {
@@ -967,12 +979,11 @@ export async function applySyncOps(
         case "checkins":
           if (op.op === "DELETE") await checkins.softDelete(op.id);
           else if (op.op === "PUT") {
-            await client.from("checkins").insert({
-              id: op.id, user_id: userId,
-              mood: op.data?.mood ?? null,
-              energy: op.data?.energy ?? null,
-              label: op.data?.label ?? null,
-            }).select().single().then(({ error }) => { if (error) throw error; });
+            await checkins.createWithId(op.id, {
+              mood: op.data?.mood as number | undefined,
+              energy: op.data?.energy as number | undefined,
+              label: op.data?.label as string | undefined,
+            });
           } else throw { kind: "validation", message: "checkins are insert-or-delete only" };
           break;
         default:
@@ -1021,9 +1032,21 @@ async function applyNoteOp(
 
   // Offline media logs arrive as ordinary notes carrying pending_item; identity is
   // resolved here because the device could not consult the unique index (spec §5.3).
+  //
+  // Resolution failure must NOT fail the op. The note is already durably written, so
+  // reporting `failed` would make PowerSync resend an op whose resend cannot help -- and
+  // before createWithId became idempotent, that resend threw 23505 before ever reaching
+  // this code, wedging the note's pending_item unresolved forever. A year 409 is the
+  // realistic trigger and it does not clear on retry, so it needs a report, not a loop.
   if (domainMeta.pending_item !== undefined) {
-    const item = await media.resolveNoteMediaLink(op.id, domainMeta);
-    if (item) result.resolved_media.push({ op_id: op.op_id, note_id: op.id });
+    try {
+      const item = await media.resolveNoteMediaLink(op.id, domainMeta);
+      if (item) result.resolved_media.push({ op_id: op.op_id, note_id: op.id });
+    } catch (err) {
+      result.media_unresolved.push({
+        op_id: op.op_id, note_id: op.id, kind: asCoreError(err).kind,
+      });
+    }
   }
 }
 
@@ -1036,18 +1059,32 @@ async function applyNoteOp(
 async function applyGenericOp(
   client: SupabaseClient, userId: string, op: SyncOp,
 ): Promise<void> {
+  // Every branch selects and routes through mapPostgrestError. Without the select, a
+  // PATCH or DELETE against a missing or already-deleted row matches zero rows, PostgREST
+  // returns no error, and the op lands in `applied` while nothing changed -- the device
+  // believes an edit stuck when it did not. CheckinService.softDelete and
+  // NoteService.softDelete both already use .select().single() for exactly this reason.
+  // Raw PostgrestErrors must not escape either: asCoreError has no `kind` to read off one,
+  // so it would flatten a 23505 or a check-constraint violation into "internal" and the
+  // client could not tell a retryable failure from a server fault.
   if (op.op === "DELETE") {
     const { error } = await client.from(op.table)
       .update({ deleted_at: new Date().toISOString() })
-      .eq("id", op.id).eq("user_id", userId).is("deleted_at", null);
-    if (error) throw error;
+      .eq("id", op.id).eq("user_id", userId).is("deleted_at", null)
+      .select("id").single();
+    if (error) throw mapPostgrestError(error);   // zero rows → PGRST116 → not_found
     return;
   }
-  const row = { ...(op.data ?? {}), id: op.id, user_id: userId };
-  const { error } = op.op === "PUT"
-    ? await client.from(op.table).upsert(row).select().single()
-    : await client.from(op.table).update(op.data ?? {}).eq("id", op.id).eq("user_id", userId);
-  if (error) throw error;
+  if (op.op === "PUT") {
+    const row = { ...(op.data ?? {}), id: op.id, user_id: userId };
+    const { error } = await client.from(op.table).upsert(row).select("id").single();
+    if (error) throw mapPostgrestError(error);
+    return;
+  }
+  const { error } = await client.from(op.table)
+    .update(op.data ?? {}).eq("id", op.id).eq("user_id", userId)
+    .select("id").single();
+  if (error) throw mapPostgrestError(error);
 }
 ```
 
@@ -1063,6 +1100,11 @@ The router needs the device's id to become the row's id. Add to `packages/core/s
    * user would see their note twice.
    */
   async createWithId(id: string, input: CreateNoteInput & CreateNoteOptions): Promise<Note> {
+    // MUST be idempotent. PowerSync resends a batch whenever the response is lost -- a
+    // dropped connection after the insert commits is ordinary, not exceptional -- and a
+    // resend that throws on its own prior success would wedge the device's queue forever.
+    // The id is client-chosen, so "this id already exists and is mine" means the write
+    // already landed, not that two different rows collided.
     const domainMeta = input.domainMeta ?? {};
     if (input.domain) {
       // No stripping: `pending_item` is a legitimate member of domainMetaSchemas.media
@@ -1080,8 +1122,43 @@ The router needs the device's id to become the row's id. Add to `packages/core/s
         media_item_id: input.mediaItemId ?? null,
       })
       .select().single();
-    if (error) throw mapPostgrestError(error);
+    if (error) {
+      // 23505 on an id the caller already owns is a replayed op, not a conflict.
+      if (error.code === "23505") return this.getById(id);
+      throw mapPostgrestError(error);
+    }
     return data as Note;
+  }
+```
+
+- [ ] **Step 4b: `CheckinService.createWithId`**
+
+The router must not hand-roll a checkins insert — every other table's write logic lives in
+a service, and an inlined copy has to be kept in step with `CheckinService.create` by hand.
+Add to `packages/core/src/checkins/service.ts`:
+
+```ts
+  /** create(), with the id chosen by the device. Idempotent for the same reason
+   *  NoteService.createWithId is: a replayed batch must not wedge the queue. */
+  async createWithId(id: string, input: CreateCheckinInput): Promise<Checkin> {
+    const { data, error } = await this.client.from("checkins")
+      .insert({
+        id, user_id: this.userId,
+        mood: input.mood ?? null,
+        energy: input.energy ?? null,
+        label: input.label ?? null,
+      })
+      .select().single();
+    if (error) {
+      if (error.code === "23505") {
+        const { data: existing, error: readError } = await this.client.from("checkins")
+          .select().eq("id", id).eq("user_id", this.userId).single();
+        if (readError) throw mapPostgrestError(readError);
+        return existing as Checkin;
+      }
+      throw mapPostgrestError(error);
+    }
+    return data as Checkin;
   }
 ```
 
