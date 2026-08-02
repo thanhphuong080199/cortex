@@ -83,6 +83,71 @@ export class NoteService {
     return data as Note;
   }
 
+  /**
+   * The offline write path's update (phase 1b spec §6). `baseUpdatedAt` is the
+   * notes.updated_at the client's edit was based on.
+   *
+   * Body conflicts are the only ones worth machinery: metadata columns are small and
+   * independently settable, so last-write-wins on those is invisible, while
+   * last-write-wins on a note body is silent, unrecoverable data loss.
+   *
+   * Comparison is on `content`, NOT `content_text` -- the latter is a generated column
+   * (strip_markdown(content), 00002_content.sql:6) and is not client-writable, so two
+   * genuinely different bodies can share one content_text.
+   */
+  async updateWithConflictCopy(
+    id: string,
+    input: UpdateNoteInput,
+    baseUpdatedAt?: string,
+  ): Promise<{ note: Note; conflictCopy: Note | null }> {
+    if (baseUpdatedAt === undefined || input.content === undefined) {
+      return { note: await this.update(id, input), conflictCopy: null };
+    }
+
+    const { data: current, error: readError } = await this.client.from("notes")
+      .select("content, updated_at")
+      .eq("id", id).eq("user_id", this.userId).is("deleted_at", null).single();
+    if (readError) throw mapPostgrestError(readError);
+
+    const moved = current.updated_at !== baseUpdatedAt;
+    const diverged = current.content !== input.content;
+    if (!moved || !diverged) {
+      return { note: await this.update(id, input), conflictCopy: null };
+    }
+
+    // Server body wins. Everything except content is still applied to it -- a lifecycle
+    // change made offline is not in conflict with a body edit made on web.
+    const { content: _losing, ...metadata } = input;
+    const note = Object.keys(metadata).length > 0
+      ? await this.update(id, metadata as UpdateNoteInput)
+      : await this.getById(id);
+
+    const conflictCopy = await this.create({
+      content: input.content,
+      title: note.title ?? undefined,
+    });
+
+    // Best-effort: the copy is the thing that must not be lost. A failed link leaves an
+    // untraceable-but-present note, which beats throwing away the text to report an error.
+    await this.client.from("links").insert({
+      user_id: this.userId,
+      from_note_id: conflictCopy.id,
+      to_note_id: id,
+      kind: "conflict_copy",
+    }).then(() => undefined, () => undefined);
+
+    return { note, conflictCopy };
+  }
+
+  /** Reads one live note the caller owns. not_found for missing, deleted, or foreign. */
+  async getById(id: string): Promise<Note> {
+    const { data, error } = await this.client.from("notes")
+      .select()
+      .eq("id", id).eq("user_id", this.userId).is("deleted_at", null).single();
+    if (error) throw mapPostgrestError(error);
+    return data as Note;
+  }
+
   async softDelete(id: string): Promise<{ id: string; deleted_at: string }> {
     const { data, error } = await this.client.from("notes")
       .update({ deleted_at: new Date().toISOString() })
