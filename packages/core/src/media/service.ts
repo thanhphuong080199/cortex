@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { LogMediaInput } from "@cortex/shared";
+import { pendingMediaItem, type LogMediaInput } from "@cortex/shared";
 import { mapPostgrestError } from "../errors.js";
 import { anchoredIRegex } from "../like.js";
 import { NoteService, type Note } from "../notes/service.js";
@@ -111,5 +111,35 @@ export class MediaService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Links an offline-created media note to its canonical media_item (phase 1b spec §5.3).
+   *
+   * The device wrote the note with domain_meta.pending_item because media-item identity
+   * is (user_id, kind, lower(title)) enforced by a unique index it could not consult
+   * offline. Resolution runs here so findOrCreate's escaping, anchored imatch and year
+   * reconciliation stay in exactly one implementation -- issue-log A3 and E6 are two
+   * rounds of bugs in that logic, and a client-side copy would be a third.
+   */
+  async resolveNoteMediaLink(
+    noteId: string,
+    meta: Record<string, unknown>,
+  ): Promise<MediaItem | null> {
+    const parsed = pendingMediaItem.safeParse(meta.pending_item);
+    if (!parsed.success) return null;
+
+    const item = await this.findOrCreateItem(parsed.data);
+
+    // pending_item is scaffolding, not data: leaving it behind would make the note
+    // re-resolve on every subsequent upload and would fail domainMetaSchemas.media,
+    // which is strict.
+    const { pending_item: _resolved, ...cleaned } = meta;
+    const { error } = await this.client.from("notes")
+      .update({ media_item_id: item.id, domain_meta: cleaned })
+      .eq("id", noteId).eq("user_id", this.userId);
+    if (error) throw mapPostgrestError(error);
+
+    return item;
   }
 }

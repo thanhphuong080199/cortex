@@ -16,3 +16,15 @@ export const logMediaInput = z.object({
   status: z.enum(["finished", "in_progress", "abandoned"]).optional(),
 });
 export type LogMediaInput = z.infer<typeof logMediaInput>;
+
+/**
+ * What an offline device writes into notes.domain_meta while it cannot reach the
+ * (user_id, kind, lower(title)) unique index that decides media-item identity. The server
+ * replaces it with a real media_item_id on upload (phase 1b spec §5.3).
+ */
+export const pendingMediaItem = z.object({
+  kind: mediaKind,
+  title: z.string().min(1).max(500),
+  year: z.number().int().min(1000).max(2200).optional(),
+});
+export type PendingMediaItem = z.infer<typeof pendingMediaItem>;
