@@ -64,6 +64,36 @@ describe("NoteService.updateWithConflictCopy", () => {
     expect(r.note.content).toBe("phone edit");
   });
 
+  it("reports linkFailed when the link cannot be written, without losing the copy", async () => {
+    // Force the link insert to fail by pointing the service at a client whose `links`
+    // writes are rejected -- the copy must still exist and be returned.
+    const note = await svc.create({ content: "original" });
+    const base = note.updated_at;
+    await svc.update(note.id, { content: "web edit" });
+
+    const sabotaged = createUserClient(alice.token);
+    const realFrom = sabotaged.from.bind(sabotaged);
+    sabotaged.from = ((table: string) =>
+      table === "links"
+        ? { insert: async () => ({ error: { code: "42501", message: "denied" } }) }
+        : realFrom(table)) as typeof sabotaged.from;
+
+    const r = await new NoteService(sabotaged, alice.id)
+      .updateWithConflictCopy(note.id, { content: "phone edit" }, base);
+
+    expect(r.linkFailed).toBe(true);
+    expect(r.conflictCopy).not.toBeNull();
+    expect(r.conflictCopy!.content).toBe("phone edit");   // the text survived
+  });
+
+  it("omits linkFailed entirely on the happy path", async () => {
+    const note = await svc.create({ content: "original" });
+    const base = note.updated_at;
+    await svc.update(note.id, { content: "web edit" });
+    const r = await svc.updateWithConflictCopy(note.id, { content: "phone edit" }, base);
+    expect(r.linkFailed).toBeUndefined();
+  });
+
   it("copies only the body, applying metadata to the surviving note", async () => {
     const note = await svc.create({ content: "original" });
     const base = note.updated_at;

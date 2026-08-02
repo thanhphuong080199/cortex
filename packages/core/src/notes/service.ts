@@ -99,7 +99,7 @@ export class NoteService {
     id: string,
     input: UpdateNoteInput,
     baseUpdatedAt?: string,
-  ): Promise<{ note: Note; conflictCopy: Note | null }> {
+  ): Promise<{ note: Note; conflictCopy: Note | null; linkFailed?: boolean }> {
     if (baseUpdatedAt === undefined || input.content === undefined) {
       return { note: await this.update(id, input), conflictCopy: null };
     }
@@ -127,16 +127,19 @@ export class NoteService {
       title: note.title ?? undefined,
     });
 
-    // Best-effort: the copy is the thing that must not be lost. A failed link leaves an
-    // untraceable-but-present note, which beats throwing away the text to report an error.
-    await this.client.from("links").insert({
+    // The copy is the thing that must not be lost, so a failed link does NOT throw --
+    // an untraceable-but-present note beats discarding the user's text to report an error.
+    // But it must not vanish either: if `00015` were missing from an environment, every
+    // conflict copy would silently become an orphan with nothing to notice it by. The flag
+    // is how the caller finds out.
+    const { error: linkError } = await this.client.from("links").insert({
       user_id: this.userId,
       from_note_id: conflictCopy.id,
       to_note_id: id,
       kind: "conflict_copy",
-    }).then(() => undefined, () => undefined);
+    });
 
-    return { note, conflictCopy };
+    return { note, conflictCopy, ...(linkError ? { linkFailed: true } : {}) };
   }
 
   /** Reads one live note the caller owns. not_found for missing, deleted, or foreign. */
