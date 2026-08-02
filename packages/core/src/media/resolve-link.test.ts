@@ -54,7 +54,13 @@ describe("MediaService.resolveNoteMediaLink", () => {
   });
 
   it("does not wildcard on % or *", async () => {
-    await offlineMediaNote({ kind: "movie", title: "Dune" });
+    // Seed the "Dune" ITEM explicitly. Relying on an earlier test having created it
+    // makes this pass vacuously when run in isolation or under a shuffled order --
+    // and a wildcard-regression guard that quietly stops guarding is worse than none.
+    const seed = await offlineMediaNote({ kind: "movie", title: "Dune" });
+    await media.resolveNoteMediaLink(seed.id, {
+      status: "finished", pending_item: { kind: "movie", title: "Dune" },
+    });
     const note = await offlineMediaNote({ kind: "movie", title: "D%" });
     const item = await media.resolveNoteMediaLink(note.id, {
       status: "finished", pending_item: { kind: "movie", title: "D%" },
@@ -81,5 +87,38 @@ describe("MediaService.resolveNoteMediaLink", () => {
     await expect(media.resolveNoteMediaLink(second.id, {
       status: "finished", pending_item: { kind: "movie", title: "Solaris", year: 2002 },
     })).rejects.toMatchObject({ kind: "conflict" });
+  });
+
+  it("deletes the item it just created when the note cannot be updated", async () => {
+    // A foreign or missing noteId matches zero rows. The item must not survive as an
+    // orphan -- there is no delete surface for media_items.
+    const orphanTitle = `Orphan ${Date.now()}`;
+    await expect(media.resolveNoteMediaLink(
+      "00000000-0000-4000-8000-000000000000",
+      { status: "finished", pending_item: { kind: "movie", title: orphanTitle } },
+    )).rejects.toMatchObject({ kind: "not_found" });
+
+    const { data } = await createUserClient(alice.token).from("media_items")
+      .select("id").eq("user_id", alice.id).eq("title", orphanTitle);
+    expect(data).toEqual([]);
+  });
+
+  it("leaves a pre-existing item alone when the note cannot be updated", async () => {
+    // Unique title so this test's assertions do not depend on run order against the
+    // "clears pending_item" test, which also logs a book titled "Piranesi".
+    const title = `Piranesi ${Date.now()}`;
+    const note = await offlineMediaNote({ kind: "book", title });
+    await media.resolveNoteMediaLink(note.id, {
+      status: "finished", pending_item: { kind: "book", title },
+    });
+
+    await expect(media.resolveNoteMediaLink(
+      "00000000-0000-4000-8000-000000000000",
+      { status: "finished", pending_item: { kind: "book", title } },
+    )).rejects.toMatchObject({ kind: "not_found" });
+
+    const { data } = await createUserClient(alice.token).from("media_items")
+      .select("id").eq("user_id", alice.id).eq("title", title).is("deleted_at", null);
+    expect(data).toHaveLength(1);   // compensation must not touch what it did not create
   });
 });

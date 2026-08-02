@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { pendingMediaItem, type LogMediaInput } from "@cortex/shared";
-import { mapPostgrestError } from "../errors.js";
+import { mapPostgrestError, notFound } from "../errors.js";
 import { anchoredIRegex } from "../like.js";
 import { NoteService, type Note } from "../notes/service.js";
 
@@ -129,16 +129,31 @@ export class MediaService {
     const parsed = pendingMediaItem.safeParse(meta.pending_item);
     if (!parsed.success) return null;
 
-    const item = await this.findOrCreateItem(parsed.data);
+    // findOrCreate, not findOrCreateItem: the `created` flag is what makes the
+    // compensation below correct -- an item that existed before this call must be left
+    // alone even when the note update fails.
+    const { item, created } = await this.findOrCreate(parsed.data);
 
     // pending_item is scaffolding, not data: leaving it behind would make the note
-    // re-resolve on every subsequent upload and would fail domainMetaSchemas.media,
-    // which is strict.
+    // re-resolve on every subsequent upload.
     const { pending_item: _resolved, ...cleaned } = meta;
-    const { error } = await this.client.from("notes")
+    const { data, error } = await this.client.from("notes")
       .update({ media_item_id: item.id, domain_meta: cleaned })
-      .eq("id", noteId).eq("user_id", this.userId);
-    if (error) throw mapPostgrestError(error);
+      .eq("id", noteId).eq("user_id", this.userId)
+      .select("id").maybeSingle();
+
+    // A missing or foreign noteId matches zero rows. WITHOUT the select this returns
+    // success, and the item created moments ago becomes a permanent orphan -- there is no
+    // delete surface for media_items. logMedia already compensates for exactly this shape
+    // of failure; so must this.
+    if (error || data === null) {
+      if (created) {
+        await this.client.from("media_items").delete()
+          .eq("id", item.id).eq("user_id", this.userId)
+          .then(() => undefined, () => undefined);
+      }
+      throw error ? mapPostgrestError(error) : notFound();
+    }
 
     return item;
   }
