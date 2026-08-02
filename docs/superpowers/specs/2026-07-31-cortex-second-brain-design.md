@@ -545,6 +545,14 @@ Each phase ends demoable (GIF-able) and shippable to your own daily use. Order o
 
 Dependencies worth noting: feedback capture (phase 2) intentionally predates the memory layer (phase 8) so phase 8 starts with months of signal; digests (7) precede memory (8) so memory-aware digests are a cheap upgrade in 8, not a rewrite.
 
+**Amendment 2026-08-02 — phase 1 was split as built:** **1a** web notes (merged), **1c**
+life-domain capture (merged, per the life-domains spec), **1b** mobile offline sync
+(`docs/superpowers/specs/2026-08-02-phase-1b-mobile-offline-sync-design.md`). Phase 1b is
+**Android only** — iOS is not built, not tested and not supported; §5's "Expo + Next.js
+clients" should be read that way until an iOS phase is specced. Phase 1b also narrows
+§6.7's sync scope to the tables that have services and UI, and adds §15's device-security
+controls.
+
 ---
 
 ## 14. Risks
@@ -557,3 +565,96 @@ Dependencies worth noting: feedback capture (phase 2) intentionally predates the
 | Two data-access paths (mobile local SQLite vs web network) | shared zod types + per-platform thin data hooks behind a common interface in `packages/core`; divergence contained to the hook layer |
 | Whisper/Voyage/provider churn | all providers behind `packages/ai` interfaces; embedding model+dims recorded per chunk to support migration re-embeds |
 | Solo-builder scope | phases are independently shippable; the plan survives stopping at any phase ≥3 with a coherent product |
+| Device-local corpus (from phase 1b) | SQLCipher-encrypted local DB, key in Android Keystore, mandatory app lock, sign-out wipe — §15.3 |
+| Sensitive content reaching third parties | `sensitive` tier keeps flagged notes off every enrichment, chat, digest and grounding path — §15.4 |
+
+---
+
+## 15. Security & data protection
+
+Added 2026-08-02. Consolidates the security posture previously scattered across §11
+(auth and isolation) and the life-domains spec §5 (privacy model), and covers what
+neither did: **data at rest on a user's device**, introduced by phase 1b.
+
+### 15.1 Threat model and what this system does not defend against
+
+The privacy model is stated plainly rather than overstated. Protection here =
+**provable isolation** (tested RLS + tested sync rules) + **provider data-usage
+guarantees** (paid tier only) + **operational hygiene** (no-content logging) +
+**informed consent** (tester disclosure).
+
+Explicitly **not** defended against, by design:
+
+| Not defended | Why |
+|---|---|
+| The operator reading the database | No E2EE (§4 item 5) — server-side AI must read plaintext. The operator can technically read everything |
+| A leaked `service_role` key | It bypasses RLS by definition. Treated as a total compromise; key rotation is the response |
+| A compromised AI provider | Content is sent to Gemini under paid-tier terms. The `sensitive` tier (§15.4) is the control for content that must never be sent |
+| A rooted device | SQLCipher and Keystore raise the bar against casual and opportunistic access, not against an attacker with root |
+
+### 15.2 Cortex is not a password manager
+
+Account credentials must not be stored in cortex. This is a structural property, not a
+policy preference. A password placed in a note is replicated to the phone (phase 1b),
+sent to Gemini for embedding and auto-tagging (phase 2), pulled into chat prompts
+(phase 3), summarised into weekly digests (phase 7), written to plaintext Markdown by
+export, and present in every database backup.
+
+A dedicated password manager has the defining property cortex cannot have: the server
+never sees plaintext. Cortex is the right home for *"bank account X, opened March 2024,
+used for rent"* — and the wrong home for its password. Stated in the tester-disclosure
+doc (§15.6).
+
+### 15.3 Data at rest on the device (phase 1b onward)
+
+| Control | Requirement |
+|---|---|
+| Local database | SQLCipher-encrypted; key generated on first run |
+| Key storage | Android Keystore via `expo-secure-store`; never AsyncStorage, never in a backup |
+| Session storage | `expo-secure-store`, not AsyncStorage — the Supabase refresh token is long-lived |
+| App lock | **Mandatory** biometric or device credential; `biometricsSecurityLevel: 'strong'` (Class 3), device-credential fallback enabled |
+| Android backup | `android:allowBackup="false"` — the DB would be copied to Drive while its key is not |
+| Sign-out | Wipes the local database and deletes the Keystore key |
+| Hard delete | Purged rows must actually leave local SQLite, tested explicitly |
+| Key invalidation | Enrolling a new biometric destroys the key; recovery is wipe + resync, with an explicit warning that un-uploaded local changes will be lost |
+
+Full detail and the Expo/PowerSync specifics are in the phase 1b spec §7.
+
+### 15.4 The `sensitive` tier (implemented in phase 2)
+
+`notes.sensitive boolean not null default false`. When true, the note is excluded from
+chunking and embedding, from auto-tagging, from chat retrieval by default, from digests,
+from `memory_facts` generation, and from web-search grounding; its content is masked in
+list views until revealed.
+
+This is a real control, not a half-measure: it does not pretend to be encryption, it
+keeps the row off every path that reaches a third party. It is consistent with the
+life-domains spec's rejection of column encryption, which would place the key beside the
+data — E2EE's costs without its guarantee.
+
+Accepted cost: FTS and semantic search do not find sensitive notes.
+
+### 15.5 Isolation is two independently tested layers
+
+- **RLS** governs every API-path access and every client write. Default-deny, policy
+  `user_id = auth.uid()`, tested by a cross-user suite.
+- **PowerSync sync rules** govern replication, which **bypasses RLS** — logical
+  replication reads with elevated Postgres credentials. Sync rules are therefore the only
+  thing preventing cross-user bucket leakage, and get their own automated isolation tests.
+
+Both are reviewed in the same PR whenever a synced table changes. Isolation tests must
+contain real rows for the *other* user: an assertion that "bob reads zero rows" from a
+table where alice also has none stays green with the policy deleted (issue-log E3).
+
+### 15.6 Operational rules
+
+1. **No-content logging** — loggers and (phase 10) Sentry record ids and counts, never
+   note bodies, check-in values, or chat text.
+2. **Paid AI tier only**, verified before phase 2 ships — free-tier prompts are used for
+   training; health, mood and finance content flows through this API.
+3. **Credentials never sync and never leave the server** — `integrations.credentials` via
+   Supabase Vault, excluded from every sync rule.
+4. **Account wipe** — `DELETE /me` cascade-purges all rows and deletes the auth user.
+5. **Tester disclosure** — one page shown at invite: no E2EE; the operator can technically
+   read the database; content is processed by Google's API under paid-tier terms; **do not
+   store passwords**; full export and hard delete are available.
