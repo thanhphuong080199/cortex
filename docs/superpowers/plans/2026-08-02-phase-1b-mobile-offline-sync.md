@@ -1238,7 +1238,12 @@ git commit -m "feat(api): POST /sync/upload operation router"
 - Consumes: `SYNC_TABLES` from `@cortex/shared` (Task 2).
 - Produces:
   - `AppSchema: Schema` — the PowerSync client schema, one table per `SYNC_TABLES` entry plus the local-only `note_edit_base`.
-  - `SYNC_RULES_PATH: string` — absolute path to the YAML, for the deploy checklist.
+
+  No path export for the YAML. An earlier draft promised a `SYNC_RULES_PATH`, but nothing
+  consumes it: the deploy checklist names the file by repo path, and Task 12's isolation
+  test reads it with its own relative path. Worse, `main` points at `dist/` while `build`
+  is plain `tsc` with no asset copy, so such an export would resolve correctly from source
+  and to a nonexistent file from the built package — worse than not having it.
 
 Copy `tsconfig.json`, `tsconfig.build.json` and `eslint.config.mjs` verbatim from `packages/core`, changing only relative paths if any are package-relative.
 
