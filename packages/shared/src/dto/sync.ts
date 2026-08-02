@@ -23,11 +23,14 @@ export const syncOp = z.object({
   op_id: z.string().min(1).max(64),
   op: syncOpKind,
   table: z.enum(SYNC_TABLES),
-  id: z.string().uuid(),
+  // Zod v4 top-level form, matching tags.ts and media.ts. The chained z.string().uuid()
+  // still works but is deprecated and would leave two styles in one package.
+  id: z.uuid(),
   data: z.record(z.string(), z.unknown()).nullish(),
-  // The notes.updated_at the client's edit was based on. Present only on notes PATCH;
-  // absent means "no base known", which the router treats as an unconditional update.
-  base_updated_at: z.string().datetime().optional(),
+  // The notes.updated_at the client's edit was based on. The ROUTER sends it only on a
+  // notes PATCH -- this schema does not gate that, and accepting a stray one elsewhere is
+  // harmless because nothing downstream reads it.
+  base_updated_at: z.iso.datetime().optional(),
 });
 export type SyncOp = z.infer<typeof syncOp>;
 
