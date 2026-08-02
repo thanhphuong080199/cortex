@@ -1637,14 +1637,17 @@ describe("getOrCreateDatabaseKey", () => {
     expect(r.status).toBe("lost");
   });
 
-  it("issues a usable new key alongside the 'lost' status", async () => {
-    const first = await getOrCreateDatabaseKey();
+  it("issues a usable, freshly stored key alongside the 'lost' status", async () => {
+    await getOrCreateDatabaseKey();
     simulateBiometricEnrollment();
+    expect(store.has(DB_KEY_NAME)).toBe(false);       // the OS really destroyed it
+
     const r = await getOrCreateDatabaseKey();
     expect(r.key).toMatch(/^[0-9a-f]{64}$/);
-    // Same deterministic mock RNG, so equality here proves only that a key was issued;
-    // what matters is that the caller is told to wipe first.
-    expect(r.key).toBe(first.key);
+    // The recovery must leave a key actually PERSISTED and auth-gated -- returning a key
+    // it failed to store would open the new database once and lock the user out forever.
+    expect(store.get(DB_KEY_NAME)).toBe(r.key);
+    expect(authGated.has(DB_KEY_NAME)).toBe(true);
   });
 
   it("returns to 'created' after clearDatabaseKey, since the init flag is gone too", async () => {
