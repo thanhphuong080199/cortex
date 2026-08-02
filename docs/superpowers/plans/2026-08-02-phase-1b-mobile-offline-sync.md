@@ -296,9 +296,11 @@ git commit -m "feat(shared): syncUploadInput DTO and SYNC_TABLES allow-list"
     id: string,
     input: UpdateNoteInput,
     baseUpdatedAt?: string,
-  ): Promise<{ note: Note; conflictCopy: Note | null }>
+  ): Promise<{ note: Note; conflictCopy: Note | null; linkFailed?: boolean }>
   ```
-  Task 5's router calls this for every `notes` PATCH.
+  Task 5's router calls this for every `notes` PATCH. `linkFailed` is present and `true`
+  only when the copy was written but its `conflict_copy` link could not be — the copy is
+  never discarded over a link failure, but the failure is never silent either.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -370,6 +372,36 @@ describe("NoteService.updateWithConflictCopy", () => {
     expect(r.note.content).toBe("phone edit");
   });
 
+  it("reports linkFailed when the link cannot be written, without losing the copy", async () => {
+    // Force the link insert to fail by pointing the service at a client whose `links`
+    // writes are rejected -- the copy must still exist and be returned.
+    const note = await svc.create({ content: "original" });
+    const base = note.updated_at;
+    await svc.update(note.id, { content: "web edit" });
+
+    const sabotaged = createUserClient(alice.token);
+    const realFrom = sabotaged.from.bind(sabotaged);
+    sabotaged.from = ((table: string) =>
+      table === "links"
+        ? { insert: async () => ({ error: { code: "42501", message: "denied" } }) }
+        : realFrom(table)) as typeof sabotaged.from;
+
+    const r = await new NoteService(sabotaged, alice.id)
+      .updateWithConflictCopy(note.id, { content: "phone edit" }, base);
+
+    expect(r.linkFailed).toBe(true);
+    expect(r.conflictCopy).not.toBeNull();
+    expect(r.conflictCopy!.content).toBe("phone edit");   // the text survived
+  });
+
+  it("omits linkFailed entirely on the happy path", async () => {
+    const note = await svc.create({ content: "original" });
+    const base = note.updated_at;
+    await svc.update(note.id, { content: "web edit" });
+    const r = await svc.updateWithConflictCopy(note.id, { content: "phone edit" }, base);
+    expect(r.linkFailed).toBeUndefined();
+  });
+
   it("copies only the body, applying metadata to the surviving note", async () => {
     const note = await svc.create({ content: "original" });
     const base = note.updated_at;
@@ -437,16 +469,19 @@ Add to `packages/core/src/notes/service.ts`, inside `class NoteService`, after `
       title: note.title ?? undefined,
     });
 
-    // Best-effort: the copy is the thing that must not be lost. A failed link leaves an
-    // untraceable-but-present note, which beats throwing away the text to report an error.
-    await this.client.from("links").insert({
+    // The copy is the thing that must not be lost, so a failed link does NOT throw --
+    // an untraceable-but-present note beats discarding the user's text to report an error.
+    // But it must not vanish either: if `00015` were missing from an environment, every
+    // conflict copy would silently become an orphan with nothing to notice it by. The flag
+    // is how the caller finds out.
+    const { error: linkError } = await this.client.from("links").insert({
       user_id: this.userId,
       from_note_id: conflictCopy.id,
       to_note_id: id,
       kind: "conflict_copy",
-    }).then(() => undefined, () => undefined);
+    });
 
-    return { note, conflictCopy };
+    return { note, conflictCopy, ...(linkError ? { linkFailed: true } : {}) };
   }
 
   /** Reads one live note the caller owns. not_found for missing, deleted, or foreign. */
