@@ -460,9 +460,10 @@ for a turbo-run task must be declared in `turbo.json` or it does not exist to th
 
 1. **PowerSync Cloud instance** created and connected to the hosted Supabase project;
    connection details and sync rules uploaded.
-2. **Railway decision (issue-log B4)** — the free trial lapses around 2026-08-31. Without
-   a live API, `POST /sync/upload` does not exist and mobile cannot upload at all. This
-   phase's write path depends on it.
+2. **Railway (issue-log B4) — decided 2026-08-02: subscribe to Hobby ($5/mo) as the
+   2026-08-31 trial expiry approaches.** No longer an open decision. It remains an entry
+   gate only in the sense that the subscription must be active before phase 1b ships:
+   without a live API, `POST /sync/upload` does not exist and mobile cannot upload at all.
 3. **Android dev-client build** via EAS. PowerSync and SQLCipher are native modules;
    **Expo Go cannot run this app.** `eas.json` exists but has never produced a build.
 
