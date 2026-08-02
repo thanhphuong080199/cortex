@@ -567,9 +567,9 @@ describe("MediaService.resolveNoteMediaLink", () => {
   });
 
   it("creates the item and stamps media_item_id", async () => {
-    const note = await offlineMediaNote({ kind: "film", title: "Arrival" });
+    const note = await offlineMediaNote({ kind: "movie", title: "Arrival" });
     const item = await media.resolveNoteMediaLink(note.id, {
-      status: "finished", pending_item: { kind: "film", title: "Arrival" },
+      status: "finished", pending_item: { kind: "movie", title: "Arrival" },
     });
     expect(item!.title).toBe("Arrival");
     const stored = await notes.getById(note.id);
@@ -577,24 +577,61 @@ describe("MediaService.resolveNoteMediaLink", () => {
   });
 
   it("reuses the existing item when two devices log the same title", async () => {
-    const first = await offlineMediaNote({ kind: "film", title: "Dune" });
+    const first = await offlineMediaNote({ kind: "movie", title: "Dune" });
     const a = await media.resolveNoteMediaLink(first.id, {
-      status: "finished", pending_item: { kind: "film", title: "Dune" },
+      status: "finished", pending_item: { kind: "movie", title: "Dune" },
     });
-    const second = await offlineMediaNote({ kind: "film", title: "dune" }); // different casing
+    const second = await offlineMediaNote({ kind: "movie", title: "dune" }); // different casing
     const b = await media.resolveNoteMediaLink(second.id, {
-      status: "finished", pending_item: { kind: "film", title: "dune" },
+      status: "finished", pending_item: { kind: "movie", title: "dune" },
     });
     expect(b!.id).toBe(a!.id);
   });
 
   it("does not wildcard on % or *", async () => {
-    await offlineMediaNote({ kind: "film", title: "Dune" });
-    const note = await offlineMediaNote({ kind: "film", title: "D%" });
+    // Seed the "Dune" ITEM explicitly. Relying on an earlier test having created it
+    // makes this pass vacuously when run in isolation or under a shuffled order --
+    // and a wildcard-regression guard that quietly stops guarding is worse than none.
+    const seed = await offlineMediaNote({ kind: "movie", title: "Dune" });
+    await media.resolveNoteMediaLink(seed.id, {
+      status: "finished", pending_item: { kind: "movie", title: "Dune" },
+    });
+
+    const note = await offlineMediaNote({ kind: "movie", title: "D%" });
     const item = await media.resolveNoteMediaLink(note.id, {
-      status: "finished", pending_item: { kind: "film", title: "D%" },
+      status: "finished", pending_item: { kind: "movie", title: "D%" },
     });
     expect(item!.title).toBe("D%");   // a NEW item, not the existing "Dune"
+  });
+
+  it("deletes the item it just created when the note cannot be updated", async () => {
+    // A foreign or missing noteId matches zero rows. The item must not survive as an
+    // orphan -- there is no delete surface for media_items.
+    const orphanTitle = `Orphan ${Date.now()}`;
+    await expect(media.resolveNoteMediaLink(
+      "00000000-0000-4000-8000-000000000000",
+      { status: "finished", pending_item: { kind: "movie", title: orphanTitle } },
+    )).rejects.toMatchObject({ kind: "not_found" });
+
+    const { data } = await createUserClient(alice.token).from("media_items")
+      .select("id").eq("user_id", alice.id).eq("title", orphanTitle);
+    expect(data).toEqual([]);
+  });
+
+  it("leaves a pre-existing item alone when the note cannot be updated", async () => {
+    const note = await offlineMediaNote({ kind: "book", title: "Piranesi" });
+    await media.resolveNoteMediaLink(note.id, {
+      status: "finished", pending_item: { kind: "book", title: "Piranesi" },
+    });
+
+    await expect(media.resolveNoteMediaLink(
+      "00000000-0000-4000-8000-000000000000",
+      { status: "finished", pending_item: { kind: "book", title: "Piranesi" } },
+    )).rejects.toMatchObject({ kind: "not_found" });
+
+    const { data } = await createUserClient(alice.token).from("media_items")
+      .select("id").eq("user_id", alice.id).eq("title", "Piranesi").is("deleted_at", null);
+    expect(data).toHaveLength(1);   // compensation must not touch what it did not create
   });
 
   it("clears pending_item from the stored meta once resolved", async () => {
@@ -608,13 +645,13 @@ describe("MediaService.resolveNoteMediaLink", () => {
   });
 
   it("surfaces a contradicting year as a conflict", async () => {
-    const first = await offlineMediaNote({ kind: "film", title: "Solaris", year: 1972 });
+    const first = await offlineMediaNote({ kind: "movie", title: "Solaris", year: 1972 });
     await media.resolveNoteMediaLink(first.id, {
-      status: "finished", pending_item: { kind: "film", title: "Solaris", year: 1972 },
+      status: "finished", pending_item: { kind: "movie", title: "Solaris", year: 1972 },
     });
-    const second = await offlineMediaNote({ kind: "film", title: "Solaris", year: 2002 });
+    const second = await offlineMediaNote({ kind: "movie", title: "Solaris", year: 2002 });
     await expect(media.resolveNoteMediaLink(second.id, {
-      status: "finished", pending_item: { kind: "film", title: "Solaris", year: 2002 },
+      status: "finished", pending_item: { kind: "movie", title: "Solaris", year: 2002 },
     })).rejects.toMatchObject({ kind: "conflict" });
   });
 });
@@ -668,16 +705,31 @@ Add to `packages/core/src/media/service.ts`, inside `class MediaService`:
     const parsed = pendingMediaItem.safeParse(meta.pending_item);
     if (!parsed.success) return null;
 
-    const item = await this.findOrCreateItem(parsed.data);
+    // findOrCreate, not findOrCreateItem: the `created` flag is what makes the
+    // compensation below correct -- an item that existed before this call must be left
+    // alone even when the note update fails.
+    const { item, created } = await this.findOrCreate(parsed.data);
 
     // pending_item is scaffolding, not data: leaving it behind would make the note
-    // re-resolve on every subsequent upload and would fail domainMetaSchemas.media,
-    // which is strict.
+    // re-resolve on every subsequent upload.
     const { pending_item: _resolved, ...cleaned } = meta;
-    const { error } = await this.client.from("notes")
+    const { data, error } = await this.client.from("notes")
       .update({ media_item_id: item.id, domain_meta: cleaned })
-      .eq("id", noteId).eq("user_id", this.userId);
-    if (error) throw mapPostgrestError(error);
+      .eq("id", noteId).eq("user_id", this.userId)
+      .select("id").maybeSingle();
+
+    // A missing or foreign noteId matches zero rows. WITHOUT the select this returns
+    // success, and the item created moments ago becomes a permanent orphan -- there is no
+    // delete surface for media_items. logMedia already compensates for exactly this shape
+    // of failure; so must this.
+    if (error || data === null) {
+      if (created) {
+        await this.client.from("media_items").delete()
+          .eq("id", item.id).eq("user_id", this.userId)
+          .then(() => undefined, () => undefined);
+      }
+      throw error ? mapPostgrestError(error) : notFound();
+    }
 
     return item;
   }
@@ -820,7 +872,7 @@ describe("POST /sync/upload", () => {
         op_id: "1", op: "PUT", table: "notes", id,
         data: {
           content: "loved it", title: "Arrival", domain: "media",
-          domain_meta: { status: "finished", pending_item: { kind: "film", title: "Arrival" } },
+          domain_meta: { status: "finished", pending_item: { kind: "movie", title: "Arrival" } },
         },
       }],
     }).expect(201);
@@ -1013,10 +1065,12 @@ The router needs the device's id to become the row's id. Add to `packages/core/s
   async createWithId(id: string, input: CreateNoteInput & CreateNoteOptions): Promise<Note> {
     const domainMeta = input.domainMeta ?? {};
     if (input.domain) {
-      // pending_item is scaffolding the server strips in resolveNoteMediaLink; it is not
-      // part of any domain schema, so validate what will remain after resolution.
-      const { pending_item: _pending, ...validatable } = domainMeta;
-      const check = validateDomainMeta(input.domain, validatable);
+      // No stripping: `pending_item` is a legitimate member of domainMetaSchemas.media
+      // (Task 4). It must PERSIST when resolution fails -- a year 409, say -- because it
+      // is the only record of which item the note was trying to reach, and therefore the
+      // only thing a retry could work from. Stripping it here would make that failure
+      // silently unrecoverable.
+      const check = validateDomainMeta(input.domain, domainMeta);
       if (!check.success) throw { kind: "validation", message: "domain_meta does not fit domain", cause: check.error } as const;
     }
     const { data, error } = await this.client.from("notes")
@@ -3763,8 +3817,12 @@ git commit -m "feat(mobile): offline 2-tap mood check-in with undo"
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import { usePowerSync, useQuery } from "@powersync/react-native";
+import { mediaKind } from "@cortex/shared";
 
-const KINDS = ["film", "series", "book", "game", "album", "podcast"] as const;
+// Derived, never a parallel list: a hand-written copy of the kinds drifted from
+// mediaKind during planning ("film"/"series"/"album" are not valid kinds) and the DB
+// check constraint would have rejected every log at runtime.
+const KINDS = mediaKind.options;
 const STATUSES = ["finished", "in_progress", "abandoned"] as const;
 
 /**
@@ -3779,7 +3837,7 @@ const STATUSES = ["finished", "in_progress", "abandoned"] as const;
  */
 export function MediaLogForm() {
   const db = usePowerSync();
-  const [kind, setKind] = useState<(typeof KINDS)[number]>("film");
+  const [kind, setKind] = useState<(typeof KINDS)[number]>(KINDS[0]);
   const [title, setTitle] = useState("");
   const [rating, setRating] = useState<number | null>(null);
   const [status, setStatus] = useState<(typeof STATUSES)[number]>("finished");
