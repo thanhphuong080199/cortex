@@ -888,8 +888,26 @@ If the connection test fails while resolving the address rather than authenticat
 is the Supabase direct-connection networking issue, not a wrong password; see PowerSync's
 Supabase integration page.
 
-**Client auth:** enable **Supabase**. PowerSync then verifies Supabase JWTs and
-`auth.user_id()` resolves to the token's subject. No manual JWKS configuration.
+**Client auth:** enable **Supabase**, and **leave the JWT secret field empty**.
+
+That empty field is the correct setting, not an omission. This project issues **asymmetric
+(ES256)** tokens — verified directly:
+
+```bash
+curl -s https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json
+# {"keys":[{"alg":"ES256","kty":"EC","use":"sig",...}]}   → asymmetric, leave secret empty
+# {"keys":[]} or 404                                      → legacy HS256, secret required
+```
+
+PowerSync auto-detects the project and configures the JWKS URI and audience itself. The
+`supabase_jwt_secret` option exists only for projects still on legacy HS256 symmetric keys.
+
+Pasting the legacy secret anyway does not fail loudly: PowerSync would try to verify an
+ES256 token with an HS256 key, and every sync would fail authentication with a message that
+reads like a bad token rather than a wrong algorithm. `apps/api/src/auth/supabase-auth.guard.ts`
+records the same trap from the other side — `supabase status` still prints a legacy
+`JWT_SECRET` for backward compatibility, and that secret does not verify real tokens, which
+is why `SUPABASE_JWT_SECRET` is left unset in this repo's `.env` files.
 
 **Sync streams:** paste the contents of `packages/sync/src/sync-rules.yaml`. It uses Sync
 Streams edition 3 — PowerSync classes the older `bucket_definitions` form as legacy.
