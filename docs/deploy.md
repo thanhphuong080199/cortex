@@ -914,10 +914,25 @@ Streams edition 3 — PowerSync classes the older `bucket_definitions` form as l
 
 ## 3. Client environment
 
+Take the instance URL from the PowerSync Dashboard — instance → settings/overview →
+**Instance URL**. **Copy it whole; do not assemble it from an instance id.** The host
+differs between instances and regions (PowerSync's own docs show more than one form), so a
+constructed URL is a guess.
+
 ```
-EXPO_PUBLIC_POWERSYNC_URL=https://<instance-id>.powersync.journeyapps.com
+EXPO_PUBLIC_POWERSYNC_URL=<pasted verbatim from the dashboard>
 EXPO_PUBLIC_API_URL=https://<api>.up.railway.app
 ```
+
+Check it resolves before wiring anything to it:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' "$EXPO_PUBLIC_POWERSYNC_URL"
+```
+
+**Any** HTTP status — `401` and `404` included — means DNS and TLS are fine and the URL is
+live; the endpoint is not meant to answer an unauthenticated bare GET. A connection or
+name-resolution error means the URL is wrong or the instance is still provisioning.
 
 `apps/mobile/.env` is gitignored and CI fails if any `.env` reaches a runner.
 
