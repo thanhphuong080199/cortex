@@ -47,6 +47,34 @@ export class NoteService {
     return data as Note;
   }
 
+  /**
+   * create(), but with the id chosen by the caller. Only the sync upload path uses this:
+   * the device already inserted this row into its local SQLite under this id, so the
+   * server row must share it -- otherwise replication would deliver a second copy and the
+   * user would see their note twice.
+   */
+  async createWithId(id: string, input: CreateNoteInput & CreateNoteOptions): Promise<Note> {
+    const domainMeta = input.domainMeta ?? {};
+    if (input.domain) {
+      // No stripping: `pending_item` is a legitimate member of domainMetaSchemas.media
+      // (Task 4). It must PERSIST when resolution fails -- a year 409, say -- because it
+      // is the only record of which item the note was trying to reach, and therefore the
+      // only thing a retry could work from. Stripping it here would make that failure
+      // silently unrecoverable.
+      const check = validateDomainMeta(input.domain, domainMeta);
+      if (!check.success) throw { kind: "validation", message: "domain_meta does not fit domain", cause: check.error } as const;
+    }
+    const { data, error } = await this.client.from("notes")
+      .insert({
+        id, user_id: this.userId, content: input.content, title: input.title ?? null,
+        domain: input.domain ?? null, domain_meta: domainMeta,
+        media_item_id: input.mediaItemId ?? null,
+      })
+      .select().single();
+    if (error) throw mapPostgrestError(error);
+    return data as Note;
+  }
+
   async update(id: string, input: UpdateNoteInput): Promise<Note> {
     // Patch on `!== undefined`, not truthiness: `title: null` means "clear the title"
     // and `content: ""` is a legitimate empty note.
