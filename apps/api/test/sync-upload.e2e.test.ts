@@ -1,4 +1,5 @@
 import { INestApplication } from "@nestjs/common";
+import { createUserClient } from "@cortex/core";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { auth, bootstrapTestApp, makeUser, type TestUser } from "./harness";
@@ -112,5 +113,76 @@ describe("POST /sync/upload", () => {
       ops: [{ op_id: "2", op: "DELETE", table: "checkins", id }],
     }).expect(201);
     expect(res.body.applied).toEqual(["2"]);
+  });
+
+  it("reports media_unresolved without failing the op, and a resend does not wedge (deadlock regression guard)", async () => {
+    const title = `Solaris ${uuid()}`;
+    // Establish the item with a fixed year -- the second log below contradicts it.
+    await post(alice.token, {
+      ops: [{
+        op_id: "1", op: "PUT", table: "notes", id: uuid(),
+        data: {
+          content: "first watch", domain: "media",
+          domain_meta: { status: "finished", pending_item: { kind: "movie", title, year: 1972 } },
+        },
+      }],
+    }).expect(201);
+
+    const secondNoteId = uuid();
+    const conflictingOp = {
+      op_id: "2", op: "PUT", table: "notes", id: secondNoteId,
+      data: {
+        content: "rewatch", domain: "media",
+        domain_meta: { status: "finished", pending_item: { kind: "movie", title, year: 2002 } },
+      },
+    };
+
+    const res = await post(alice.token, { ops: [conflictingOp] }).expect(201);
+    // The note write itself succeeded -- the op is applied, never failed, even though its
+    // media resolution could not complete.
+    expect(res.body.applied).toEqual(["2"]);
+    expect(res.body.failed).toEqual([]);
+    expect(res.body.media_unresolved).toEqual([{ op_id: "2", note_id: secondNoteId, kind: "conflict" }]);
+
+    // PowerSync resends the identical op whenever a response is lost. Before createWithId
+    // was made idempotent, this resend hit the 23505 the first PUT created and threw
+    // before ever reaching media resolution -- the deadlock the reviewer flagged. It must
+    // not throw, and it must not silently disappear from `applied` either.
+    const resend = await post(alice.token, { ops: [conflictingOp] }).expect(201);
+    expect(resend.body.applied).toEqual(["2"]);
+    expect(resend.body.failed).toEqual([]);
+    expect(resend.body.media_unresolved).toEqual([{ op_id: "2", note_id: secondNoteId, kind: "conflict" }]);
+  });
+
+  it("a resent PUT does not create a duplicate note (idempotent createWithId)", async () => {
+    const id = uuid();
+    const op = { op_id: "1", op: "PUT", table: "notes", id, data: { content: "idempotent" } };
+
+    const first = await post(alice.token, { ops: [op] }).expect(201);
+    expect(first.body.applied).toEqual(["1"]);
+
+    const second = await post(alice.token, { ops: [op] }).expect(201);
+    expect(second.body.applied).toEqual(["1"]);
+
+    const { data } = await createUserClient(alice.token).from("notes").select("id").eq("id", id);
+    expect(data).toHaveLength(1);
+  });
+
+  it("routes tags through the generic writer, and a PATCH on a missing row fails not_found rather than silently applying", async () => {
+    const id = uuid();
+    const res = await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "tags", id, data: { name: `sync-tag-${id}` } }],
+    }).expect(201);
+    expect(res.body.applied).toEqual(["1"]);
+
+    // Regression guard for Finding 2: without a `.select().single()` on the generic
+    // writer's PATCH branch, a PATCH against a row that does not exist matches zero rows,
+    // PostgREST reports no error, and the op would land in `applied` while nothing changed.
+    const missing = uuid();
+    const res2 = await post(alice.token, {
+      ops: [{ op_id: "2", op: "PATCH", table: "tags", id: missing, data: { name: "ghost" } }],
+    }).expect(201);
+    expect(res2.body.applied).toEqual([]);
+    expect(res2.body.failed).toEqual([{ op_id: "2", kind: "not_found" }]);
   });
 });

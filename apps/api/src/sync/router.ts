@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { CheckinService, MediaService, NoteService, type CoreErrorKind } from "@cortex/core";
+import {
+  CheckinService, MediaService, NoteService, mapPostgrestError, type CoreErrorKind,
+} from "@cortex/core";
 import type { SyncOp } from "@cortex/shared";
 
 export interface SyncUploadResult {
@@ -11,6 +13,10 @@ export interface SyncUploadResult {
   // see NoteService.updateWithConflictCopy. The copy itself is never lost; this is how a
   // caller finds the ones that need re-linking.
   link_failures: string[];
+  // A note whose write landed but whose media resolution then failed -- e.g. a year
+  // conflict from MediaService.resolveNoteMediaLink. NOT `failed`: the note already
+  // exists, so a PowerSync resend cannot help and would only wedge the queue.
+  media_unresolved: { op_id: string; note_id: string; kind: CoreErrorKind }[];
 }
 
 function asCoreError(err: unknown): { kind: CoreErrorKind; message?: string } {
@@ -41,7 +47,8 @@ export async function applySyncOps(
   const checkins = new CheckinService(client, userId);
 
   const result: SyncUploadResult = {
-    applied: [], failed: [], conflict_copies: [], resolved_media: [], link_failures: [],
+    applied: [], failed: [], conflict_copies: [], resolved_media: [],
+    link_failures: [], media_unresolved: [],
   };
 
   for (const op of ops) {
@@ -53,12 +60,11 @@ export async function applySyncOps(
         case "checkins":
           if (op.op === "DELETE") await checkins.softDelete(op.id);
           else if (op.op === "PUT") {
-            await client.from("checkins").insert({
-              id: op.id, user_id: userId,
-              mood: op.data?.mood ?? null,
-              energy: op.data?.energy ?? null,
-              label: op.data?.label ?? null,
-            }).select().single().then(({ error }) => { if (error) throw error; });
+            await checkins.createWithId(op.id, {
+              mood: op.data?.mood as number | undefined,
+              energy: op.data?.energy as number | undefined,
+              label: op.data?.label as string | undefined,
+            });
           } else throw { kind: "validation", message: "checkins are insert-or-delete only" };
           break;
         default:
@@ -110,9 +116,21 @@ async function applyNoteOp(
 
   // Offline media logs arrive as ordinary notes carrying pending_item; identity is
   // resolved here because the device could not consult the unique index (spec §5.3).
+  //
+  // Resolution failure must NOT fail the op. The note is already durably written, so
+  // reporting `failed` would make PowerSync resend an op whose resend cannot help -- and
+  // before createWithId became idempotent, that resend threw 23505 before ever reaching
+  // this code, wedging the note's pending_item unresolved forever. A year 409 is the
+  // realistic trigger and it does not clear on retry, so it needs a report, not a loop.
   if (domainMeta.pending_item !== undefined) {
-    const item = await media.resolveNoteMediaLink(op.id, domainMeta);
-    if (item) result.resolved_media.push({ op_id: op.op_id, note_id: op.id });
+    try {
+      const item = await media.resolveNoteMediaLink(op.id, domainMeta);
+      if (item) result.resolved_media.push({ op_id: op.op_id, note_id: op.id });
+    } catch (err) {
+      result.media_unresolved.push({
+        op_id: op.op_id, note_id: op.id, kind: asCoreError(err).kind,
+      });
+    }
   }
 }
 
@@ -125,16 +143,30 @@ async function applyNoteOp(
 async function applyGenericOp(
   client: SupabaseClient, userId: string, op: SyncOp,
 ): Promise<void> {
+  // Every branch selects and routes through mapPostgrestError. Without the select, a
+  // PATCH or DELETE against a missing or already-deleted row matches zero rows, PostgREST
+  // returns no error, and the op lands in `applied` while nothing changed -- the device
+  // believes an edit stuck when it did not. CheckinService.softDelete and
+  // NoteService.softDelete both already use .select().single() for exactly this reason.
+  // Raw PostgrestErrors must not escape either: asCoreError has no `kind` to read off one,
+  // so it would flatten a 23505 or a check-constraint violation into "internal" and the
+  // client could not tell a retryable failure from a server fault.
   if (op.op === "DELETE") {
     const { error } = await client.from(op.table)
       .update({ deleted_at: new Date().toISOString() })
-      .eq("id", op.id).eq("user_id", userId).is("deleted_at", null);
-    if (error) throw error;
+      .eq("id", op.id).eq("user_id", userId).is("deleted_at", null)
+      .select("id").single();
+    if (error) throw mapPostgrestError(error);   // zero rows → PGRST116 → not_found
     return;
   }
-  const row = { ...(op.data ?? {}), id: op.id, user_id: userId };
-  const { error } = op.op === "PUT"
-    ? await client.from(op.table).upsert(row).select().single()
-    : await client.from(op.table).update(op.data ?? {}).eq("id", op.id).eq("user_id", userId);
-  if (error) throw error;
+  if (op.op === "PUT") {
+    const row = { ...(op.data ?? {}), id: op.id, user_id: userId };
+    const { error } = await client.from(op.table).upsert(row).select("id").single();
+    if (error) throw mapPostgrestError(error);
+    return;
+  }
+  const { error } = await client.from(op.table)
+    .update(op.data ?? {}).eq("id", op.id).eq("user_id", userId)
+    .select("id").single();
+  if (error) throw mapPostgrestError(error);
 }

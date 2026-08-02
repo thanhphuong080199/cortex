@@ -30,6 +30,31 @@ export class CheckinService {
     return data as Checkin;
   }
 
+  /**
+   * create(), with the id chosen by the device. Idempotent for the same reason
+   * NoteService.createWithId is: a replayed batch must not wedge the queue.
+   */
+  async createWithId(id: string, input: CreateCheckinInput): Promise<Checkin> {
+    const { data, error } = await this.client.from("checkins")
+      .insert({
+        id, user_id: this.userId,
+        mood: input.mood ?? null,
+        energy: input.energy ?? null,
+        label: input.label ?? null,
+      })
+      .select().single();
+    if (error) {
+      if (error.code === "23505") {
+        const { data: existing, error: readError } = await this.client.from("checkins")
+          .select().eq("id", id).eq("user_id", this.userId).single();
+        if (readError) throw mapPostgrestError(readError);
+        return existing as Checkin;
+      }
+      throw mapPostgrestError(error);
+    }
+    return data as Checkin;
+  }
+
   async softDelete(id: string): Promise<{ id: string }> {
     // `is deleted_at null` makes a repeat delete a not_found rather than a silent no-op,
     // and a foreign id is indistinguishable from a missing one (errors.ts / spec §6).

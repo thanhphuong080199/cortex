@@ -54,6 +54,11 @@ export class NoteService {
    * user would see their note twice.
    */
   async createWithId(id: string, input: CreateNoteInput & CreateNoteOptions): Promise<Note> {
+    // MUST be idempotent. PowerSync resends a batch whenever the response is lost -- a
+    // dropped connection after the insert commits is ordinary, not exceptional -- and a
+    // resend that throws on its own prior success would wedge the device's queue forever.
+    // The id is client-chosen, so "this id already exists and is mine" means the write
+    // already landed, not that two different rows collided.
     const domainMeta = input.domainMeta ?? {};
     if (input.domain) {
       // No stripping: `pending_item` is a legitimate member of domainMetaSchemas.media
@@ -61,6 +66,11 @@ export class NoteService {
       // is the only record of which item the note was trying to reach, and therefore the
       // only thing a retry could work from. Stripping it here would make that failure
       // silently unrecoverable.
+      //
+      // `validation`, not `internal` as create() throws for the identical check: this
+      // input arrives from an untrusted mobile payload via the sync router, so a schema
+      // mismatch here is a caller error, not a bug in our own code. The two methods
+      // deliberately disagree on kind for that reason -- do not "fix" them to match.
       const check = validateDomainMeta(input.domain, domainMeta);
       if (!check.success) throw { kind: "validation", message: "domain_meta does not fit domain", cause: check.error } as const;
     }
@@ -71,7 +81,11 @@ export class NoteService {
         media_item_id: input.mediaItemId ?? null,
       })
       .select().single();
-    if (error) throw mapPostgrestError(error);
+    if (error) {
+      // 23505 on an id the caller already owns is a replayed op, not a conflict.
+      if (error.code === "23505") return this.getById(id);
+      throw mapPostgrestError(error);
+    }
     return data as Note;
   }
 
