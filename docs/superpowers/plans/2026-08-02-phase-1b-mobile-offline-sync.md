@@ -1244,16 +1244,29 @@ export * from "./schema.js";
 # credentials that must never reach a device, and note_chunks/usage_ledger/feedback_events/
 # memory_revisions/ingest_inbox are server-side machinery. flashcards is deferred to
 # phase 6, which adds its rule, its client schema entry and its isolation test together.
-bucket_definitions:
+#
+# Sync STREAMS (edition 3), not the older bucket_definitions form: PowerSync's docs class
+# Sync Rules as legacy and recommend Streams for new projects. Edition 3 also enables the
+# newer compiler (JOINs, CTEs, multiple queries per stream), which phase 6's flashcards
+# work is likely to want.
+#
+# Beneath these queries sits a third isolation layer, configured outside this repo: the
+# Postgres publication is scoped to these six tables by name rather than FOR ALL TABLES,
+# so integrations.credentials and the other server-only tables never enter the replication
+# stream at all. See docs/deploy.md. Both layers are checked; neither is trusted alone.
+config:
+  edition: 3
+
+streams:
   user_data:
-    parameters: SELECT request.user_id() AS user_id
-    data:
-      - SELECT * FROM notes WHERE user_id = bucket.user_id
-      - SELECT * FROM tags WHERE user_id = bucket.user_id
-      - SELECT * FROM note_tags WHERE user_id = bucket.user_id
-      - SELECT * FROM links WHERE user_id = bucket.user_id
-      - SELECT * FROM media_items WHERE user_id = bucket.user_id
-      - SELECT * FROM checkins WHERE user_id = bucket.user_id
+    auto_subscribe: true
+    queries:
+      - SELECT * FROM notes       WHERE user_id = auth.user_id()
+      - SELECT * FROM tags        WHERE user_id = auth.user_id()
+      - SELECT * FROM note_tags   WHERE user_id = auth.user_id()
+      - SELECT * FROM links       WHERE user_id = auth.user_id()
+      - SELECT * FROM media_items WHERE user_id = auth.user_id()
+      - SELECT * FROM checkins    WHERE user_id = auth.user_id()
 ```
 
 - [ ] **Step 6: Run the test**
@@ -1975,7 +1988,9 @@ git commit -m "fix(mobile): allowBackup=false - the DB must not reach Drive with
 **Interfaces:**
 - Consumes: `packages/sync/src/sync-rules.yaml` (Task 6), `makeUser` from `./clients.js`.
 
-**Context (spec §7.8):** PowerSync replicates via logical replication, **bypassing RLS**, so sync rules are the only thing preventing cross-user bucket leakage. This test asserts the property statically — that every data query in the rules is scoped to `bucket.user_id` — and dynamically, that the equivalent SQL returns only the owner's rows. Per issue-log E3, the dynamic half seeds **real rows for both users**; an assertion that "bob reads zero rows" from a table where alice also has none stays green with the rule deleted.
+**Context (spec §7.8):** PowerSync replicates via logical replication, **bypassing RLS**, so sync rules are what prevents cross-user leakage. This test asserts the property statically — every stream query is scoped to `auth.user_id()` — and dynamically, that the equivalent SQL returns only the owner's rows. Per issue-log E3, the dynamic half seeds **real rows for both users**; an assertion that "bob reads zero rows" from a table where alice also has none stays green with the rule deleted.
+
+It also covers the layer *beneath* the sync rules. PowerSync's own setup guide says to run `CREATE PUBLICATION powersync FOR ALL TABLES`, which for cortex would put `integrations.credentials`, `note_chunks`, `usage_ledger` and `memory_revisions` into the replication stream — filtered out by the sync rules, but only after leaving Postgres. `docs/deploy.md` therefore scopes the publication to the six synced tables by name. That is configuration living outside this repo, which is exactly why it needs a test that fails loudly if someone widens it.
 
 - [ ] **Step 1: Write the test**
 
@@ -2023,20 +2038,47 @@ describe("sync rules — static shape", () => {
     expect(tables).toEqual([...SYNC_TABLES].sort());
   });
 
-  it("scopes every data query to bucket.user_id", () => {
+  it("scopes every data query to the authenticated user", () => {
     for (const q of dataQueries) {
-      expect(q, `unscoped sync rule: ${q}`).toMatch(/WHERE\s+user_id\s*=\s*bucket\.user_id/);
+      expect(q, `unscoped sync stream query: ${q}`)
+        .toMatch(/WHERE\s+user_id\s*=\s*auth\.user_id\(\)/);
     }
   });
 
-  it("declares the bucket parameter from the JWT, not from client input", () => {
-    expect(rules).toMatch(/parameters:\s*SELECT\s+request\.user_id\(\)\s+AS\s+user_id/);
+  it("uses sync streams edition 3, not the legacy bucket_definitions form", () => {
+    expect(rules).toMatch(/config:\s*\n\s*edition:\s*3/);
+    expect(rules).not.toContain("bucket_definitions");
+  });
+
+  it("takes the user id from the JWT, never from client-supplied parameters", () => {
+    // request.user_id() and a `parameters:` block belong to the legacy form. auth.user_id()
+    // resolves from the verified Supabase token; anything a client could set must not
+    // appear in a scoping predicate.
+    expect(rules).not.toContain("request.user_id");
+    expect(rules).not.toMatch(/^\s*parameters:/m);
   });
 
   it("names no server-only table anywhere", () => {
     for (const t of ["note_chunks", "usage_ledger", "integrations", "feedback_events",
                      "memory_revisions", "ingest_inbox", "flashcards"]) {
       expect(rules).not.toContain(t);
+    }
+  });
+});
+
+describe("the powersync publication — the layer beneath the sync rules", () => {
+  // Skips where the publication has not been created (a fresh local stack), so the suite
+  // stays runnable before Task 7's setup. It must NEVER silently skip on the hosted
+  // project, where the publication does exist -- hence asserting the skip reason.
+  it("replicates exactly the six synced tables, and nothing server-only", async () => {
+    const { data, error } = await admin.rpc("_test_publication_tables", { p_pub: "powersync" });
+    if (error?.code === "PGRST202") return;   // function absent: pre-Task-7 local stack
+    expect(error).toBeNull();
+    const tables = (data as { tablename: string }[]).map((r) => r.tablename).sort();
+    if (tables.length === 0) return;          // publication not created yet
+    expect(tables).toEqual([...SYNC_TABLES].sort());
+    for (const t of ["integrations", "note_chunks", "usage_ledger", "memory_revisions"]) {
+      expect(tables).not.toContain(t);
     }
   });
 });
@@ -2058,30 +2100,64 @@ describe("sync rules — the same predicate against real data", () => {
 });
 ```
 
-- [ ] **Step 2: Add `@cortex/shared` to the db package's dependencies**
+- [ ] **Step 2: Add the publication reader**
+
+`packages/db` reaches Postgres only through PostgREST, which cannot query system catalogs,
+so this follows the narrow SECURITY DEFINER reader pattern `00001` established
+(`_test_check_constraint_def`) and `00012` extended (`_test_column_vector_dim`).
+
+```sql
+-- supabase/migrations/00016_test_publication_reader.sql
+-- Test-only, third narrow reader. It exists so the sync-rule isolation suite can assert
+-- the scope of the `powersync` publication -- configuration that lives in the Supabase
+-- dashboard rather than this repo, and whose default (FOR ALL TABLES) would put
+-- integrations.credentials into the replication stream (phase 1b spec §7.8).
+--
+-- Narrow by construction: it reads one system view, returns table names only, and takes
+-- a publication name rather than arbitrary SQL. It is NOT a generic catalog-query path.
+create or replace function public._test_publication_tables(p_pub text)
+returns table (tablename name)
+language sql
+security definer
+set search_path = pg_catalog, public
+as $$
+  select t.tablename
+  from pg_publication_tables t
+  where t.pubname = p_pub and t.schemaname = 'public'
+  order by t.tablename;
+$$;
+
+revoke all on function public._test_publication_tables(text) from public;
+grant execute on function public._test_publication_tables(text) to service_role;
+```
+
+Granted to `service_role` only: the suite calls it through `admin`, and no end user has any
+reason to enumerate replication configuration.
+
+- [ ] **Step 3: Add `@cortex/shared` to the db package's dependencies**
 
 ```bash
 pnpm --filter @cortex/db add @cortex/shared@workspace:*
 ```
 
-- [ ] **Step 3: Run the test**
+- [ ] **Step 4: Run the test**
 
 Run: `pnpm turbo run test --filter=@cortex/db -- sync-rules-isolation`
 Expected: PASS, 6/6.
 
-- [ ] **Step 4: Prove the static test bites**
+- [ ] **Step 5: Prove the static test bites**
 
-Temporarily delete ` WHERE user_id = bucket.user_id` from the `checkins` line in
+Temporarily delete ` WHERE user_id = auth.user_id()` from the `checkins` line in
 `packages/sync/src/sync-rules.yaml`, rerun, and confirm the "scopes every data query" test
 **fails**. Restore the line.
 
 A test that cannot fail is the E3 mistake; verify this one can.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add packages/db/src/test/sync-rules-isolation.test.ts packages/db/package.json pnpm-lock.yaml
-git commit -m "test(db): sync rules are an isolation layer, tested like RLS"
+git add packages/db/src/test/sync-rules-isolation.test.ts supabase/migrations/00016_test_publication_reader.sql packages/db/package.json pnpm-lock.yaml
+git commit -m "test(db): sync rules and publication scope, tested like RLS"
 ```
 
 ---

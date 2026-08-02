@@ -819,3 +819,101 @@ Source) and it will deploy on push to `main`. Two caveats before enabling it:
   gated to run *before* the app deploy, or a deploy will land on an older schema.
 - `apps/api/Dockerfile` expects the **repo root** as build context (it copies
   `packages/`), which `railway.json` already encodes via `dockerfilePath`.
+
+---
+
+# Phase 1b — PowerSync Cloud setup
+
+One-time setup, done in the Supabase SQL editor and the PowerSync dashboard. None of it is
+a migration: `create role ... password` would commit a secret to git.
+
+## 1. Supabase — replication role and a SCOPED publication
+
+Generate a strong password and store it in a password manager first; Supabase will not
+show it again.
+
+```sql
+-- BYPASSRLS is required and is the reason sync rules must be tested as an independent
+-- isolation layer: replication reads around RLS entirely (parent spec §15.5).
+create role powersync_role with replication bypassrls login password '<REDACTED>';
+
+-- SELECT only, and only on the six synced tables. NOT "on all tables": this role has no
+-- business seeing integrations.credentials.
+grant select on public.notes, public.tags, public.note_tags,
+                 public.links, public.media_items, public.checkins
+  to powersync_role;
+
+-- The publication MUST be named "powersync". Its SCOPE is ours to choose, and choosing
+-- matters: PowerSync's setup guide says `FOR ALL TABLES`, which would put
+-- integrations.credentials, note_chunks, usage_ledger and memory_revisions into the
+-- replication stream. The sync rules would filter them out -- but only after they had
+-- left Postgres. Naming the six tables keeps them out of the stream entirely, giving a
+-- third isolation layer beneath the sync rules.
+create publication powersync for table
+  public.notes, public.tags, public.note_tags,
+  public.links, public.media_items, public.checkins;
+```
+
+Verify immediately — this is the whole point of the step:
+
+```sql
+select tablename from pg_publication_tables where pubname = 'powersync' order by tablename;
+```
+
+Exactly six rows. Anything else (especially `integrations`) means
+`drop publication powersync;` and create it again. `packages/db`'s
+`sync-rules-isolation.test.ts` asserts this same property through
+`_test_publication_tables`, so a later widening fails the suite rather than going unnoticed.
+
+## 2. PowerSync instance
+
+Create an Organization → Project → Instance. Pick the region nearest the user.
+
+**Replication connection:**
+
+| Field | Value |
+|---|---|
+| Type | `postgresql` |
+| Hostname | `db.<project-ref>.supabase.co` |
+| Port | `5432` |
+| Database | `postgres` |
+| Username | `powersync_role` |
+| Password | from step 1 |
+| SSL mode | `verify-full` |
+
+Port **5432 direct**, never the connection pooler on 6543 — logical replication cannot run
+through a transaction pooler, and Supabase's UI offers the pooler string by default.
+
+If the connection test fails while resolving the address rather than authenticating, that
+is the Supabase direct-connection networking issue, not a wrong password; see PowerSync's
+Supabase integration page.
+
+**Client auth:** enable **Supabase**. PowerSync then verifies Supabase JWTs and
+`auth.user_id()` resolves to the token's subject. No manual JWKS configuration.
+
+**Sync streams:** paste the contents of `packages/sync/src/sync-rules.yaml`. It uses Sync
+Streams edition 3 — PowerSync classes the older `bucket_definitions` form as legacy.
+
+## 3. Client environment
+
+```
+EXPO_PUBLIC_POWERSYNC_URL=https://<instance-id>.powersync.journeyapps.com
+EXPO_PUBLIC_API_URL=https://<api>.up.railway.app
+```
+
+`apps/mobile/.env` is gitignored and CI fails if any `.env` reaches a runner.
+
+## 4. Android dev client
+
+PowerSync and SQLCipher are native modules, so **Expo Go cannot run this app**:
+
+```bash
+pnpm --filter @cortex/mobile exec eas build --profile development --platform android
+```
+
+A dev client built before phase 1b will not work — it is a compiled binary and cannot load
+newly added native modules. Rebuild after the PowerSync dependencies land (plan Task 17).
+
+`android:allowBackup=false` in `app.json` is load-bearing, not a preference: Auto Backup
+would copy the SQLCipher database to Google Drive while its key lives in Android Keystore,
+which is not backed up — producing an undecryptable file on Drive. Pure risk, no benefit.
