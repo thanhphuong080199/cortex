@@ -34,10 +34,19 @@ export const syncOp = z.object({
 });
 export type SyncOp = z.infer<typeof syncOp>;
 
-// 500 caps a single request's work: the router replays ops sequentially through core
-// services, each of which is at least one PostgREST round trip. PowerSync retries the
-// remainder in the next batch, so a cap costs latency, never data.
+/**
+ * Caps a single request's work: the router replays ops sequentially through core services,
+ * each of which is at least one PostgREST round trip. PowerSync retries the remainder in the
+ * next batch, so a cap costs latency, never data.
+ *
+ * Exported because the MOBILE CONNECTOR has to respect it too, and a second literal would be
+ * silent data loss rather than a mismatch. `getCrudBatch()` with no limit can return more ops
+ * than this; that request is rejected 400, and the connector treats 4xx as permanent and
+ * discards the batch. The client must therefore ask for at most this many.
+ */
+export const SYNC_UPLOAD_MAX_OPS = 500;
+
 export const syncUploadInput = z.object({
-  ops: z.array(syncOp).min(1).max(500),
+  ops: z.array(syncOp).min(1).max(SYNC_UPLOAD_MAX_OPS),
 });
 export type SyncUploadInput = z.infer<typeof syncUploadInput>;

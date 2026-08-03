@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@cortex/shared": "workspace:*",
-    "@powersync/common": "^1.57.0"
+    "@powersync/common": "^2.0.0"
   },
   "devDependencies": {
     "@cortex/config": "workspace:*",

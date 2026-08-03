@@ -1,6 +1,7 @@
 import { makeRedirectUri } from "expo-auth-session";
 import * as QueryParams from "expo-auth-session/build/QueryParams";
 import * as WebBrowser from "expo-web-browser";
+import { getPowerSync } from "./powersync";
 import { supabase } from "./supabase";
 import { wipeLocalData } from "./wipe";
 
@@ -39,8 +40,8 @@ export async function signOut(): Promise<void> {
   // shut the stream down cleanly, and a wipe that fails must not leave the user
   // "signed out" with their whole corpus still on the device.
   //
-  // `null` until Task 17 exists to hand over a database — with no PowerSync instance yet,
-  // there is nothing to clear but the key, and that still has to go.
-  await wipeLocalData(null);
+  // `getPowerSync()` is null when the user signs out before the database finished opening —
+  // `wipeLocalData` handles that, and the key still has to go either way.
+  await wipeLocalData(getPowerSync());
   await supabase.auth.signOut();
 }
