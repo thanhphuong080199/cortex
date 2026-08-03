@@ -17,14 +17,14 @@ committed copy of what matters.
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
 | 2 — security baseline | 8–13 | **Complete.** All six tasks done and reviewed. |
 | 3 — shared filters | 14–16 | **Complete.** `282666d`, `b824a2a`, `083ab6a`. None independently reviewed. |
-| 4 — mobile parity | 17–23 | **Not started. Resume here.** |
+| 4 — mobile parity | 17 | **Task 17 complete** (`c6757f9`), not independently reviewed. |
+| 4 — mobile parity | 18–23 | **Not started. Resume here.** |
 
-### Resume here: Task 17
+### Resume here: Task 18
 
-PowerSync provider and connector. Its carried context is unchanged and listed below — the
-`lost`-key file deletion, `hasStrongBiometrics()`, the pnpm dedupe check, and the dev-client
-rebuild. **Also read "Stage 3 — what shipped" below**: Task 19 has to create an FTS table whose
-shape Task 15 now depends on, and `apps/mobile` still declares no workspace dependency.
+Quick capture. Read "Stage 4 — what shipped" below first: Task 17 changed which PowerSync major
+the app is on, pinned where the database file lives, and already added the `fts5` native flag
+Task 19 needs.
 
 ### Verification state — the full gate has been run
 
@@ -51,7 +51,31 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
 
 ## Outstanding actions for the human
 
-**None. Both cleared 2026-08-03**, recorded here so a later session does not re-raise them.
+**One open, from Task 17.** The two below were cleared 2026-08-03 and are kept so a later
+session does not re-raise them.
+
+0. **OPEN — rebuild the Android dev client, and read the Gradle output when you do.**
+   Two native flags now ride on `apps/mobile/package.json`'s `op-sqlite` block, and **neither
+   can be verified on this machine — there is no Android SDK installed**, so no Gradle
+   configure can run. They take effect at configure time and print their own confirmation:
+
+   ```
+   [OP-SQLITE] Detected op-sqlite config from package.json at: <path>
+   [OP-SQLITE] using sqlcipher.
+   [OP-SQLITE] FTS5 enabled
+   ```
+
+   All three lines must appear. If the first names a different `package.json` than
+   `apps/mobile/package.json`, move the `op-sqlite` block to the file it names (PowerSync's
+   docs warn the monorepo hoisting can do this) and rebuild.
+
+   **Do not accept the plan's check for this.** It says to grep `apps/mobile/android/*.gradle`
+   for `sqlcipher`; that matches nothing whether or not the flag is set, because the flag is
+   consumed in op-sqlite's own `build.gradle` under `node_modules`. A green grep there would be
+   an unencrypted database that looks configured — the exact failure the step exists to prevent.
+
+   Missing `sqlcipher` means the local corpus is **unencrypted**. Missing `fts5` means Task 19's
+   `notes_fts` fails at runtime with "no such module: fts5".
 
 1. **`supabase db push` for `00016_powersync_publication.sql` — done.** `00001`–`00016` are
    local == remote. (The CLI is a devDependency: `npx supabase`, not `supabase`.) The migration's
@@ -74,6 +98,86 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
    including the copies already on Drive, which is why server-side revocation was required rather
    than deleting the local file. Already-issued access tokens stayed valid until their normal
    1-hour expiry — a bounded, accepted window; rotating the JWT secret was judged unwarranted.
+
+---
+
+## Stage 4 — what shipped
+
+### Task 17 — PowerSync provider and connector (commit `c6757f9`)
+
+**The app is on the `@powersync/*` v2 major now, and that was forced, not chosen.** v2 is the
+major that switched from `@journeyapps/react-native-quick-sqlite` to
+`@op-engineering/op-sqlite`, so the plan's own Step 2 — installing op-sqlite and setting
+`op-sqlite: { sqlcipher: true }` — only describes v2. v1 would need a different encryption
+story entirely.
+
+That exposed the dedupe trap from the other direction. `@powersync/react-native@2` peers on
+`@powersync/common@^2`, `packages/sync` pinned `^1.57`, and `apps/mobile` declared no
+`@powersync/common` at all — so pnpm resolved the shared peer **down a major**, giving a v2
+`PowerSyncDatabase` running on v1.57 primitives, one physical copy and the wrong one. Both
+packages now pin `^2.0.0` explicitly; `packages/sync` and `apps/mobile` and the RN SDK's own
+tree all resolve to the same `@powersync/common@2.0.0` path. `packages/sync` needed no source
+change — build, typecheck, lint and its 4 tests pass unchanged on v2.
+
+**`fts5: true` is in the `op-sqlite` block, and Task 19 depends on it.** op-sqlite only adds
+`-DSQLITE_ENABLE_FTS5=1` when that flag is set (`android/build.gradle`), so without it
+Task 19's `CREATE VIRTUAL TABLE notes_fts USING fts5(...)` fails at runtime with "no such
+module: fts5". It is a **native** flag — discovering it at Task 19 would cost a second
+dev-client rebuild, so it went in here, with the rebuild this task already needs.
+Neither it nor `sqlcipher` is verified yet; see "Outstanding actions" item 0.
+
+**`dbLocation` is pinned to op-sqlite's `ANDROID_DATABASE_PATH`, not left to default.** The
+plan said to resolve the path against the installed package, and doing that revealed the path
+is not a constant at all: `OPSqliteAdapter.openDatabase` picks explicit `dbLocation` first,
+else asks `NativePowerSyncHelper.resolveDefaultDatabaseLocation`, which returns
+`context.filesDir` **only if** a legacy RNQS database already sits there, else op-sqlite's
+`context.getDatabasePath()`. Left unset, the location depends on a file's existence and the
+recovery delete would have to reproduce that decision — a wrong guess deletes nothing,
+succeeds silently, and the open then hits the still-present old file. Pinning collapses all
+three branches to one constant that open and delete share. Safe on a first run: op-sqlite
+`create_directories` the location on open (`cpp/bridge.cpp:73`). The RNQS branch can never
+apply — no cortex build has ever shipped a local database.
+
+**`getCrudBatch` takes an explicit limit, and this was a data-loss bug in the plan's code.**
+Unbounded it can return more ops than `syncUploadInput` accepts; the server answers 400; the
+connector's own 4xx branch treats 400 as permanent and calls `batch.complete()` — discarding
+writes the user made offline. The cap is now `SYNC_UPLOAD_MAX_OPS`, exported from
+`@cortex/shared` and used by both the zod schema and the connector, so a second literal cannot
+drift. `haveMore` brings the remainder back, so the cap costs a round trip and never data.
+
+`apps/mobile` depends on **`@cortex/shared`**, not `@cortex/core` — the Stage 3 ruling. The
+plan's install list said core while its own connector code already imported `SyncOp` from
+shared. This also discharges the "Task 19 must add the dependency" note below.
+
+**25 tests where the plan specified 4**, and `uploadData` — which holds the batch limit, the
+conflict-copy base, and which failures discard the user's writes — had none at all in the plan.
+Two of the six mapping cases cover guard halves the plan's four left unexercised: drop
+`op === "PATCH"` from the base guard, or the `?? {}` on `opData`, and all four plan cases stay
+green. **Nine mutations run**, each failing exactly the test that exists to catch it:
+constructing before the delete; leaving the `-wal`/`-shm` siblings; dropping the in-flight race
+guard; hardcoding `strongBiometrics`; retaining the poisoned promise after a failed open;
+dropping either half of the base guard; sending `data` on a DELETE; dropping the batch limit;
+swapping the 4xx/5xx branches.
+
+Gate: `pnpm turbo run typecheck lint test --force` → **26/26, 0 cached, 411 tests**
+(mobile 72, shared 54, sync 4, api 68, core 100, web 20, db 93). Docker was up, so the
+Supabase-backed suites ran rather than replayed. CI needed no change — `@cortex/mobile` and
+`@cortex/shared` are already named in `ci.yml` (checked, per the Task 7 rule).
+
+Smaller things carried forward:
+
+- `initPowerSync` memoises an **in-flight promise**, not just the resolved database. Two
+  callers racing the first mount would otherwise construct two `PowerSyncDatabase` instances
+  over one file — two sync streams and two write queues. The promise is cleared on failure, or
+  a user who cancelled the biometric prompt would re-await the same rejection forever with
+  nothing to retry.
+- `PowerSyncProvider` mounts **inside** `AppLockGate`. Opening the database prompts for the
+  biometric guarding its key, so mounting it outside would authenticate the user twice for one
+  entry and touch local data ahead of the gate that exists to stop that (§7.7).
+- `signOut` now passes `getPowerSync()` instead of Task 13's `null` placeholder.
+- The prebuild was re-run and `allowBackup="false"` plus the secure-store backup rules were
+  re-confirmed in the merged `AndroidManifest.xml`. Task 11's guarantee survives the
+  regeneration.
 
 ---
 
@@ -370,34 +474,29 @@ Three facts that cost real time to establish, all now in `docs/deploy.md`:
   module a suite touches must be `vi.mock`ed. Anything importing from `app/` (RN components)
   hits this immediately — which is why `AppLockGate` has no test and all testable lock logic
   lives in `app-lock.ts`.
-- **Task 17:** `getOrCreateDatabaseKey` now requires `{ strongBiometrics }`. Pass
-  `hasStrongBiometrics()` from `app-lock.ts`. Hardcoding `true` reintroduces the PIN-only
-  lockout; hardcoding `false` drops the auth binding on devices that could have had it.
-- **Task 17:** on `lost`, delete the database **file** (and its `-wal`/`-shm` siblings) before
-  constructing `PowerSyncDatabase`. `wipeLocalData` is **not** that path — `disconnectAndClear()`
-  needs to open the database in order to clear it, which is precisely what a lost key prevents.
-  Resolve the file's actual location against the installed `@powersync/react-native`; a wrong
-  path deletes nothing and fails silently.
-- **Task 17:** verify `@powersync/react-native` and `@powersync/common` dedupe to **one**
-  physical install under pnpm. Two copies means `AppSchema` built from one `Schema` class
-  handed to a `PowerSyncDatabase` constructed against another — failing far from its cause.
-  `packages/sync` deliberately imports from `@powersync/common`, because
-  `@powersync/react-native` cannot parse under node.
-- **Task 17:** the Android dev client must be **rebuilt**. PowerSync and SQLCipher are
-  native modules; a dev client built before phase 1b is a compiled binary and cannot load
-  them. Expo Go cannot run this app at all.
+- ~~Task 17's four notes — `strongBiometrics`, the `lost`-key file delete, the pnpm dedupe
+  check — are **discharged**; see "Stage 4 — what shipped".~~ The **dev-client rebuild is
+  still outstanding** and is now item 0 under "Outstanding actions". PowerSync, SQLCipher and
+  op-sqlite are native modules; a dev client built before phase 1b is a compiled binary and
+  cannot load them, and Expo Go cannot run this app at all.
+- **Any Stage 4 task:** `packages/sync` still imports from `@powersync/common`, not
+  `@powersync/react-native`, because the RN package cannot parse under node. Both are pinned at
+  `^2.0.0` now and must move together — dropping either back below 2 silently re-splits the
+  `Schema` class identity.
 - **Task 13's wipe** is done, but `secure-storage.ts`'s orphan probe is what stops a wipe
   missing stranded chunks. Do not replace it with a fixed bound.
 - **`expo-secure-store` behaviour:** it returns null and self-deletes an entry it cannot decrypt
   after reinstall (`SecureStoreModule.kt`, `BadPaddingException` path). For the session that
   degrades to a re-login, which is intended; for the database key it is the invalidation-recovery
   path, with very different severity.
-- **Task 19 must add `@cortex/shared` to `apps/mobile`'s dependencies.** It has none of the
-  workspace packages today (only `@cortex/config`, as a devDependency). Import
-  `noteFiltersToSql`/`toSqlitePlaceholders` from there, never from `@cortex/core`.
+- ~~**Task 19 must add `@cortex/shared` to `apps/mobile`'s dependencies.**~~ **Done in Task 17.**
+  `@cortex/shared` and `@cortex/sync` are both dependencies now. Still import
+  `noteFiltersToSql`/`toSqlitePlaceholders` from shared, never from `@cortex/core`.
 - **Task 19 must create `notes_fts` as `fts5(id UNINDEXED, content)`** and keep it in step with
   `notes`. The clause `noteFiltersToSql` emits selects `id` from it; a rowid-keyed table returns
-  nothing for every search without erroring. See Stage 3 above.
+  nothing for every search without erroring. See Stage 3 above. The **native** half is already
+  done — Task 17 set `fts5: true` — but it is unverified until the dev-client rebuild, so if
+  `notes_fts` fails with "no such module: fts5", that is the flag, not the SQL.
 - **`supabase migration up`, not `db reset`.** A reset breaks Kong→auth routing with stale
   Docker DNS, which surfaces as `AuthRetryableFetchError` and reads like a code regression. If it
   happens, restart the kong container rather than the stack.
