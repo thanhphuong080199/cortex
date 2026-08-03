@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { KeyOutcome } from "./db-key.js";
+
 const store = new Map<string, string>();
 const authGated = new Set<string>();
 // Fails the write to one named entry, modelling both a cancelled biometric prompt (writing an
@@ -43,6 +45,18 @@ vi.mock("expo-crypto", () => {
 const { getOrCreateDatabaseKey, clearDatabaseKey, DB_KEY_NAME } = await import("./db-key.js");
 
 /**
+ * The key out of any outcome.
+ *
+ * `lost` deliberately names its key `unusableKey`, so `outcome.key` does not compile against
+ * the union and no caller can reach a key without first branching on `status`. Tests need the
+ * bytes regardless of which variant came back, so they go through here -- which is itself the
+ * shape every real caller has to adopt.
+ */
+function keyOf(o: KeyOutcome): string {
+  return o.status === "lost" ? o.unusableKey : o.key;
+}
+
+/**
  * What Android does when the user enrolls a new biometric.
  *
  * The entry is destroyed OUTRIGHT, so it must leave `authGated` too. Leaving the name behind
@@ -69,7 +83,7 @@ describe("getOrCreateDatabaseKey", () => {
   it("creates a key on first run", async () => {
     const r = await getOrCreateDatabaseKey();
     expect(r.status).toBe("created");
-    expect(r.key).toMatch(/^[0-9a-f]{64}$/);
+    expect(keyOf(r)).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("stores the key behind biometric authentication", async () => {
@@ -81,7 +95,7 @@ describe("getOrCreateDatabaseKey", () => {
     const first = await getOrCreateDatabaseKey();
     const second = await getOrCreateDatabaseKey();
     expect(second.status).toBe("loaded");
-    expect(second.key).toBe(first.key);
+    expect(keyOf(second)).toBe(keyOf(first));
   });
 
   it("reports 'lost' -- not 'created' -- after a biometric enrollment", async () => {
@@ -97,14 +111,36 @@ describe("getOrCreateDatabaseKey", () => {
     expect(store.has(DB_KEY_NAME)).toBe(false); // the OS really destroyed it
 
     const r = await getOrCreateDatabaseKey();
-    expect(r.key).toMatch(/^[0-9a-f]{64}$/);
+    // Narrow before touching the key at all. `lost` is the one variant whose key cannot open
+    // the existing database, so it is the one variant that does not expose a `key` field --
+    // reaching the bytes REQUIRES having established the status first.
+    if (r.status !== "lost") throw new Error(`expected 'lost', got '${r.status}'`);
+    expect(r.unusableKey).toMatch(/^[0-9a-f]{64}$/);
     // The old key is gone for good, so a recovery that somehow returned it would be
     // returning a key that cannot open anything.
-    expect(r.key).not.toBe(first.key);
+    expect(r.unusableKey).not.toBe(keyOf(first));
     // The recovery must leave a key actually PERSISTED and auth-gated -- returning a key
     // it failed to store would open the new database once and lock the user out forever.
-    expect(store.get(DB_KEY_NAME)).toBe(r.key);
+    expect(store.get(DB_KEY_NAME)).toBe(r.unusableKey);
     expect(authGated.has(DB_KEY_NAME)).toBe(true);
+  });
+
+  /**
+   * The `lost` variant must NOT carry a field named `key`.
+   *
+   * That is the whole enforcement mechanism: with `key` on all three variants,
+   * `const { key } = await getOrCreateDatabaseKey()` type-checks, runs, and silently skips the
+   * wipe that `lost` exists to demand -- opening SQLCipher with a key that cannot decrypt the
+   * file, far from the code that caused it. Naming it `unusableKey` breaks that destructure at
+   * compile time. Types are erased at runtime, so this asserts the shape the compiler relies on.
+   */
+  it("does not expose a 'key' field on the lost variant", async () => {
+    await getOrCreateDatabaseKey();
+    simulateBiometricEnrollment();
+
+    const r = await getOrCreateDatabaseKey();
+    expect(r.status).toBe("lost");
+    expect(Object.keys(r).sort()).toEqual(["status", "unusableKey"]);
   });
 
   it("returns to 'created' after clearDatabaseKey, since the init flag is gone too", async () => {
@@ -141,7 +177,7 @@ describe("getOrCreateDatabaseKey", () => {
 
       // The next boot succeeds and hands over a key; the caller builds the real database.
       const boot = await getOrCreateDatabaseKey();
-      expect(boot.key).toMatch(/^[0-9a-f]{64}$/);
+      expect(keyOf(boot)).toMatch(/^[0-9a-f]{64}$/);
 
       simulateBiometricEnrollment();
       expect((await getOrCreateDatabaseKey()).status).toBe("lost");
@@ -174,5 +210,29 @@ describe("getOrCreateDatabaseKey", () => {
     await getOrCreateDatabaseKey();
     failReadsTo = DB_KEY_NAME;
     await expect(getOrCreateDatabaseKey()).rejects.toThrow("biometric_prompt_failed");
+  });
+
+  /**
+   * Not every rejection from an auth-gated call is a cancelled prompt. A disk-full write or a
+   * corrupt keystore rejects through the same catch, and reporting THAT as
+   * `biometric_prompt_failed` tells the caller to re-prompt a user who cannot fix it -- an
+   * unbounded prompt loop against a broken store, with the only diagnostic discarded. The
+   * mapping stays (one error shape for one user action) but it must not destroy evidence.
+   */
+  it("preserves the underlying failure as `cause` on both paths", async () => {
+    failWritesTo = DB_KEY_NAME;
+    await expect(getOrCreateDatabaseKey()).rejects.toMatchObject({
+      message: "biometric_prompt_failed",
+      cause: expect.objectContaining({ message: "native write failed" }),
+    });
+
+    failWritesTo = null;
+    await getOrCreateDatabaseKey();
+
+    failReadsTo = DB_KEY_NAME;
+    await expect(getOrCreateDatabaseKey()).rejects.toMatchObject({
+      message: "biometric_prompt_failed",
+      cause: expect.objectContaining({ message: "native read failed" }),
+    });
   });
 });

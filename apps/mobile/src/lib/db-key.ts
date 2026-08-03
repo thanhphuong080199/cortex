@@ -26,10 +26,16 @@ const INIT_FLAG = "cortex.db.initialized";
 export type KeyOutcome =
   | { status: "created"; key: string }
   | { status: "loaded"; key: string }
-  // The key CANNOT open the existing database. The caller MUST wipe the local database
-  // before using it. Destructuring `{ key }` and dropping `status` compiles fine and
-  // corrupts silently -- see the note at the bottom of this file.
-  | { status: "lost"; key: string };
+  // The key CANNOT open the existing database -- it is a fresh key for a database that does
+  // not exist yet. The caller MUST delete the local database file before opening anything
+  // with it.
+  //
+  // The field is named `unusableKey`, not `key`, and that asymmetry is the enforcement.
+  // With `key` on all three variants, `const { key } = await getOrCreateDatabaseKey()`
+  // type-checks and runs while ignoring the one signal that says "wipe first", and SQLCipher
+  // then fails to decrypt somewhere far from the cause. With this name, reading a key off the
+  // union does not compile at all until the caller has branched on `status`.
+  | { status: "lost"; unusableKey: string };
 
 // expo-crypto 57.0.1 exports `getRandomBytes` as a synchronous function returning a
 // Uint8Array, backed by the native `ExpoCrypto.getRandomValues`. It is not deprecated.
@@ -48,11 +54,15 @@ export async function getOrCreateDatabaseKey(): Promise<KeyOutcome> {
   let existing: string | null = null;
   try {
     existing = await SecureStore.getItemAsync(DB_KEY_NAME, { requireAuthentication: true });
-  } catch {
-    // A rejection is the biometric PROMPT failing (user cancelled, too many attempts) --
-    // not an invalidated key. Treat it as "no answer yet" and let the caller retry;
+  } catch (cause) {
+    // A rejection is USUALLY the biometric PROMPT failing (user cancelled, too many attempts)
+    // -- not an invalidated key. Treat it as "no answer yet" and let the caller retry;
     // reporting `lost` here would wipe a perfectly good database over a cancelled prompt.
-    throw new Error("biometric_prompt_failed");
+    //
+    // But it is not always that: a corrupt keystore rejects through here too, and retrying
+    // prompts a user who cannot fix it. The mapping stays -- one error shape for what is one
+    // action to the user -- but `cause` must survive it, or that case has no diagnostic at all.
+    throw new Error("biometric_prompt_failed", { cause });
   }
 
   if (existing !== null) {
@@ -94,11 +104,13 @@ export async function getOrCreateDatabaseKey(): Promise<KeyOutcome> {
     // have to handle a raw platform exception from one path and a mapped one from the other
     // for what is, to the user, the identical action.
     await SecureStore.setItemAsync(DB_KEY_NAME, key, { requireAuthentication: true });
-  } catch {
-    throw new Error("biometric_prompt_failed");
+  } catch (cause) {
+    // Same mapping, same reason to keep the cause: a full disk rejects here exactly like a
+    // cancelled prompt does, and only `cause` tells the two apart after the fact.
+    throw new Error("biometric_prompt_failed", { cause });
   }
 
-  return initialized ? { status: "lost", key } : { status: "created", key };
+  return initialized ? { status: "lost", unusableKey: key } : { status: "created", key };
 }
 
 /** Sign-out and post-wipe cleanup: both entries go, so the next run is a clean first run. */
@@ -111,8 +123,14 @@ export async function clearDatabaseKey(): Promise<void> {
   await SecureStore.deleteItemAsync(INIT_FLAG);
 }
 
-// KNOWN SHARP EDGE, deliberately left for the caller's design (Task 10 / Task 13):
-// all three outcomes carry an identical `key` field, so `const { key } = await
-// getOrCreateDatabaseKey()` type-checks and runs while ignoring the one signal that says
-// "this key cannot open your database". The compiler cannot force the wipe. Callers must
-// switch on `status` exhaustively.
+// WHAT THE COMPILER DOES AND DOES NOT ENFORCE, for callers (Task 13's wipe, Task 17's open):
+//
+// It DOES stop you reaching a key without branching. `outcome.key` does not compile against
+// the union, because the `lost` variant has no such field -- so the dangerous shortcut,
+// `const { key } = await getOrCreateDatabaseKey()`, is a type error rather than silent
+// corruption.
+//
+// It does NOT verify that the branch you write actually wipes. Nothing here can. On `lost`,
+// delete the database FILE before opening anything: `unusableKey` is a key for a database
+// that does not exist yet, so handing it to SQLCipher against the old file fails to decrypt.
+// Clearing through the database handle after opening it with this key is too late.

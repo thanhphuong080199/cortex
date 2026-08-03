@@ -1760,10 +1760,25 @@ git commit -m "fix(mobile): store the Supabase session in Keystore, not AsyncSto
   type KeyOutcome =
     | { status: "created"; key: string }
     | { status: "loaded"; key: string }
-    | { status: "lost"; key: string };   // caller MUST wipe the local DB before using `key`
+    // NOT `key`. The asymmetry is deliberate: `outcome.key` does not compile against the
+    // union, so no caller can reach a key without first branching on `status`. The caller
+    // MUST delete the database FILE before opening anything with `unusableKey`.
+    | { status: "lost"; unusableKey: string };
   getOrCreateDatabaseKey(): Promise<KeyOutcome>
   clearDatabaseKey(): Promise<void>
   ```
+
+> **AS SHIPPED (commit `1ba9453`, amended by the Task 9 review).** The Step 3 snippet below is
+> the *pre-review* draft, kept for the record. Four changes landed on top of it, each
+> regression-tested — read `apps/mobile/src/lib/db-key.ts` for the real contract:
+>
+> 1. **The init flag is written BEFORE the key.** The plan's order could report `created`
+>    over a live database after an enrollment, silently destroying local data.
+> 2. **The load path repairs a missing init flag**, so a store that reaches key-present /
+>    flag-absent by any route heals instead of staying armed.
+> 3. **The creation-path key write is wrapped** and mapped to `biometric_prompt_failed`:
+>    writing an auth-gated value prompts on Android exactly as reading one does.
+> 4. **`lost` names its key `unusableKey`**, and both mapped errors carry `{ cause }`.
 
 **Context (spec §7.5).** Expo's docs: *"Keys are invalidated by the system when biometrics change. This only applies to values stored with `requireAuthentication` set to `true`."* and `getItemAsync` *"resolves with `null` if there is no entry for the given key **or if the key has been invalidated**."*
 
@@ -3310,20 +3325,40 @@ export async function initPowerSync(): Promise<{ db: PowerSyncDatabase; wiped: b
   const outcome = await getOrCreateDatabaseKey();
   const wiped = outcome.status === "lost";
 
+  // The old file must be GONE BEFORE the database is constructed, not cleared afterwards.
+  // `unusableKey` is a fresh key for a database that does not exist yet: SQLCipher cannot
+  // decrypt the existing cortex.db with it, so anything that opens the handle first --
+  // including `disconnectAndClear()`, which has to init the database before it can clear it --
+  // fails on "file is not a database" instead of recovering. Delete, then open clean.
+  if (outcome.status === "lost") await deleteLocalDatabaseFiles();
+
+  const encryptionKey = outcome.status === "lost" ? outcome.unusableKey : outcome.key;
+
   db = new PowerSyncDatabase({
     schema: AppSchema,
     database: {
       dbFilename: "cortex.db",
       // Android only -- no getDylibPath/iOS branch, per the phase's platform constraint.
-      sqliteOptions: { encryptionKey: outcome.key },
+      sqliteOptions: { encryptionKey },
     },
   });
 
-  if (wiped) await db.disconnectAndClear();
   await db.connect(new ApiConnector());
   return { db, wiped };
 }
 ```
+
+**`deleteLocalDatabaseFiles` — resolve the path against the installed package, do not guess.**
+It must remove `cortex.db` **and its `-wal` and `-shm` siblings**; leaving the WAL behind can
+resurrect pages of the old database. Before writing it, confirm where `@powersync/react-native`
+actually puts the file on Android (its `dbLocation` / default directory), then delete from that
+directory with `expo-file-system`. A wrong path fails silently — the delete succeeds against
+nothing, and the open then hits the still-present old file.
+
+**Test this branch.** `wiped === true` must be reachable in the suite with the deletion mocked,
+asserting the delete happens **before** the `PowerSyncDatabase` constructor. Ordering is the
+whole point, and only an ordering assertion (a shared `order: string[]`, as Task 13 does) pins
+it.
 
 - [ ] **Step 6: Provide it to the tree and wire sign-out**
 
