@@ -96,6 +96,18 @@ describe("secureStorageAdapter", () => {
     expect([...store.keys()]).toEqual([]);
   });
 
+  it("sweeps a crashed write's chunks when no count key survives to bound them", async () => {
+    // The window the sweep exists for: the count key is deleted BEFORE the new chunks are
+    // written, so a crash mid-write leaves chunks with no count key at all. readCount reads 0,
+    // and a sweep of a fixed few indices past 0 strands every chunk beyond it — permanently
+    // unreachable and undeletable, which is exactly what Task 13's device wipe must not miss.
+    for (let i = 0; i < 8; i++) store.set(`session__${i}`, "orphaned tail");
+
+    await secureStorageAdapter.removeItem("session");
+
+    expect([...store.keys()]).toEqual([]);
+  });
+
   // F5: auth-js runs lockless by default, so two operations on the session key can interleave.
   it("serialises overlapping writes instead of splicing them together", async () => {
     const a = "a".repeat(SECURE_CHUNK_SIZE * 3);

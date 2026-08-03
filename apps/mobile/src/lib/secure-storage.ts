@@ -25,13 +25,23 @@ import * as SecureStore from "expo-secure-store";
 // for any per-entry overhead the platform adds on top of the value.
 export const SECURE_CHUNK_SIZE = 1024;
 
-// `removeItem` sweeps this many indices past the recorded count. A crash between the chunk
-// writes and the count write leaves chunks no count key covers: unreachable to `getItem` AND
-// undeletable by a `removeItem` that trusts the count, i.e. session material that sign-out can
-// never clear. A realistic Supabase session (access JWT + refresh token + user_metadata) is a
-// few KB, so a crashed maximal write followed by a minimal one strands ~3 chunks; 4 covers that
-// with room to spare, and the cost is 4 no-op native deletes on a path that runs at sign-out.
-const ORPHAN_SWEEP_MARGIN = 4;
+// `removeItem` cannot trust the count key to bound what it deletes. The write path deletes the
+// old count key BEFORE laying down the new chunks, so a crash mid-write leaves chunks with no
+// count key at all: `readCount` reads 0, and anything the sweep misses is unreachable to
+// `getItem` AND undeletable forever — session material that sign-out can never clear, which is
+// exactly what Task 13's device wipe must not leave behind.
+//
+// A fixed margin past the count does not close this: the stranded run is as long as the crashed
+// write was, not as long as the surviving count. So probe upward instead. Crashed writes lay
+// chunks down contiguously from index 0, so stopping after a run of absent indices is provably
+// enough; a run rather than a single miss covers a gap left by a partially-failed parallel
+// delete. Probing costs nothing on the normal path — `getItemAsync` on an absent key returns
+// null without decrypting anything.
+const ORPHAN_PROBE_GAP = 4;
+// Terminates the probe against a store this adapter did not write. A value needing 256 chunks
+// is ~256 KB, far outside anything a Supabase session holds, so reaching this bound means
+// something other than a crashed write put those keys there.
+const ORPHAN_PROBE_LIMIT = 256;
 
 const encoder = new TextEncoder();
 
@@ -111,13 +121,25 @@ async function writeValue(key: string, value: string): Promise<void> {
   await SecureStore.setItemAsync(countKey(key), String(chunks.length));
 }
 
+/** Every chunk index this key holds: the `count` the count key promises, plus any orphans. */
+async function chunkIndicesToClear(key: string, count: number): Promise<number[]> {
+  const indices = Array.from({ length: count }, (_, i) => i);
+  let misses = 0;
+  for (let i = count; misses < ORPHAN_PROBE_GAP && i < ORPHAN_PROBE_LIMIT; i++) {
+    if ((await SecureStore.getItemAsync(chunkKey(key, i))) === null) {
+      misses++;
+    } else {
+      indices.push(i);
+      misses = 0;
+    }
+  }
+  return indices;
+}
+
 async function clearValue(key: string): Promise<void> {
   const count = await readCount(key);
-  await Promise.all(
-    Array.from({ length: count + ORPHAN_SWEEP_MARGIN }, (_, i) =>
-      SecureStore.deleteItemAsync(chunkKey(key, i)),
-    ),
-  );
+  const indices = await chunkIndicesToClear(key, count);
+  await Promise.all(indices.map((i) => SecureStore.deleteItemAsync(chunkKey(key, i))));
   // Same ordering rule as the write path, mirrored: the count key goes last, so a crash mid-
   // delete leaves a count key whose chunks are missing, which `getItem` already reads as null.
   await SecureStore.deleteItemAsync(countKey(key));
