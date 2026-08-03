@@ -1529,6 +1529,7 @@ git commit -m "ci: run @cortex/sync tests through turbo; deploy.md 00015"
 - Create: `apps/mobile/src/lib/secure-storage.test.ts`
 - Create: `apps/mobile/vitest.config.ts`
 - Modify: `apps/mobile/package.json`
+- Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -1604,6 +1605,21 @@ pnpm --filter @cortex/mobile add -D vitest
 ```
 
 Add `"test": "vitest run"` to `apps/mobile/package.json`'s `scripts`.
+
+**Wire it into CI in the same step.** The `checks` job filters tests per package, so a new
+suite that is not named there runs on nobody's machine but yours — Task 7 had to fix
+exactly that for `@cortex/sync`. `apps/mobile`'s suites mock every native module and touch
+no Supabase stack, so they belong in `checks`, not `db-tests`. In
+`.github/workflows/ci.yml`, after the `Test @cortex/sync` step:
+
+```yaml
+      - name: Test @cortex/mobile
+        run: pnpm turbo run test --filter=@cortex/mobile
+```
+
+Every later task in Stages 2 and 4 adds to this same suite, so this step is what makes all
+of them run in CI. Verify it is not a silent no-op before moving on: the step must fail if
+`apps/mobile/src/lib/secure-storage.test.ts` is deleted.
 
 - [ ] **Step 3: Run test to verify it fails**
 
@@ -1725,7 +1741,7 @@ Expected: PASS, 5/5; typecheck and lint clean.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add apps/mobile pnpm-lock.yaml
+git add apps/mobile pnpm-lock.yaml .github/workflows/ci.yml
 git commit -m "fix(mobile): store the Supabase session in Keystore, not AsyncStorage"
 ```
 
