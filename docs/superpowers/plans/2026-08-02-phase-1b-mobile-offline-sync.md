@@ -1787,16 +1787,33 @@ vi.mock("expo-secure-store", () => ({
   deleteItemAsync: vi.fn(async (k: string) => { store.delete(k); authGated.delete(k); }),
 }));
 
-vi.mock("expo-crypto", () => ({
-  getRandomBytes: (n: number) => new Uint8Array(n).fill(7),
-}));
+// Every call must yield a DIFFERENT key. A constant RNG would make `second.key === first.key`
+// below a tautology that an implementation minting a fresh key on every run would also pass.
+vi.mock("expo-crypto", () => {
+  let calls = 0;
+  return {
+    getRandomBytes: (n: number) => {
+      calls += 1;
+      return Uint8Array.from({ length: n }, (_, i) => (calls * 31 + i) % 256);
+    },
+  };
+});
 
 const { getOrCreateDatabaseKey, clearDatabaseKey, DB_KEY_NAME } =
   await import("./db-key.js");
 
-/** What Android does when the user enrolls a new biometric. */
+/**
+ * What Android does when the user enrolls a new biometric.
+ *
+ * The entry is destroyed OUTRIGHT, so it must leave `authGated` too. Leaving the name behind
+ * would make the "recovery re-gates the new key" assertion below pass on the FIRST write's
+ * bookkeeping, never checking the recovery at all.
+ */
 function simulateBiometricEnrollment() {
-  for (const k of authGated) store.delete(k);
+  for (const k of [...authGated]) {
+    store.delete(k);
+    authGated.delete(k);
+  }
 }
 
 beforeEach(() => { store.clear(); authGated.clear(); });
@@ -1828,12 +1845,15 @@ describe("getOrCreateDatabaseKey", () => {
   });
 
   it("issues a usable, freshly stored key alongside the 'lost' status", async () => {
-    await getOrCreateDatabaseKey();
+    const first = await getOrCreateDatabaseKey();
     simulateBiometricEnrollment();
     expect(store.has(DB_KEY_NAME)).toBe(false);       // the OS really destroyed it
 
     const r = await getOrCreateDatabaseKey();
     expect(r.key).toMatch(/^[0-9a-f]{64}$/);
+    // The old key is gone for good, so a recovery that somehow returned it would be
+    // returning a key that cannot open anything.
+    expect(r.key).not.toBe(first.key);
     // The recovery must leave a key actually PERSISTED and auth-gated -- returning a key
     // it failed to store would open the new database once and lock the user out forever.
     expect(store.get(DB_KEY_NAME)).toBe(r.key);
