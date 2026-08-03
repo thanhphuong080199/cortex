@@ -280,4 +280,51 @@ describe("POST /sync/upload", () => {
       expect(res.body.applied).toEqual(["1"]);
     });
   });
+  /**
+   * The rule mobile's undo has to respect, and nothing pinned it before.
+   *
+   * PowerSync turns a local `UPDATE checkins SET deleted_at = ...` into a PATCH, which lands
+   * here. The op is reported in `failed` while the response is still 200, so the connector
+   * completes the batch and the undo is discarded -- the check-in stays on the server forever
+   * while the phone shows it gone. Mobile therefore issues a local DELETE instead.
+   */
+  it("rejects a PATCH on checkins rather than applying it", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "checkins", id, data: { mood: 4 } }],
+    }).expect(201);
+
+    const res = await post(alice.token, {
+      ops: [{ op_id: "2", op: "PATCH", table: "checkins", id,
+              data: { deleted_at: "2026-08-03T10:00:00.000Z" } }],
+    }).expect(201);
+
+    expect(res.body.applied).toEqual([]);
+    expect(res.body.failed).toEqual([{
+      op_id: "2", kind: "validation", message: "checkins are insert-or-delete only",
+    }]);
+
+    // And the row is untouched -- the PATCH did not half-apply on its way to being reported.
+    const client = createUserClient(alice.token);
+    const { data } = await client.from("checkins").select("deleted_at").eq("id", id).single();
+    expect(data!.deleted_at).toBeNull();
+  });
+
+  it("accepts the DELETE that mobile's undo actually sends", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "checkins", id, data: { mood: 2 } }],
+    }).expect(201);
+
+    const res = await post(alice.token, {
+      ops: [{ op_id: "2", op: "DELETE", table: "checkins", id }],
+    }).expect(201);
+
+    expect(res.body.applied).toEqual(["2"]);
+    const client = createUserClient(alice.token);
+    const { data } = await client.from("checkins").select("deleted_at").eq("id", id).single();
+    // Soft on the server even though the device deleted the row outright: every synced table
+    // needs its tombstone.
+    expect(data!.deleted_at).not.toBeNull();
+  });
 });
