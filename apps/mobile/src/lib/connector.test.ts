@@ -100,7 +100,7 @@ describe("ApiConnector.uploadData", () => {
   beforeEach(() => {
     session = { access_token: "jwt" };
     getSession.mockClear();
-    fetchMock = vi.fn(async () => ({ ok: true, status: 200 }));
+    fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ failed: [] }) }));
     vi.stubGlobal("fetch", fetchMock);
   });
 
@@ -182,5 +182,38 @@ describe("ApiConnector.uploadData", () => {
   it("returns null credentials rather than a token when signed out", async () => {
     session = null;
     expect(await new ApiConnector().fetchCredentials()).toBeNull();
+  });
+  /**
+   * A 200 is not "everything applied". The router applies ops independently and reports the
+   * casualties in `failed`, and the batch completes regardless -- so a rejected op leaves the
+   * queue while its note stays in local SQLite and never reaches the server.
+   */
+  it("surfaces ops the server rejected inside a 200", async () => {
+    const db = database([patch]);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ failed: [{ op_id: "1", kind: "validation" }] }),
+    });
+
+    await new ApiConnector().uploadData(db);
+
+    expect(logged).toHaveBeenCalledWith(
+      "sync upload: ops rejected by the server",
+      [{ op_id: "1", kind: "validation" }],
+    );
+    logged.mockRestore();
+  });
+
+  it("still completes a batch whose response body cannot be read", async () => {
+    const db = database([patch]);
+    fetchMock.mockResolvedValueOnce({
+      ok: true, status: 200, json: async () => { throw new Error("not json"); },
+    });
+
+    // An unreadable body is not a reason to strand the queue -- the server accepted the batch.
+    await expect(new ApiConnector().uploadData(db)).resolves.toBeUndefined();
+    expect(complete).toHaveBeenCalledOnce();
   });
 });

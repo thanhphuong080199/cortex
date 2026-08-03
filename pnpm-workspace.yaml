@@ -3,9 +3,11 @@ packages:
   - "packages/*"
 allowBuilds:
   '@swc/core': true
-  # @cortex/core's filter-equivalence suite runs the emitted WHERE clause on real SQLite,
-  # which is a native module and needs its install script. Test-only: nothing that ships
-  # imports it.
+  # Two suites run SQL on real SQLite rather than asserting its text: @cortex/core's
+  # filter-equivalence suite (the emitted WHERE clause) and @cortex/mobile's capture suite
+  # (the quick-capture INSERT, whose timestamp format only shows up when executed). It is a
+  # native module and needs its install script, or CI installs skip the build and both suites
+  # fail there only. Test-only: nothing that ships imports it.
   better-sqlite3: true
   esbuild: true
   sharp: true

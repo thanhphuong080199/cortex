@@ -185,4 +185,99 @@ describe("POST /sync/upload", () => {
     expect(res2.body.applied).toEqual([]);
     expect(res2.body.failed).toEqual([{ op_id: "2", kind: "not_found" }]);
   });
+  /**
+   * Everything above sends `domain_meta` as an OBJECT, which is the API contract but not what
+   * a phone sends. PowerSync's local schema has no jsonb type, so `domain_meta` is a TEXT
+   * column and the device serialises it -- every real mobile op carries a string. That gap is
+   * why the old `as Record<string, unknown>` cast survived: no test ever exercised the wire
+   * format the mobile write path actually produces.
+   */
+  describe("domain_meta as the device really sends it (a JSON string)", () => {
+    it("stores {} as an object, not as the JSON string \"{}\"", async () => {
+      const id = uuid();
+      const res = await post(alice.token, {
+        ops: [{ op_id: "1", op: "PUT", table: "notes", id,
+                data: { content: "captured offline", domain_meta: "{}" } }],
+      }).expect(201);
+      expect(res.body.applied).toEqual(["1"]);
+
+      const client = createUserClient(alice.token);
+      const { data } = await client.from("notes").select("domain_meta").eq("id", id).single();
+      // A string here is silent corruption: the column accepts any JSON, so "{}" stores
+      // happily as a jsonb STRING and every later reader has to cope with both shapes.
+      expect(data!.domain_meta).toEqual({});
+      expect(typeof data!.domain_meta).toBe("object");
+    });
+
+    it("applies a note that has BOTH a domain and a serialised meta", async () => {
+      const id = uuid();
+      const res = await post(alice.token, {
+        ops: [{ op_id: "1", op: "PUT", table: "notes", id,
+                data: { content: "read it", domain: "learning",
+                        domain_meta: JSON.stringify({ topic: "type theory" }) } }],
+      }).expect(201);
+
+      // The worst case before the fix. validateDomainMeta parsed a string against an object
+      // schema, threw `validation`, and the op landed in `failed` while the response stayed
+      // 200 -- so the connector completed the batch and the note was dropped for good.
+      expect(res.body.failed).toEqual([]);
+      expect(res.body.applied).toEqual(["1"]);
+    });
+
+    it("resolves an offline media log whose pending_item arrived serialised", async () => {
+      const id = uuid();
+      const res = await post(alice.token, {
+        ops: [{ op_id: "1", op: "PUT", table: "notes", id,
+                data: { content: "watched", title: "Solaris", domain: "media",
+                        domain_meta: JSON.stringify({
+                          status: "finished",
+                          pending_item: { kind: "movie", title: "Solaris", year: 1972 },
+                        }) } }],
+      }).expect(201);
+
+      // `domainMeta.pending_item` on a string is undefined, so this whole branch was skipped
+      // and spec 5.3's offline identity resolution silently never ran.
+      expect(res.body.applied).toEqual(["1"]);
+      expect(res.body.resolved_media).toEqual([{ op_id: "1", note_id: id }]);
+    });
+
+    it("fails the op rather than discarding metadata it cannot parse", async () => {
+      const res = await post(alice.token, {
+        ops: [{ op_id: "1", op: "PUT", table: "notes", id: uuid(),
+                data: { content: "x", domain_meta: "{not json" } }],
+      }).expect(201);
+
+      // Defaulting to {} would save the note and drop the metadata with nothing to notice by.
+      expect(res.body.applied).toEqual([]);
+      expect(res.body.failed).toEqual([{
+        op_id: "1", kind: "validation", message: "domain_meta is not valid JSON",
+      }]);
+    });
+
+    it("rejects JSON that parses but is not an object", async () => {
+      const res = await post(alice.token, {
+        ops: [{ op_id: "1", op: "PUT", table: "notes", id: uuid(),
+                data: { content: "x", domain_meta: "[]" } },
+               { op_id: "2", op: "PUT", table: "notes", id: uuid(),
+                 data: { content: "y", domain_meta: "null" } }],
+      }).expect(201);
+
+      // `typeof [] === "object"`, so an array slips past every check except Array.isArray --
+      // and `JSON.parse("null")` is a valid parse of a value that has no properties at all.
+      expect(res.body.applied).toEqual([]);
+      expect(res.body.failed.map((f: { kind: string }) => f.kind)).toEqual([
+        "validation", "validation",
+      ]);
+    });
+
+    it("still accepts an object, so the API's own clients are unaffected", async () => {
+      const id = uuid();
+      const res = await post(alice.token, {
+        ops: [{ op_id: "1", op: "PUT", table: "notes", id,
+                data: { content: "from the web", domain: "health",
+                        domain_meta: { intensity: 3 } } }],
+      }).expect(201);
+      expect(res.body.applied).toEqual(["1"]);
+    });
+  });
 });

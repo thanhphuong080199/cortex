@@ -19,6 +19,54 @@ export interface SyncUploadResult {
   media_unresolved: { op_id: string; note_id: string; kind: CoreErrorKind }[];
 }
 
+/**
+ * Reads `domain_meta` off a CRUD op, in EITHER of the two shapes that legitimately arrive.
+ *
+ * The device sends a STRING. PowerSync's local schema has no jsonb type, so
+ * `packages/sync/src/schema.ts` declares `domain_meta: column.text` and the row's value is the
+ * serialised JSON. Every op from a phone therefore carries `"{}"`, not `{}`. The API's own
+ * clients send the object.
+ *
+ * `(data.domain_meta ?? {}) as Record<string, unknown>` -- what this replaced -- is a cast, so
+ * it silenced the difference instead of handling it, and every consequence was silent:
+ *
+ *   - With a domain set, `validateDomainMeta` parses a string against an object schema, fails,
+ *     and `createWithId` throws `validation`. The op is reported in `failed` while the request
+ *     is still 200, so the connector completes the batch and the note is dropped -- present on
+ *     the device forever, never on the server, with nothing surfaced to the user.
+ *   - With no domain the string reaches PostgREST and lands in the jsonb column as the JSON
+ *     STRING "{}" rather than the object {}, which every later reader has to cope with.
+ *   - `domainMeta.pending_item` on a string is undefined, so an offline media log never
+ *     resolves its media item (spec §5.3) and reports nothing either.
+ *
+ * Malformed or non-object JSON throws `validation` rather than defaulting to `{}`: a device
+ * that serialises this wrongly needs to show up in `failed`, not to have its metadata quietly
+ * discarded while the note saves.
+ */
+export function readDomainMeta(raw: unknown): Record<string, unknown> {
+  if (raw === null || raw === undefined) return {};
+
+  if (typeof raw === "string") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (cause) {
+      throw { kind: "validation", message: "domain_meta is not valid JSON", cause } as const;
+    }
+    // `null` parses fine and is not an object; so do `5`, `"x"` and `[]`. An array is the
+    // dangerous one -- typeof [] is "object", so only the Array check keeps it out.
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw { kind: "validation", message: "domain_meta must be a JSON object" } as const;
+    }
+    return parsed as Record<string, unknown>;
+  }
+
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw { kind: "validation", message: "domain_meta must be a JSON object" } as const;
+  }
+  return raw as Record<string, unknown>;
+}
+
 function asCoreError(err: unknown): { kind: CoreErrorKind; message?: string } {
   const e = err as { kind?: CoreErrorKind; message?: string };
   return e?.kind
@@ -87,7 +135,7 @@ async function applyNoteOp(
   if (op.op === "DELETE") { await notes.softDelete(op.id); return; }
 
   const data = (op.data ?? {}) as Record<string, unknown>;
-  const domainMeta = (data.domain_meta ?? {}) as Record<string, unknown>;
+  const domainMeta = readDomainMeta(data.domain_meta);
 
   if (op.op === "PUT") {
     // The id comes from the device so the local optimistic row and the server row are the

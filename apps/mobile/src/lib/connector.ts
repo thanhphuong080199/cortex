@@ -100,6 +100,17 @@ export class ApiConnector implements PowerSyncBackendConnector {
       throw new Error(`sync upload failed (${res.status})`);
     }
 
+    // A 200 does NOT mean every op applied. The router runs ops independently and reports the
+    // casualties in `failed` so one bad row cannot wedge the queue -- but the batch is
+    // completed either way, so a failed op is gone from the device's queue with the note still
+    // sitting in local SQLite and never on the server. Nothing can retry it usefully (these
+    // are validation errors, not transient ones), so the least this can do is stop the loss
+    // being invisible. Deciding what to DO with them is still open -- see the handoff.
+    const result = (await res.json().catch(() => null)) as { failed?: unknown[] } | null;
+    if (result?.failed?.length) {
+      console.error("sync upload: ops rejected by the server", result.failed);
+    }
+
     await batch.complete();
     // The bases these ops were checked against are spent; keeping them would apply a stale
     // base to the user's NEXT edit and manufacture a conflict copy that never happened.

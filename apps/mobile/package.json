@@ -42,7 +42,9 @@
   },
   "devDependencies": {
     "@cortex/config": "workspace:*",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/react": "^19.2.17",
+    "better-sqlite3": "^13.0.2",
     "typescript": "^6.0.3",
     "vitest": "^3.2.7"
   }
