@@ -17,14 +17,18 @@ committed copy of what matters.
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
 | 2 — security baseline | 8–13 | **Complete.** All six tasks done and reviewed. |
 | 3 — shared filters | 14–16 | **Complete.** `282666d`, `b824a2a`, `083ab6a`. None independently reviewed. |
-| 4 — mobile parity | 17 | **Task 17 complete** (`c6757f9`), not independently reviewed. |
-| 4 — mobile parity | 18–23 | **Not started. Resume here.** |
+| 4 — mobile parity | 17–18 | **Complete** (`c6757f9`, `1f900ce`), neither independently reviewed. |
+| 4 — mobile parity | 19–23 | **Not started. Resume here.** |
 
-### Resume here: Task 18
+### Resume here: Task 19
 
-Quick capture. Read "Stage 4 — what shipped" below first: Task 17 changed which PowerSync major
-the app is on, pinned where the database file lives, and already added the `fts5` native flag
-Task 19 needs.
+Note list with shared filters. Read "Stage 4 — what shipped" below first: Task 17 changed which
+PowerSync major the app is on and already added the `fts5` native flag this task needs, and
+Task 18 settled the local timestamp format the list orders by.
+
+**Task 18 has not been verified on a device.** Its Step 3 (capture online, capture in airplane
+mode, confirm both reach web) needs a human with the dev client installed. Everything provable
+without a device is proven; see below.
 
 ### Verification state — the full gate has been run
 
@@ -111,6 +115,72 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
 ---
 
 ## Stage 4 — what shipped
+
+### Task 18 — quick capture, and two bugs a device write exposed (commit `1f900ce`)
+
+Both were invisible until something actually wrote a note from the phone, which is why nothing
+before this task caught them.
+
+**1. `datetime('now')` is the wrong timestamp format, and Task 19 orders by it.** SQLite's
+`datetime()` returns `2026-08-03 10:00:00` — space-separated, second precision, no zone. Rows
+the server echoes back are ISO with a `T` and a `Z`, and `ORDER BY` on a TEXT column is a byte
+comparison: a space (0x20) sorts below `T` (0x54), so within a single day **every locally
+captured note sorts beneath every synced note** regardless of its real time. Separately,
+`syncOp.base_updated_at` is `z.iso.datetime()`, which rejects both the space form and a numeric
+offset, so Task 20 would have had its conflict-copy base rejected server-side. Now
+`strftime('%Y-%m-%dT%H:%M:%fZ','now')`.
+
+**2. `domain_meta` arrives at the server as a STRING and the router cast it to an object.**
+PowerSync's local schema has no jsonb type, so `packages/sync` declares the column `column.text`
+and the device serialises it — every op from a phone carries `"{}"`, not `{}`. The old
+`(data.domain_meta ?? {}) as Record<string, unknown>` is a cast, so it silenced the difference
+instead of handling it, and all three consequences were silent:
+
+- With a domain set, `validateDomainMeta` parsed a string against an object schema, threw
+  `validation`, and the op landed in `failed` **while the response stayed 200** — so the
+  connector completed the batch and the note was dropped. Present on the device forever, never
+  on the server, nothing surfaced to the user. This is the severe one.
+- With no domain, `"{}"` reached PostgREST and stored in the jsonb column as a JSON *string*
+  rather than an object.
+- `domainMeta.pending_item` on a string is `undefined`, so an offline media log never resolved
+  its media item (spec §5.3) and reported nothing either — the whole point of Task 22.
+
+`readDomainMeta` now takes both shapes and **fails the op** on anything it cannot parse rather
+than defaulting to `{}`; a device serialising this wrongly needs to appear in `failed`, not to
+have its metadata quietly discarded while the note saves. `Array.isArray` is a separate guard
+because `typeof [] === "object"`.
+
+**Why it survived this long: every existing `sync-upload` test sends `domain_meta` as an
+object.** The suite modelled the API contract, not the wire format the mobile write path
+produces. The new cases send strings, and the original cast fails **5 of the 6**.
+
+**The capture SQL is tested by executing it on real SQLite**, not by asserting its text — the
+Task 15 precedent. The timestamp format is only observable by running the statement; an
+assertion over the SQL string restates the implementation and passes on anything that parses.
+`uuid()` is registered in the test because it belongs to PowerSync's SQLite core extension
+rather than to SQLite. `better-sqlite3` is now a test-only devDependency of `@cortex/mobile`
+as well as `@cortex/core`, and `pnpm-workspace.yaml`'s `allowBuilds` note was updated to say so.
+
+The write lives in `src/lib/capture.ts`, not in the screen. Anything importing an RN component
+dies under `environment: "node"`, so logic left in the `.tsx` is logic that cannot be tested —
+and the statement is where every consequence is.
+
+**One of my own tests was initially unfalsifiable** and is worth recording, because it is the
+exact failure mode this branch keeps finding. The sort test overwrote the captured
+`created_at` with an ISO literal before asserting order, so it tested SQLite's string
+comparison rather than the statement, and stayed green under `datetime('now')`. It now derives
+the comparison row from whatever the statement actually produced, and fails as it should.
+
+Also: **the connector now surfaces ops the server rejected inside a 200.** Previously a 200 was
+treated as total success. What to *do* about them is unresolved — see the deferred list.
+
+Verified without a device: 9 capture tests on real SQLite, 6 new sync-upload e2e cases, 2 new
+connector cases. Ten mutations run, each failing exactly its own test — including the plan's
+own `datetime('now')` (fails 2 of 9) and the router's original cast (fails 5 of 6).
+Gate: **26/26, 0 cached, 428 tests**, Docker up.
+
+**Not verified:** Step 3's device run — capture online, capture in airplane mode, confirm both
+reach web. That needs a human with the dev client installed.
 
 ### Task 17 — PowerSync provider and connector (commit `c6757f9`)
 
@@ -533,6 +603,12 @@ Each was judged non-blocking at the time and ledgered rather than fixed:
   now slightly out of step.
 - `secure-storage.ts` — no test covers `getItem` racing a concurrent `setItem` on the same
   key; the per-key queue covers it structurally but nothing proves it.
+- **A sync op the server rejects inside a 200 is now logged, but still lost.** The router
+  applies ops independently and reports casualties in `failed`; the batch completes either way,
+  so the op leaves the device's queue while its row stays in local SQLite and never reaches the
+  server. Retrying cannot help — these are validation failures, not transient ones — so the fix
+  is a policy decision (dead-letter table? surface to the user? mark the row?) rather than a
+  code change, which is why Task 18 only made the loss visible instead of choosing one.
 - **Resolved by Task 11**, kept here for the trail: the `expo-secure-store` config plugin's
   backup rules arrived as a side effect of `expo install`. They turned out to be the only thing
   covering device-to-device transfer on Android 12+, and are now documented as such.
