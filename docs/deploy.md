@@ -885,16 +885,17 @@ not on PATH.)
 
 Because of the `if not exists` guard, that push proves the **helper** landed, not that the
 hosted publication has the right scope: had it existed with a wrong scope, the guard would have
-skipped it. Re-confirm from the dashboard SQL editor, which needs no `service_role` key in a
-shell session:
+skipped it. Confirm from the dashboard SQL editor, which needs no `service_role` key in a shell
+session:
 
 ```sql
 select * from _test_publication_tables('powersync');
 -- checkins, links, media_items, note_tags, notes, tags -- exactly six rows
 ```
 
-`sync-rules-isolation.test.ts` asserts this automatically against the **local** stack and CI.
-The hosted publication is verified by hand, here and in section 1 above.
+**Run 2026-08-03: six rows, no `integrations`.** `sync-rules-isolation.test.ts` asserts this
+automatically against the **local** stack and CI, so the hosted publication stays a manual check
+— re-run the query above after any change to replication configuration.
 
 A publication that lives only in a dashboard session is a layer nobody can review, diff or
 restore. The migration is what makes the local stack and CI carry the same six-table scope the

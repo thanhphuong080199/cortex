@@ -43,23 +43,29 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
 
 ## Outstanding actions for the human
 
-One left. It blocks a security claim, not a task.
+**None. Both cleared 2026-08-03**, recorded here so a later session does not re-raise them.
 
-1. ~~**`supabase db push`** for `00016_powersync_publication.sql`.~~ **Done 2026-08-03.**
-   `00001`–`00016` are local == remote. Note the CLI is a devDependency — `npx supabase`, not
-   `supabase`. One residual, non-blocking: the migration's `if not exists` guard means the push
-   proves the `_test_publication_tables` helper landed, **not** that the hosted publication has
-   the right scope — a pre-existing wrong scope would have been skipped. Confirm from the
-   dashboard SQL editor with `select * from _test_publication_tables('powersync');` (six rows,
-   no `integrations`). The automated test covers the local stack and CI only.
-2. **Revoke all Supabase sessions** — Dashboard → Authentication → Users → your account → sign
-   out all sessions. Task 8 moved the session into Keystore, but the old one is still in
-   plaintext on any device that already had one, and this build can no longer delete it (the
-   `@react-native-async-storage/async-storage` dependency is gone). It is also inside whatever
-   Auto Backup snapshots Google already took, and a Supabase refresh token does not expire on
-   its own. Server-side revocation is stronger than deleting the local file because it also
-   invalidates the copies already on Drive. **This blocks the claim that the refresh token is
-   out of Auto Backup.**
+1. **`supabase db push` for `00016_powersync_publication.sql` — done.** `00001`–`00016` are
+   local == remote. (The CLI is a devDependency: `npx supabase`, not `supabase`.) The migration's
+   `if not exists` guard means the push proved only that the `_test_publication_tables` helper
+   landed, not that the hosted publication had the right scope — a pre-existing wrong scope would
+   have been skipped silently. Closed separately by running
+   `select * from _test_publication_tables('powersync');` in the dashboard SQL editor: **six rows,
+   no `integrations`.** The automated test still covers the local stack and CI only, so any future
+   suspicion of drift needs that same manual query.
+2. **Stale plaintext Supabase sessions revoked — done.** Task 8 moved the session into Keystore,
+   but the old one remained in plaintext on any device that already had one, and this build can no
+   longer delete it (the `@react-native-async-storage/async-storage` dependency is gone). It was
+   also inside whatever Auto Backup snapshots Google had already taken, and a Supabase refresh
+   token does not expire on its own. Revoked server-side via the SQL editor — deleting from
+   `auth.refresh_tokens` **and** `auth.sessions`, because tokens issued by older GoTrue versions
+   can carry a null `session_id` and survive the cascade from `auth.sessions` alone.
+   (`auth.refresh_tokens.user_id` is a `varchar`, so it needs an `::text` cast.)
+
+   **Task 8's security claim now holds**: no live refresh token predates the Keystore migration,
+   including the copies already on Drive, which is why server-side revocation was required rather
+   than deleting the local file. Already-issued access tokens stayed valid until their normal
+   1-hour expiry — a bounded, accepted window; rotating the JWT secret was judged unwarranted.
 
 ---
 
