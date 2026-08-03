@@ -15,24 +15,49 @@ committed copy of what matters.
 | Stage | Tasks | State |
 | --- | --- | --- |
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
-| 2 — security baseline | 8–13 | **Complete except Task 12**, which is blocked on Docker. |
-| 3 — shared filters | 14–16 | Not started. **Blocked on Docker.** |
+| 2 — security baseline | 8–13 | **Complete.** All six tasks done and reviewed. |
+| 3 — shared filters | 14–16 | **Not started. Resume here.** |
 | 4 — mobile parity | 17–23 | Not started. |
 
-### The blocker: Docker Desktop is down on this machine
+### Resume here: Task 14
 
-Everything still open needs the local Supabase stack, so nothing further can be gated honestly
-until Docker Desktop is running:
+`NoteFilters` and `applyNoteFilters` in `@cortex/core`. Extracts the narrowing that currently
+exists twice (`apps/web/src/app/page.tsx` and `note-list.tsx`) and caused issue-log **E5**;
+mobile would have been a third copy. Its test imports `createUserClient` and `makeUser` from the
+core harness, so **Docker Desktop must be running** — see the gate note below.
 
-- **Task 12** (sync-rule isolation) seeds real rows for two users through `makeUser`/`admin`.
-- **Task 14** imports `createUserClient` and `makeUser` from the core test harness.
-- Tasks 15–16 build on 14.
+### Verification state — the full gate has been run
 
-Every gate run recorded on this branch since Task 8 shows **26/26 turbo tasks green with 23
-cached** — only the three `@cortex/mobile` tasks ran fresh. That is acceptable for diffs
-confined to `apps/mobile`, and every commit message says so explicitly, but it must never be
-reported as a full run. Once Docker is up, run `pnpm turbo run typecheck lint test --force`
-once to re-verify the Supabase-backed suites against everything Stage 2 changed.
+Docker was down for Tasks 9–13, so every gate in that stretch was 26/26 with **23 cached**; only
+the three `@cortex/mobile` tasks ran fresh. After Docker came up, a full
+`pnpm turbo run typecheck lint test --force` ran clean: **26/26 fresh, 0 cached, 332 tests**
+(mobile 47, shared 34, db 93, sync 4, core 73, api 68, web 29). That run covered every
+Supabase-backed suite against everything Stage 2 changed, including `db-key.ts`'s new signature
+— nothing outside `apps/mobile` imports it.
+
+Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@cortex/api` and
+`@cortex/core` are **turbo cache replays, not runs**. That is acceptable for a diff confined to
+`apps/mobile` provided it is stated explicitly, and never implied as a run.
+
+---
+
+## Outstanding actions for the human
+
+Neither blocks a task. Both block a claim.
+
+1. **`supabase db push`** — migration `00016_powersync_publication.sql` (Task 12) is applied
+   locally but not to the hosted project. The `create publication` half is a deliberate no-op
+   there, but the `_test_publication_tables` helper is not, so the suite cannot assert the
+   hosted publication until this lands. Follow with `supabase migration list` to confirm
+   local == remote.
+2. **Revoke all Supabase sessions** — Dashboard → Authentication → Users → your account → sign
+   out all sessions. Task 8 moved the session into Keystore, but the old one is still in
+   plaintext on any device that already had one, and this build can no longer delete it (the
+   `@react-native-async-storage/async-storage` dependency is gone). It is also inside whatever
+   Auto Backup snapshots Google already took, and a Supabase refresh token does not expire on
+   its own. Server-side revocation is stronger than deleting the local file because it also
+   invalidates the copies already on Drive. **This blocks the claim that the refresh token is
+   out of Auto Backup.**
 
 ---
 
@@ -123,37 +148,48 @@ A fourth test covers the dangerous direction: a failure to clear the key itself.
 `signOut` passes `null` until Task 17 exists to hand over a database. Task 17 Step 6 already
 carries the replacement step.
 
----
+### Task 12 — sync-rule isolation, and the publication in version control (commit `8623a52`)
 
-## The one thing to do first on resume
+Mostly test repair. **Four of the plan's tests could not do their job**, which matters more here
+than anywhere else on the branch: logical replication bypasses RLS, so these are the only checks
+standing between two users' notes.
 
-**Start Docker Desktop, then run `pnpm turbo run typecheck lint test --force` once.** Stage 2
-changed `db-key.ts`'s exported signature; nothing outside `apps/mobile` imports it, but that has
-only been verified by typecheck against cached Supabase suites.
+- **The two dynamic tests could not fail.** `.eq("user_id", alice.id)` then asserting every
+  returned row is alice's restates the query instead of testing it — green with the sync rules
+  deleted, the publication widened to `FOR ALL TABLES`, or no rules file at all. They now execute
+  the predicate the YAML *declares* (table and column parsed out of it) and assert both
+  directions against named seeded ids. "Bob absent" alone is satisfied by a predicate returning
+  nothing, which is how a rule scoped on the wrong column would have passed.
+- **The publication test could not run.** It skipped on `PGRST202` when the RPC was missing and
+  again when the publication was empty. Both conditions held *everywhere* — neither
+  `_test_publication_tables` nor a local publication had ever existed — so it would have passed
+  by skipping forever, on the property keeping `integrations.credentials` out of the stream.
+- **Two static assertions were wrong, not the rules.** `sync-rules.yaml`'s comments name
+  `bucket_definitions` and every server-only table in order to record *why* they are absent, so
+  `expect(rules).not.toContain(...)` over the raw file fails on exactly those explanations.
+  Staying green would have meant deleting the most useful comments in the file. The assertions
+  now run against the file with comments stripped.
 
-Then **Task 12**, which has a pre-flight finding already written into the plan:
+**New coverage a rules file structurally cannot give you.** `note_tags` and `links` each carry
+their own `user_id` **and** a foreign key into `notes`. A child row whose `user_id` says alice
+while its parent note belongs to bob is bucketed straight into alice's stream, carrying bob's
+note id, and lands on her device as a dangling reference. Every static check passes in that
+state, and so does every predicate execution, because the row's `user_id` genuinely is alice's.
 
-> The plan's dynamic half **cannot fail**. `.eq("user_id", alice.id)` filters to alice and the
-> assertion then checks every row is alice's — green with the sync rules deleted, with the
-> publication widened, with no rules file at all. It restates the query instead of testing it,
-> while guarding the one property standing between two users' notes. The fix is spelled out in
-> the plan at that test: execute the *rule's* predicate with alice's id substituted for
-> `auth.user_id()`, and assert both directions — alice's row present, bob's absent.
+**Both new guards were proven to bite**, not just observed passing:
 
----
+- Inserted exactly such a cross-owner `note_tags` row → the ownership test failed and named it,
+  while the predicate test passed, confirming the gap it fills. Row removed.
+- Added `note_chunks` to the publication → the six-table equality failed with `note_chunks` in
+  the diff. Reverted; publication verified back at exactly six tables.
 
-## Action required from the human — Task 8's security claim depends on it
-
-Still outstanding. Task 8 moved the Supabase session out of AsyncStorage into Android Keystore,
-but **the old session is still on any device that already had one**, in plaintext, and this
-build can no longer delete it (the `@react-native-async-storage/async-storage` dependency is
-gone). It is also inside whatever Auto Backup snapshots Google already took. A Supabase refresh
-token is long-lived and does not expire on its own.
-
-One-time fix, server-side, which kills the stale token wherever copies exist:
-**Supabase Dashboard → Authentication → Users → your account → revoke / sign out all sessions.**
-
-Not blocking any task. Blocking the claim that the refresh token is out of Auto Backup.
+Migration `00016_powersync_publication.sql` puts the publication under version control. It
+creates it only `if not exists`, so it is a **no-op on the hosted project**, which got its
+publication by hand in Stage 1 — and it deliberately does *not* follow with
+`alter publication ... add table`, which errors on a relation already present. The
+`_test_publication_tables` helper follows the `_test_has_table_privilege` precedent from `00001`:
+SECURITY DEFINER, read-only schema metadata, revoked from PUBLIC, granted to `service_role` only.
+**This migration still needs pushing to the hosted project** — see "Outstanding actions" above.
 
 ---
 
@@ -222,6 +258,13 @@ Three facts that cost real time to establish, all now in `docs/deploy.md`:
   after reinstall (`SecureStoreModule.kt`, `BadPaddingException` path). For the session that
   degrades to a re-login, which is intended; for the database key it is the invalidation-recovery
   path, with very different severity.
+- **Stage 3 (Tasks 14–16) needs Docker.** Task 14's test imports `createUserClient` and
+  `makeUser` from the core harness; 15 and 16 build on 14.
+- **`supabase migration up`, not `db reset`.** A reset breaks Kong→auth routing with stale
+  Docker DNS, which surfaces as `AuthRetryableFetchError` and reads like a code regression. If it
+  happens, restart the kong container rather than the stack.
+- **The generated `apps/mobile/android/` tree defeats repo-wide `grep`** (it timed out a
+  `grep -rn` across the repo). Use the Grep tool or scope the path.
 
 ## Deferred minors, for the whole-branch review after Task 23
 
@@ -263,17 +306,26 @@ Each was judged non-blocking at the time and ledgered rather than fixed:
   the implementer's machine. This happened twice: `@cortex/sync` (fixed in Task 7) and
   `apps/mobile` (caught in Task 8's pre-flight). `apps/mobile` is now wired, so Tasks 10 and 13
   needed no CI change.
-- **Pre-flight scan each task's tests for assertions the query or the mock guarantees.** Five
-  vacuous tests caught so far: one before Stage 1, two in Task 9's pre-flight, Task 13's
-  self-contradicting third test, and Task 12's `.eq(...)`-then-assert-the-same pair. A test that
-  cannot fail is worse than no test.
+- **Pre-flight scan each task's tests for assertions the query or the mock guarantees.** Nine
+  caught so far: one before Stage 1, two in Task 9's pre-flight, Task 13's self-contradicting
+  third test, Task 12's `.eq(...)`-then-assert-the-same **pair**, its publication test that
+  skipped everywhere, and its two static assertions that failed on the file's own explanatory
+  comments. A test that cannot fail is worse than no test — and the density of them in Task 12,
+  the isolation suite, is the argument for doing this scan every time.
+- **Prove a new guard bites before believing it.** Task 12's two genuinely new tests were each
+  verified by introducing the exact defect they exist to catch (a cross-owner `note_tags` row; a
+  server-only table added to the publication) and watching them fail with a message that named
+  the problem. A green test nobody has tried to break is an assertion, not evidence.
 - **Verify library behaviour against the installed source, not the docs.** Three decisions on
   this branch turned on reading `expo-secure-store` and `expo-local-authentication` Kotlin:
   writes prompt as well as reads, reads ignore the caller's `requireAuthentication`, and
   `isEnrolledAsync` asks a weaker question than `assertBiometricsSupport` answers.
 - Never `pnpm --filter <pkg> test`; always `pnpm turbo run test --filter=<pkg>`.
-- Docker Desktop is frequently down on this machine, which makes `@cortex/db`, `@cortex/api`
-  and `@cortex/core` **turbo cache replays rather than fresh runs**. Acceptable for a diff
-  confined to `apps/mobile`, but it must be stated explicitly, never implied as a run.
+- Docker Desktop is frequently down on this machine — see "Verification state" above for what
+  that does to the gate and how it must be reported.
+- **Verify library behaviour against the installed source, not the docs, and check the merged
+  artifact rather than the config that should produce it.** `allowBackup` was confirmed in the
+  generated `AndroidManifest.xml`, not in `app.json`; the publication scope is asserted from
+  `pg_publication_tables`, not from the migration that writes it.
 - Commit messages go through a scratchpad file and `git commit -F` — backticks in bash
   heredocs trigger command substitution and mangle the message.
