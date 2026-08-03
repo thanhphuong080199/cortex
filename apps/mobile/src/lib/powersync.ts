@@ -6,6 +6,7 @@ import { File } from "expo-file-system";
 import { hasStrongBiometrics } from "./app-lock.js";
 import { ApiConnector } from "./connector.js";
 import { getOrCreateDatabaseKey } from "./db-key.js";
+import { setupNotesFts } from "./fts.js";
 
 export const DB_FILENAME = "cortex.db";
 
@@ -96,6 +97,11 @@ export async function initPowerSync(): Promise<{ db: PowerSyncDatabase; wiped: b
         sqliteOptions: { encryptionKey },
       },
     });
+
+    // Before connect, so the first batch replication delivers is already covered by the
+    // triggers rather than racing them. `execute` waits for the schema to be applied, which is
+    // what creates `ps_data__notes` for the triggers to hang off.
+    await setupNotesFts(opened);
 
     await opened.connect(new ApiConnector());
     db = opened;

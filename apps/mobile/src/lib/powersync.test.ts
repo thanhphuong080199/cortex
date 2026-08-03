@@ -40,6 +40,11 @@ vi.mock("@powersync/react-native", () => ({
 }));
 
 vi.mock("@cortex/sync", () => ({ AppSchema: { schemaMarker: true } }));
+
+const setupNotesFts = vi.fn(async () => {
+  order.push("fts");
+});
+vi.mock("./fts.js", () => ({ setupNotesFts }));
 vi.mock("./connector.js", () => ({ ApiConnector: class {} }));
 
 const hasStrongBiometrics = vi.fn(async () => true);
@@ -58,6 +63,7 @@ beforeEach(() => {
   existing = new Set(["/data/db/cortex.db", "/data/db/cortex.db-wal", "/data/db/cortex.db-shm"]);
   outcome = { status: "loaded", key: "aa" };
   hasStrongBiometrics.mockClear();
+  setupNotesFts.mockClear();
   getOrCreateDatabaseKey.mockClear();
   connect.mockClear();
 });
@@ -117,6 +123,7 @@ describe("initPowerSync", () => {
       "delete:/data/db/cortex.db-wal",
       "delete:/data/db/cortex.db-shm",
       "construct",
+      "fts",
     ]);
   });
 
@@ -127,7 +134,7 @@ describe("initPowerSync", () => {
     const { wiped } = await mod.initPowerSync();
 
     expect(wiped).toBe(false);
-    expect(order).toEqual(["construct"]);
+    expect(order).toEqual(["construct", "fts"]);
   });
 
   it("never deletes anything on a first run", async () => {
@@ -192,5 +199,17 @@ describe("initPowerSync", () => {
     expect(mod.getPowerSync()).toBeNull();
     await mod.initPowerSync();
     expect(mod.getPowerSync()).not.toBeNull();
+  });
+  it("builds the search index before connecting, not after", async () => {
+    const mod = await freshModule();
+
+    const { db } = await mod.initPowerSync();
+
+    // After connect, the first batch replication delivers would land in ps_data__notes with no
+    // triggers on it yet -- indexed only by the NEXT launch's rebuild, so search silently
+    // misses everything that arrived in between.
+    expect(setupNotesFts).toHaveBeenCalledWith(db);
+    expect(order).toEqual(["construct", "fts"]);
+    expect(connect).toHaveBeenCalledOnce();
   });
 });

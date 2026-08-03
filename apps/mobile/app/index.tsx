@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { ActivityIndicator, Button, Text, View } from "react-native";
 import { signInWithGoogle, signOut } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
+import { NoteList } from "@/screens/note-list";
 import { QuickCapture } from "@/screens/quick-capture";
 
 export default function Home() {
@@ -32,9 +33,10 @@ export default function Home() {
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 16 }}>
       {session ? (
         // Capture sits above the note list slot Task 19 fills.
-        <View style={{ alignSelf: "stretch", gap: 16 }}>
+        <View style={{ flex: 1, alignSelf: "stretch" }}>
           <QuickCapture />
-          <View style={{ alignItems: "center", gap: 8 }}>
+          <NoteList />
+          <View style={{ alignItems: "center", gap: 8, padding: 16 }}>
             <Text>Signed in as {session.user.email}</Text>
             <Button title="Sign out" onPress={() => void signOut()} />
           </View>
