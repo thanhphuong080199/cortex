@@ -876,13 +876,25 @@ Task 12 moved the `create publication` above into version control, along with th
   publication this section already created by hand and skips it. The migration deliberately
   does **not** follow up with `alter publication ... add table`, which would error on a
   relation already in the publication.
-- **The helper function is not a no-op**, so `00016` still has to be pushed before the suite
-  can assert the publication against the hosted project:
+- **The helper function is not a no-op**, so `00016` had to be pushed before the suite could
+  assert the publication against the hosted project.
 
-```bash
-supabase db push          # applies 00016 to the hosted project
-supabase migration list   # local == remote
+**Shipped 2026-08-03.** `npx supabase db push` applied `00016`; `npx supabase migration list`
+shows `00001`–`00016` local == remote. (The CLI is a devDependency here — `supabase` alone is
+not on PATH.)
+
+Because of the `if not exists` guard, that push proves the **helper** landed, not that the
+hosted publication has the right scope: had it existed with a wrong scope, the guard would have
+skipped it. Re-confirm from the dashboard SQL editor, which needs no `service_role` key in a
+shell session:
+
+```sql
+select * from _test_publication_tables('powersync');
+-- checkins, links, media_items, note_tags, notes, tags -- exactly six rows
 ```
+
+`sync-rules-isolation.test.ts` asserts this automatically against the **local** stack and CI.
+The hosted publication is verified by hand, here and in section 1 above.
 
 A publication that lives only in a dashboard session is a layer nobody can review, diff or
 restore. The migration is what makes the local stack and CI carry the same six-table scope the

@@ -43,13 +43,15 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
 
 ## Outstanding actions for the human
 
-Neither blocks a task. Both block a claim.
+One left. It blocks a security claim, not a task.
 
-1. **`supabase db push`** — migration `00016_powersync_publication.sql` (Task 12) is applied
-   locally but not to the hosted project. The `create publication` half is a deliberate no-op
-   there, but the `_test_publication_tables` helper is not, so the suite cannot assert the
-   hosted publication until this lands. Follow with `supabase migration list` to confirm
-   local == remote.
+1. ~~**`supabase db push`** for `00016_powersync_publication.sql`.~~ **Done 2026-08-03.**
+   `00001`–`00016` are local == remote. Note the CLI is a devDependency — `npx supabase`, not
+   `supabase`. One residual, non-blocking: the migration's `if not exists` guard means the push
+   proves the `_test_publication_tables` helper landed, **not** that the hosted publication has
+   the right scope — a pre-existing wrong scope would have been skipped. Confirm from the
+   dashboard SQL editor with `select * from _test_publication_tables('powersync');` (six rows,
+   no `integrations`). The automated test covers the local stack and CI only.
 2. **Revoke all Supabase sessions** — Dashboard → Authentication → Users → your account → sign
    out all sessions. Task 8 moved the session into Keystore, but the old one is still in
    plaintext on any device that already had one, and this build can no longer delete it (the
