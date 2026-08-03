@@ -17,30 +17,27 @@ committed copy of what matters.
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
 | 2 — security baseline | 8–13 | **Complete.** All six tasks done and reviewed. |
 | 3 — shared filters | 14–16 | **Complete.** `282666d`, `b824a2a`, `083ab6a`. None independently reviewed. |
-| 4 — mobile parity | 17–21 | **Complete** (`c6757f9`, `1f900ce`, `9cfe51b`, `d93e324`, `590469c`), none independently reviewed. |
-| 4 — mobile parity | 22–23 | **Not started. Resume here.** |
+| 4 — mobile parity | 17–23 | **All complete.** None independently reviewed. |
+### Where this actually stands
 
-### Resume here: Task 22
+**All 23 tasks are implemented and committed. Nothing is pushed.** Two things remain, both
+needing a human:
 
-Media log. It is the task that finally exercises `pending_item`, which Task 18's `readDomainMeta`
-fix unblocked — before it, `domainMeta.pending_item` on the string a device sends was always
-`undefined` and offline media resolution silently never ran (spec §5.3).
+1. **Task 23 Step 4 — the device-security table**, plus the accumulated feature checklist
+   below. None of it can be asserted from a test runner.
+2. **Task 23 Step 6 — push and open the PR.** Deliberately not run: it is outward-facing and
+   was never explicitly authorised.
 
-**Check three things in the plan's SQL before trusting it:**
+**Then the whole-branch review.** Tasks 14–23 were all implemented inline rather than by
+subagents (the session harness forbids dispatching agents unasked), so **ten consecutive tasks
+have had no independent review**. That is the single largest risk on this branch.
 
-1. `datetime('now')` — Tasks 18, 20 and 21 all shipped it from the plan. Use `NOW_ISO` from
-   `src/lib/sql.ts`.
-2. **Which op kind the statement produces.** Task 21's undo was an `UPDATE` where the router
-   only accepts PUT and DELETE, and the failure is silent — reported in `failed` inside a 200,
-   batch completed, write gone. A media log writes `notes`, which takes all three, but check
-   the same way.
-3. `domain_meta` is written as a JSON **string** into a TEXT column. That is correct and the
-   server now parses it; do not "fix" it to an object.
+### Device verification checklist
 
-Task 22 may add a native module (an image picker). **If it does, the dev client needs
-rebuilding** — EAS `37039bce` does not contain it. Say so before the device checklist.
+Use dev client EAS **`f603e36f`** (submitted 2026-08-03), NOT `37039bce` — Stage 4 added
+`expo-sharing` and `expo-file-system`, which a binary built before them cannot load.
 
-**Tasks 18–21 have not been verified on a device.** Accumulated checklist:
+Features:
 
 1. Capture online, then in airplane mode; both appear instantly; both reach web on reconnect.
 2. Three notes in the list, view switching, search for a word in one body only.
@@ -48,11 +45,29 @@ rebuilding** — EAS `37039bce` does not contain it. Say so before the device ch
    replace-safe FTS trigger).
 4. **The conflict run, which nothing else can prove:** open a note, airplane mode, edit the
    body. Edit the same note differently on web, save. Reconnect. Expect TWO notes — the web
-   body on the original, the phone body as a new inbox note.
-5. Airplane mode: tap a mood, see "Logged ✓", tap Undo. Reconnect and confirm **no** check-in
-   row on web — that is the Task 21 bug's regression check.
+   body on the original, the phone body as a new inbox note. This is the only check on the
+   `sessionBase` fix, which lives in a `.tsx` no unit test can import.
+5. Airplane mode: tap a mood, "Logged ✓", Undo. Reconnect and confirm **no** check-in row on
+   web — the Task 21 regression check.
+6. Airplane mode: log a film that already exists in the library under different casing.
+   Reconnect. On web, **one** media item, both notes pointing at it.
+7. Export while online — share sheet opens with a zip. Then airplane mode: the button reads
+   "Export needs a connection" and is disabled.
 
-Dev client EAS `37039bce` still covers 1–5; nothing since Task 17 has added a native module.
+Security (Task 23 Step 4):
+
+| Check | Expected |
+|---|---|
+| Kill and reopen the app | Biometric prompt before any note is visible |
+| Background 10s, return | No prompt (inside the 60s grace) |
+| Background 90s, return | Prompt |
+| Sign out, sign back in | Zero local notes before the first sync completes |
+| Enroll a new fingerprint, reopen | Reset banner appears; notes resync from the server |
+| `adb backup` the app | Refused / empty — `allowBackup=false` |
+| Purge a note on web | It disappears from the phone after sync |
+
+Also confirm the three `[OP-SQLITE]` lines in the new build's Gradle log, or re-run the APK
+marker check in `docs/deploy.md` § "Stage 4 ship".
 
 ### Verification state — the full gate has been run
 
@@ -139,6 +154,50 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
 ---
 
 ## Stage 4 — what shipped
+
+### Tasks 22–23 — media log, export, purge propagation (commits `590469c`..`cf919a3`)
+
+**Task 22 — the plan wrote the status list out by hand, directly under its own warning not
+to.** The comment above `KINDS` explains that a hand-written copy of the media kinds drifted
+during planning and the DB check constraint would have rejected every log at runtime — and then
+`STATUSES` is a hand-written parallel list. The statuses already existed three times across the
+codebase (`logMediaInput`, `domainMetaSchemas.media`, and the form). They are now one
+`mediaStatus` enum in `@cortex/shared`, with the other two repointed at it. A drifted copy is
+not a type error anywhere: it reaches the server, fails `.strict()` validation, and the op is
+reported in `failed` inside a 200 — the log silently dropped.
+
+`rating` is omitted rather than sent as `null`, for the same reason: `.strict()` treats `null`
+as a value of the wrong type, not as "no rating".
+
+The strongest test there **runs the server's own validator** — `validateDomainMeta("media", …)`
+across every status the shared enum defines, plus `pendingMediaItem.safeParse` on the item.
+Asserting the built object's shape by hand would restate the builder; running the real schema
+is what catches drift between the two.
+
+`datetime('now')` appeared in Tasks 18, 20, 21 **and** 22 — four of the five Stage 4 tasks that
+write SQL. `NOW_ISO` in `src/lib/sql.ts` is now the only copy.
+
+**Task 23 — the plan's export does nothing.** Its `run()` fetches the archive and discards it,
+with a comment saying to add `expo-sharing` "if not already installed". It was not. Now
+implemented: `File.downloadFileAsync` streams the zip to disk (the server streams it to keep
+memory flat, so buffering here would undo that), into the **cache** directory rather than
+documents — the file exists only to be handed to another app. A same-day export is cleared
+first or the download fails on the existing name; an unavailable share sheet reports rather
+than claiming a success the user cannot act on.
+
+**The plan's first purge test is close to tautological** — it performs the delete, then asserts
+the delete happened. The property worth asserting is that nothing rewrites that DELETE into an
+update, and that children go with it, since logical replication bypasses RLS and a row still
+visible to `service_role` is a row still on the phone. Added: `links` removed from **both** FK
+directions (a cascade on one column is easy to miss and leaves half the references dangling), a
+bystander note survives, and a note that was never trashed cannot be purged at all.
+
+`docs/deploy.md` gained a "Stage 4 ship" section: the `op-sqlite` flags and the three Gradle
+lines that confirm them, how to verify them from the APK with no Android SDK (with the negative
+control that makes it conclusive), the rule that the PowerSync majors move together plus the
+`readlink` check, and why a development build needs no EAS env vars while preview/production do.
+
+Gate: **26/26, 0 cached, 491 tests**, Docker up.
 
 ### Task 21 — mood check-in, and an undo that could never reach the server (commit `590469c`)
 
