@@ -1,76 +1,29 @@
+// parseNoteFilters / matchesFilters / applyNoteFilters are tested in @cortex/shared and
+// @cortex/core -- one description, one suite. What stays here is web-only: presentation,
+// and the fact that this module's re-export actually resolves.
 import { describe, expect, it } from "vitest";
-import { matchesView, parseDomain, parseView } from "./note-views";
+import { NOTE_VIEWS, VIEW_LABELS, applyNoteFilters, parseNoteFilters } from "./note-views";
 
-const live = (lifecycle: string) => ({ lifecycle, deleted_at: null });
+describe("VIEW_LABELS", () => {
+  it("labels every view", () => {
+    for (const v of NOTE_VIEWS) expect(VIEW_LABELS[v]).toBeTruthy();
+  });
 
-describe("matchesView", () => {
-  it("inbox shows only live inbox notes", () => {
-    expect(matchesView(live("inbox"), "inbox")).toBe(true);
-    expect(matchesView(live("active"), "inbox")).toBe(false);
-    expect(matchesView({ lifecycle: "inbox", deleted_at: "2026-08-01" }, "inbox")).toBe(false);
-  });
-  it("active shows active and evergreen", () => {
-    expect(matchesView(live("active"), "active")).toBe(true);
-    expect(matchesView(live("evergreen"), "active")).toBe(true);
-    expect(matchesView(live("archived"), "active")).toBe(false);
-  });
-  it("archived shows only live archived notes", () => {
-    expect(matchesView(live("archived"), "archived")).toBe(true);
-    expect(matchesView(live("inbox"), "archived")).toBe(false);
-  });
-  it("trash shows any deleted note regardless of lifecycle", () => {
-    expect(matchesView({ lifecycle: "archived", deleted_at: "2026-08-01" }, "trash")).toBe(true);
-    expect(matchesView(live("archived"), "trash")).toBe(false);
+  it("labels nothing that is not a view", () => {
+    // Catches a label left behind after a view is renamed or removed, which would
+    // otherwise sit in the nav as a dead entry.
+    expect(Object.keys(VIEW_LABELS).sort()).toEqual([...NOTE_VIEWS].sort());
   });
 });
 
-describe("matchesView with a domain filter", () => {
-  const health = { lifecycle: "inbox", deleted_at: null, domain: "health" };
-  const plain = { lifecycle: "inbox", deleted_at: null, domain: null };
-
-  it("narrows any view to notes carrying that domain", () => {
-    expect(matchesView(health, "inbox", "health")).toBe(true);
-    expect(matchesView(plain, "inbox", "health")).toBe(false);
-    expect(matchesView({ ...health, domain: "media" }, "inbox", "health")).toBe(false);
-  });
-
-  it("leaves behaviour unchanged when no domain is given", () => {
-    expect(matchesView(health, "inbox")).toBe(true);
-    expect(matchesView(plain, "inbox")).toBe(true);
-  });
-
-  it("still applies the view rules on top of the domain", () => {
-    // The domain narrows; it never overrides. A trashed health note is not in the inbox.
-    expect(matchesView({ ...health, deleted_at: "2026-08-01" }, "inbox", "health")).toBe(false);
-    expect(matchesView({ ...health, deleted_at: "2026-08-01" }, "trash", "health")).toBe(true);
-  });
-
-  it("tolerates rows with no domain key at all", () => {
-    // Realtime payloads are whatever the row shape is; an older cached row must not throw.
-    expect(matchesView({ lifecycle: "inbox", deleted_at: null }, "inbox", "health")).toBe(false);
-    expect(matchesView({ lifecycle: "inbox", deleted_at: null }, "inbox")).toBe(true);
-  });
-});
-
-describe("parseDomain", () => {
-  it("accepts the six known domains", () => {
-    expect(parseDomain("health")).toBe("health");
-    expect(parseDomain("reflection")).toBe("reflection");
-  });
-  it("returns undefined for anything else, so the filter is simply absent", () => {
-    expect(parseDomain(undefined)).toBeUndefined();
-    expect(parseDomain("astrology")).toBeUndefined();
-    expect(parseDomain("")).toBeUndefined();
-  });
-});
-
-describe("parseView", () => {
-  it("accepts the four known views", () => {
-    expect(parseView("trash")).toBe("trash");
-    expect(parseView("active")).toBe("active");
-  });
-  it("falls back to inbox for anything else", () => {
-    expect(parseView(undefined)).toBe("inbox");
-    expect(parseView("nonsense")).toBe("inbox");
+describe("the shared filter re-export", () => {
+  it("resolves the functions both web call sites need", () => {
+    // page.tsx and note-list.tsx both import through this module. A re-export naming a
+    // symbol that does not exist is a build error, but one that resolves to undefined is
+    // not -- and note-list.tsx only reaches applyNoteFilters inside an effect, so a
+    // browser would be the first thing to notice.
+    expect(typeof parseNoteFilters).toBe("function");
+    expect(typeof applyNoteFilters).toBe("function");
+    expect(parseNoteFilters({ view: "trash" }).view).toBe("trash");
   });
 });
