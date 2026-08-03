@@ -11,7 +11,8 @@
       "supportsTablet": false
     },
     "android": {
-      "package": "app.cortex.mobile"
+      "package": "app.cortex.mobile",
+      "allowBackup": false
     },
     "plugins": [
       "expo-router",

@@ -3,6 +3,11 @@ node_modules/
 dist/
 .next/
 .expo/
+# Continuous Native Generation: app.json is the source of truth and `expo prebuild`
+# regenerates these wholesale. Committing them would let a stale manifest outlive a change
+# to app.json -- and android/ is where `allowBackup="false"` has to land.
+apps/mobile/android/
+apps/mobile/ios/
 .env
 .env.local
 .env.*

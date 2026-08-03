@@ -949,9 +949,47 @@ pnpm --filter @cortex/mobile exec eas build --profile development --platform and
 A dev client built before phase 1b will not work — it is a compiled binary and cannot load
 newly added native modules. Rebuild after the PowerSync dependencies land (plan Task 17).
 
+### Backup and transfer are OFF, and it takes two mechanisms, not one
+
 `android:allowBackup=false` in `app.json` is load-bearing, not a preference: Auto Backup
 would copy the SQLCipher database to Google Drive while its key lives in Android Keystore,
 which is not backed up — producing an undecryptable file on Drive. Pure risk, no benefit.
+
+Verified in the generated manifest (Task 11):
+
+```bash
+pnpm --filter @cortex/mobile exec expo prebuild --platform android --clean
+rg 'allowBackup' apps/mobile/android/app/src/main/AndroidManifest.xml
+# android:allowBackup="false"
+```
+
+**`allowBackup=false` is not sufficient on its own.** On Android 12+ it disables cloud backup
+but **does not** disable device-to-device transfer. What covers D2D is a second, separate
+mechanism that arrived with the `expo-secure-store` config plugin:
+
+```xml
+<!-- expo-secure-store/android/src/main/res/xml/secure_store_data_extraction_rules.xml -->
+<device-transfer>
+  <include domain="sharedpref" path="."/>
+  <exclude domain="sharedpref" path="SecureStore"/>
+</device-transfer>
+```
+
+Only the `sharedpref` domain is included, so the `database` and `file` domains — where the
+SQLCipher database lives — are outside both cloud backup and device transfer, and SecureStore's
+own preferences are excluded on top of that. These resources ship inside the library and reach
+the app through Android resource merging; the app's own `res/xml/` is empty, which is why
+grepping the app module for them finds nothing.
+
+**Consequence for anyone changing mobile dependencies:** dropping the `expo-secure-store`
+plugin, or overriding `dataExtractionRules` in `app.json`, silently removes the D2D protection
+while `allowBackup="false"` still sits in the manifest looking like it covers everything. The
+two are not interchangeable. Re-run the prebuild and re-read the merged manifest after any
+change to `plugins`.
+
+`apps/mobile/android/` and `ios/` are gitignored. This is a Continuous Native Generation
+project: `app.json` is the source of truth and prebuild regenerates the native projects
+wholesale, so a committed manifest could outlive the config that produced it.
 
 ## 5. Stage 1 ship — `00015` and the `/sync/upload` write verification
 
