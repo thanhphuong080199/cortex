@@ -3,5 +3,9 @@ packages:
   - "packages/*"
 allowBuilds:
   '@swc/core': true
+  # @cortex/core's filter-equivalence suite runs the emitted WHERE clause on real SQLite,
+  # which is a native module and needs its install script. Test-only: nothing that ships
+  # imports it.
+  better-sqlite3: true
   esbuild: true
   sharp: true

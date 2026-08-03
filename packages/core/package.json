@@ -21,8 +21,10 @@
     "@cortex/config": "workspace:*",
     "@types/adm-zip": "^0.5.5",
     "@types/archiver": "^6.0.0",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.10.0",
     "adm-zip": "^0.5.16",
+    "better-sqlite3": "^13.0.2",
     "dotenv": "^16.4.0",
     "vitest": "^3.0.0"
   }

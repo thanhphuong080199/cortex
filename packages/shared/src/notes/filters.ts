@@ -129,3 +129,67 @@ export function matchesFilters(
 export function requiresRefetch(f: NoteFilters): boolean {
   return Boolean(f.q || f.tag);
 }
+
+/**
+ * The same narrowing as a SQL WHERE clause, for mobile's local SQLite replica.
+ *
+ * Deliberately a SECOND implementation rather than an abstraction over both engines:
+ * PostgREST and SQLite genuinely differ (imatch, to_tsvector ranking, RPCs), and a
+ * translation layer for all of that is the rejected approach B in spec §2.2. The guard
+ * against drift is filters-equivalence.test.ts, not a shared code path.
+ *
+ * Values are parameterised, never interpolated: a title or tag containing a quote must not
+ * be able to reshape the clause.
+ *
+ * **Contract for the caller.** The clause is written against `notes n`, plus `note_tags nt`
+ * when `join` is non-empty. If `q` is set it also reads a table
+ *
+ *     CREATE VIRTUAL TABLE notes_fts USING fts5(id UNINDEXED, content)
+ *
+ * and selects `id` from it -- NOT `rowid`. FTS5 rowids are integers while `notes.id` is a
+ * TEXT uuid, so a rowid-based clause compiles, executes, and silently matches nothing. The
+ * uuid has to be carried as its own UNINDEXED column, which is also the shape PowerSync's
+ * FTS setup uses.
+ */
+export function noteFiltersToSql(f: NoteFilters): {
+  where: string;
+  params: unknown[];
+  join: string;
+} {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  const p = (value: unknown): string => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+
+  clauses.push(f.view === "trash" ? "n.deleted_at is not null" : "n.deleted_at is null");
+  if (f.view === "active") clauses.push(`n.lifecycle in (${p("active")}, ${p("evergreen")})`);
+  else if (f.view !== "trash") clauses.push(`n.lifecycle = ${p(f.view)}`);
+
+  if (f.domain) clauses.push(`n.domain = ${p(f.domain)}`);
+  if (f.tag) clauses.push(`nt.tag_id = ${p(f.tag)} and nt.deleted_at is null`);
+
+  // Full text uses SQLite FTS5, a different engine from Postgres FTS -- see the equivalence
+  // suite, which asserts structural agreement and each engine's own q behaviour rather than
+  // pretending the two rank identically.
+  if (f.q) clauses.push(`n.id in (select id from notes_fts where notes_fts match ${p(f.q)})`);
+
+  return {
+    where: clauses.join(" and "),
+    params,
+    join: f.tag ? "join note_tags nt on nt.note_id = n.id" : "",
+  };
+}
+
+/**
+ * SQLite uses positional `?`; the clause is emitted in the numbered `$n` form because
+ * numbered placeholders survive being read, logged and reordered. Params are pushed in the
+ * order their placeholders are emitted, so a positional rewrite is order-preserving.
+ *
+ * Both the equivalence suite and mobile's query go through this, so the two run
+ * byte-identical SQL.
+ */
+export function toSqlitePlaceholders(where: string): string {
+  return where.replace(/\$\d+/g, "?");
+}

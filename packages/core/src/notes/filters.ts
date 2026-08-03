@@ -9,9 +9,11 @@ export {
   NOTE_VIEWS,
   applyNoteFilters,
   matchesFilters,
+  noteFiltersToSql,
   noteSelect,
   parseNoteFilters,
   requiresRefetch,
+  toSqlitePlaceholders,
   type NoteFilters,
   type NoteView,
 } from "@cortex/shared";
