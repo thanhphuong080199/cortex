@@ -16,22 +16,27 @@ committed copy of what matters.
 | --- | --- | --- |
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
 | 2 — security baseline | 8–13 | **Complete.** All six tasks done and reviewed. |
-| 3 — shared filters | 14–16 | Task 14 complete (`282666d`). **Resume at Task 15.** |
-| 4 — mobile parity | 17–23 | Not started. |
+| 3 — shared filters | 14–16 | **Complete.** `282666d`, `b824a2a`, `083ab6a`. None independently reviewed. |
+| 4 — mobile parity | 17–23 | **Not started. Resume here.** |
 
-### Resume here: Task 15
+### Resume here: Task 17
 
-`noteFiltersToSql` and the equivalence test. **Read "Task 14 changed where the filters live"
-below before starting** — Task 15's plan text puts the SQLite translation in
-`packages/core/src/notes/filters.ts`, and that is no longer where the module is.
+PowerSync provider and connector. Its carried context is unchanged and listed below — the
+`lost`-key file deletion, `hasStrongBiometrics()`, the pnpm dedupe check, and the dev-client
+rebuild. **Also read "Stage 3 — what shipped" below**: Task 19 has to create an FTS table whose
+shape Task 15 now depends on, and `apps/mobile` still declares no workspace dependency.
 
 ### Verification state — the full gate has been run
 
 Docker was down for Tasks 9–13, so every gate in that stretch was 26/26 with **23 cached**; only
-the three `@cortex/mobile` tasks ran fresh. Docker has been up since; the gate after Task 14 was
-`pnpm turbo run typecheck lint test --force` → **26/26 fresh, 0 cached, 380 tests**
-(mobile 47, shared 54, sync 4, api 68, core 85, web 29, db 93). Every Supabase-backed suite ran
+the three `@cortex/mobile` tasks ran fresh. Docker has been up since; the gate after Task 16 was
+`pnpm turbo run typecheck lint test --force` → **26/26 fresh, 0 cached, 395 tests**
+(mobile 47, shared 54, sync 4, api 68, core 100, web 20, db 93). Every Supabase-backed suite ran
 rather than replayed.
+
+`--force` matters here beyond the Docker question: `turbo run build --filter=@cortex/web` came
+back `FULL TURBO, 2 cached` on a tree with uncommitted web changes during Task 16. Read the
+`Cached:` line before believing any gate.
 
 Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@cortex/api` and
 `@cortex/core` are **turbo cache replays, not runs**. That is acceptable for a diff confined to
@@ -123,8 +128,64 @@ filter has something to wrongly admit as well as wrongly exclude.
   returns nothing rather than everything" failed. "tag narrows through the join" **passed**
   under that mutation, which is the whole argument for the unused-tag test.
 
-Task 14 was implemented inline rather than by a subagent (the session harness forbids
-dispatching agents unasked), so **it has had no independent review**. Fold it into the
+### Task 15 fixed a shipping bug in the plan's own code (commit `b824a2a`)
+
+`noteFiltersToSql` and `toSqlitePlaceholders` are in `@cortex/shared` for the same reason as
+Task 14 — Task 19 consumes them from React Native. Only the equivalence test lives in
+`packages/core`, where Postgres and `better-sqlite3` can meet.
+
+**The planned FTS clause could never match.** It read
+
+```sql
+n.id in (select rowid from notes_fts where notes_fts match ?)
+```
+
+An FTS5 `rowid` is an INTEGER and `notes.id` is a TEXT uuid, so that `in` is never true: it
+compiles, executes, and silently returns nothing for every search. Confirmed by running the
+plan's version against real SQLite — all four `q` cases came back `[]`. **Task 19 must create**
+
+```sql
+CREATE VIRTUAL TABLE notes_fts USING fts5(id UNINDEXED, content)
+```
+
+and the clause selects `id`, not `rowid`. That is also the shape PowerSync's own FTS setup uses,
+and it is documented on the function itself.
+
+Nothing in the plan's suite could have caught it, by construction: `q` is deliberately excluded
+from the structural cases (correctly — the two engines tokenise differently), the planned
+`beforeAll` never created `notes_fts`, so the whole FTS branch shipped unexecuted. The `tag`
+branch was unexecuted for the same reason — no tag case, and a `note_tags` table created but
+never populated. Both have cases now.
+
+**Agreement was also asserted where correctness was meant.** The plan asserted only
+`sqlIds(f) == postgrestIds(f)`. Two implementations that both drop `evergreen` agree perfectly,
+and two empty results agree too. Every case is now anchored three ways —
+SQLite == expected == PostgREST — and the SQLite mirror asserts its own row counts, so a
+silently-empty copy fails where the cause is visible instead of making every comparison vacuous.
+
+`better-sqlite3` is a test-only devDependency of `@cortex/core`. `pnpm-workspace.yaml` now
+allows its install script (`allowBuilds`), which a native module needs — CI installs would
+otherwise skip the build and the suite would fail there only.
+
+### Task 16 removed the E5 duplication (commit `083ab6a`)
+
+Both web query sites now build from `applyNoteFilters`; `note-views.ts` keeps only
+`VIEW_LABELS` and re-exports the rest **from `@cortex/shared`** (not core — `note-list.tsx` is
+the `"use client"` component the placement ruling was about).
+
+- The refetch gained a narrowing it never had: it applied `deleted_at`, `q`, `tag` and `domain`
+  but **not `lifecycle`**, leaning on a client-side `matchesView` pass to drop rows the query
+  should not have returned. It now narrows server-side and keeps the client pass as a net.
+- `if (q || tag)` — the hand-maintained restatement of which fields `matchesView` ignores, kept
+  in a different file from the function it had to agree with — is now `requiresRefetch(filters)`.
+- Verified E5 cannot recur: `textSearch` and `note_tags!inner` appear nowhere in `apps/web/src`.
+- Web's suite went 29 → 20: twelve `parseView`/`parseDomain`/`matchesView` cases moved to
+  `@cortex/shared` (where 20 cases now cover them), replaced by three web-only ones.
+- Production build run with `--force`, not from cache. Route `/` unchanged at 3.6 kB / 198 kB
+  First Load JS, which is the evidence the shared placement kept the bundle flat.
+
+**None of Tasks 14–16 has had an independent review** — they were implemented inline rather than
+by subagents (the session harness forbids dispatching agents unasked). Fold all three into the
 whole-branch review after Task 23.
 
 ---
@@ -326,11 +387,12 @@ Three facts that cost real time to establish, all now in `docs/deploy.md`:
   after reinstall (`SecureStoreModule.kt`, `BadPaddingException` path). For the session that
   degrades to a re-login, which is intended; for the database key it is the invalidation-recovery
   path, with very different severity.
-- **Stage 3 needs Docker** for the `@cortex/core` half only. Task 14 moved the pure tests into
-  `@cortex/shared`, which runs without it; Task 15's equivalence test needs both Postgres and
-  `better-sqlite3`, so it needs Docker.
 - **Task 19 must add `@cortex/shared` to `apps/mobile`'s dependencies.** It has none of the
-  workspace packages today (only `@cortex/config`, as a devDependency).
+  workspace packages today (only `@cortex/config`, as a devDependency). Import
+  `noteFiltersToSql`/`toSqlitePlaceholders` from there, never from `@cortex/core`.
+- **Task 19 must create `notes_fts` as `fts5(id UNINDEXED, content)`** and keep it in step with
+  `notes`. The clause `noteFiltersToSql` emits selects `id` from it; a rowid-keyed table returns
+  nothing for every search without erroring. See Stage 3 above.
 - **`supabase migration up`, not `db reset`.** A reset breaks Kong→auth routing with stale
   Docker DNS, which surfaces as `AuthRetryableFetchError` and reads like a code regression. If it
   happens, restart the kong container rather than the stack.
