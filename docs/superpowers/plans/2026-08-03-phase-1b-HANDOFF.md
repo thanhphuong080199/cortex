@@ -17,18 +17,23 @@ committed copy of what matters.
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
 | 2 — security baseline | 8–13 | **Complete.** All six tasks done and reviewed. |
 | 3 — shared filters | 14–16 | **Complete.** `282666d`, `b824a2a`, `083ab6a`. None independently reviewed. |
-| 4 — mobile parity | 17–18 | **Complete** (`c6757f9`, `1f900ce`), neither independently reviewed. |
-| 4 — mobile parity | 19–23 | **Not started. Resume here.** |
+| 4 — mobile parity | 17–19 | **Complete** (`c6757f9`, `1f900ce`, `9cfe51b`), none independently reviewed. |
+| 4 — mobile parity | 20–23 | **Not started. Resume here.** |
 
-### Resume here: Task 19
+### Resume here: Task 20
 
-Note list with shared filters. Read "Stage 4 — what shipped" below first: Task 17 changed which
-PowerSync major the app is on and already added the `fts5` native flag this task needs, and
-Task 18 settled the local timestamp format the list orders by.
+Note editor, archive and tags. Read "Stage 4 — what shipped" below first — Tasks 17–19 changed
+the PowerSync major, the local timestamp format, and how the FTS index is maintained.
 
-**Task 18 has not been verified on a device.** Its Step 3 (capture online, capture in airplane
-mode, confirm both reach web) needs a human with the dev client installed. Everything provable
-without a device is proven; see below.
+**Task 20 inherits the `note_edit_base` contract.** Task 17's connector reads
+`base_updated_at` out of that local-only table and sends it on a notes PATCH; Task 20 is what
+writes it. `syncOp.base_updated_at` is `z.iso.datetime()`, so the value must be the ISO form
+Task 18 settled on — `notes.updated_at` as replication delivers it, copied verbatim.
+
+**Tasks 18 and 19 have not been verified on a device.** Capture online, capture in airplane
+mode, confirm both reach web; then three notes in the list, view switching, and a search for a
+word in one body only. Everything provable without a device is proven. The existing dev client
+(EAS `37039bce`) still works for both — neither task added a native module.
 
 ### Verification state — the full gate has been run
 
@@ -115,6 +120,58 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
 ---
 
 ## Stage 4 — what shipped
+
+### Task 19 — note list and the local FTS index (commit `9cfe51b`)
+
+**The plan's Step 2 could not have worked, in three independent ways.** It creates
+
+```sql
+CREATE VIRTUAL TABLE notes_fts USING fts5(content, content_rowid=id, tokenize='unicode61')
+```
+
+`content_rowid` is only legal alongside an external content table (`content=`), so the CREATE
+itself fails; there is no `id` column for the clause `noteFiltersToSql` actually emits to select
+from; and its population inserts a TEXT uuid into `rowid`, an INTEGER. The correct shape is
+documented on `noteFiltersToSql` itself — `fts5(id UNINDEXED, content)`, selecting `id` and
+never `rowid`, because an FTS5 rowid is an integer while `notes.id` is a uuid, so a rowid-keyed
+table matches nothing for every search **without ever erroring**. The plan's shape fails 8 of
+the 14 new tests.
+
+Three further corrections, each its own failure mode:
+
+- **Triggers on `ps_data__notes`, not a rebuild inside `statusChanged`.** The plan guarded its
+  full repopulate with `if (!status.hasSynced) return`, but `hasSynced` latches true after the
+  first sync — so every later status change (a connection blip, an upload starting, a
+  checkpoint) would delete and rebuild the entire index while reads ran against it. Rebuild is
+  now once per launch, which is what repairs an index that drifted; the triggers keep it
+  current in between.
+- **The insert trigger deletes any existing row for that id first.** SQLite fires DELETE
+  triggers for a row evicted by `INSERT OR REPLACE` only when `recursive_triggers` is ON, and
+  it is off by default — `libpowersync.so` never sets it. Without the extra DELETE a replace
+  leaves the old body indexed forever: search keeps finding notes by words they no longer
+  contain, gaining one stale copy per edit. Making the insert path idempotent covers every
+  write pattern rather than betting on which one replication uses.
+- **Soft-deleted notes stay indexed.** The plan populated `WHERE deleted_at IS NULL`, which
+  makes trash search contradict itself — the view demands `deleted_at is not null` while the
+  index holds only rows where it IS null — so it returns nothing and raises nothing. The index
+  is a text index; deciding visibility is the WHERE clause's job.
+
+Imports come from **`@cortex/shared`**, not `@cortex/core` as the plan says (Task 14 ruling).
+
+**The tests run the real emitted clause against a faithful stand-in for PowerSync's local
+layout on real SQLite**, so they exercise the `id`-vs-`rowid` trap directly. The internal shape
+is not guessed: `(id TEXT PRIMARY KEY NOT NULL, data TEXT)` was read out of the
+`libpowersync.so` inside the APK we ship, and `notes` is an auto-generated view of
+`json_extract` over that `data` column. Useful for any later task that needs to reach beneath
+the view.
+
+**Two of my own tests were initially unfalsifiable**, both caught by mutation rather than by
+review — the same failure mode this branch keeps finding. The trash test created its rows
+*after* `setupNotesFts`, so the triggers indexed them whatever the rebuild did, and it stayed
+green under the plan's `deleted_at` filter; it now seeds the row before setup. (Task 18 had one
+too. Assume the next one exists and mutate for it.)
+
+Gate: **26/26, 0 cached, 442 tests**, Docker up.
 
 ### Task 18 — quick capture, and two bugs a device write exposed (commit `1f900ce`)
 
