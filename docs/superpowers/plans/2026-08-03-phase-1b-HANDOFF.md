@@ -16,24 +16,22 @@ committed copy of what matters.
 | --- | --- | --- |
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
 | 2 — security baseline | 8–13 | **Complete.** All six tasks done and reviewed. |
-| 3 — shared filters | 14–16 | **Not started. Resume here.** |
+| 3 — shared filters | 14–16 | Task 14 complete (`282666d`). **Resume at Task 15.** |
 | 4 — mobile parity | 17–23 | Not started. |
 
-### Resume here: Task 14
+### Resume here: Task 15
 
-`NoteFilters` and `applyNoteFilters` in `@cortex/core`. Extracts the narrowing that currently
-exists twice (`apps/web/src/app/page.tsx` and `note-list.tsx`) and caused issue-log **E5**;
-mobile would have been a third copy. Its test imports `createUserClient` and `makeUser` from the
-core harness, so **Docker Desktop must be running** — see the gate note below.
+`noteFiltersToSql` and the equivalence test. **Read "Task 14 changed where the filters live"
+below before starting** — Task 15's plan text puts the SQLite translation in
+`packages/core/src/notes/filters.ts`, and that is no longer where the module is.
 
 ### Verification state — the full gate has been run
 
 Docker was down for Tasks 9–13, so every gate in that stretch was 26/26 with **23 cached**; only
-the three `@cortex/mobile` tasks ran fresh. After Docker came up, a full
-`pnpm turbo run typecheck lint test --force` ran clean: **26/26 fresh, 0 cached, 332 tests**
-(mobile 47, shared 34, db 93, sync 4, core 73, api 68, web 29). That run covered every
-Supabase-backed suite against everything Stage 2 changed, including `db-key.ts`'s new signature
-— nothing outside `apps/mobile` imports it.
+the three `@cortex/mobile` tasks ran fresh. Docker has been up since; the gate after Task 14 was
+`pnpm turbo run typecheck lint test --force` → **26/26 fresh, 0 cached, 380 tests**
+(mobile 47, shared 54, sync 4, api 68, core 85, web 29, db 93). Every Supabase-backed suite ran
+rather than replayed.
 
 Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@cortex/api` and
 `@cortex/core` are **turbo cache replays, not runs**. That is acceptable for a diff confined to
@@ -66,6 +64,68 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
    including the copies already on Drive, which is why server-side revocation was required rather
    than deleting the local file. Already-issued access tokens stayed valid until their normal
    1-hour expiry — a bounded, accepted window; rotating the JWT secret was judged unwarranted.
+
+---
+
+## Stage 3 — what shipped so far
+
+### Task 14 changed where the filters live (commit `282666d`)
+
+**The plan says `@cortex/core`. They are in `@cortex/shared`.** Tasks 15, 16 and 19 all inherit
+this, so their plan text needs adjusting as you reach them.
+
+Task 14 Step 5 asks for that decision at Task 14, on the question "does this drag Node-only code
+into a bundler" — but the check it specifies cannot answer it. Deep-importing
+`dist/notes/filters.js` passes either way, because `filters.ts` imports only the domain enum.
+The import Tasks 16 and 19 actually use is the package **barrel**, and `@cortex/core`'s barrel
+reaches `archiver` through `export/service.ts`, with no `sideEffects: false` in core's
+package.json to stop a bundler following it. Task 16 puts that barrel behind
+`apps/web/src/lib/note-views.ts`, which `note-list.tsx` — a `"use client"` component — imports;
+Metro (Task 19) tree-shakes far less than webpack. The plan's fallback sentence also asserts
+"@cortex/shared, which mobile already depends on": `apps/mobile` depends on neither shared nor
+core today, so Task 19 has to add the dependency either way.
+
+Ruled by the human on 2026-08-03: `packages/shared/src/notes/filters.ts`, with
+`packages/core/src/notes/filters.ts` re-exporting the six names **explicitly** (not `export *`,
+so adding an export to shared cannot silently widen core's surface). Shared is zod-only,
+already a web dependency, and `applyNoteFilters` types the query builder structurally, so it
+needs no supabase-js. Task 16's `from "@cortex/core"` still resolves for the server component —
+but web's **client** component and mobile should import `@cortex/shared` directly.
+
+Consequences to carry:
+
+- Tests split by what needs a database: 20 pure tests in `@cortex/shared` (parse, select,
+  predicate, refetch — **no Docker**), 12 PostgREST tests in `@cortex/core` where the harness
+  lives. Both suites were already named in `ci.yml`, so no CI change was needed — checked
+  rather than assumed, per the Task 7 rule.
+- **Task 15's `noteFiltersToSql` belongs in shared too**, for the same reason: Task 19 consumes
+  it from React Native. Only its equivalence test stays in `packages/core`, where Postgres and
+  `better-sqlite3` can meet.
+
+**Five of Task 14's planned DB tests could not fail** — the same scan that caught Task 12's.
+All five asserted `data.every(...)` over the query's own narrowing with no lower bound, which
+restates the query and is vacuously true on an empty result. The worst, "domain narrows without
+overriding the view", asserted only `deleted_at !== null` — nothing about domain — over seed
+data that returned zero rows. There was also no delete before seeding against a fixed fixture
+email. Rewritten as exact id sets over named seeded rows, failing in both directions, with two
+rows the plan did not seed (a trashed undomained note, an undomained inbox note) so the domain
+filter has something to wrongly admit as well as wrongly exclude.
+
+**Four mutations run to prove the guards bite**, each failing exactly the predicted tests:
+
+- `eq("lifecycle","active")` for `in([active,evergreen])` → "active covers both" failed, 1 id
+  vs 2. The plan's `every()` version stays green under this.
+- domain clause skipped on trash → "domain narrows without overriding the view" failed, 2 vs 1.
+  **This is the one the plan's assertion could not see** — both wrongly-returned rows are
+  trashed, so `every(deleted_at !== null)` holds.
+- domain clause applied with `is(deleted_at, null)` → same test failed.
+- `textSearch` and the `note_tags.tag_id` predicate dropped → both FTS tests and "an unused tag
+  returns nothing rather than everything" failed. "tag narrows through the join" **passed**
+  under that mutation, which is the whole argument for the unused-tag test.
+
+Task 14 was implemented inline rather than by a subagent (the session harness forbids
+dispatching agents unasked), so **it has had no independent review**. Fold it into the
+whole-branch review after Task 23.
 
 ---
 
@@ -266,8 +326,11 @@ Three facts that cost real time to establish, all now in `docs/deploy.md`:
   after reinstall (`SecureStoreModule.kt`, `BadPaddingException` path). For the session that
   degrades to a re-login, which is intended; for the database key it is the invalidation-recovery
   path, with very different severity.
-- **Stage 3 (Tasks 14–16) needs Docker.** Task 14's test imports `createUserClient` and
-  `makeUser` from the core harness; 15 and 16 build on 14.
+- **Stage 3 needs Docker** for the `@cortex/core` half only. Task 14 moved the pure tests into
+  `@cortex/shared`, which runs without it; Task 15's equivalence test needs both Postgres and
+  `better-sqlite3`, so it needs Docker.
+- **Task 19 must add `@cortex/shared` to `apps/mobile`'s dependencies.** It has none of the
+  workspace packages today (only `@cortex/config`, as a devDependency).
 - **`supabase migration up`, not `db reset`.** A reset breaks Kong→auth routing with stale
   Docker DNS, which surfaces as `AuthRetryableFetchError` and reads like a code regression. If it
   happens, restart the kong container rather than the stack.
