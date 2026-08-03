@@ -950,3 +950,34 @@ newly added native modules. Rebuild after the PowerSync dependencies land (plan 
 `android:allowBackup=false` in `app.json` is load-bearing, not a preference: Auto Backup
 would copy the SQLCipher database to Google Drive while its key lives in Android Keystore,
 which is not backed up — producing an undecryptable file on Drive. Pure risk, no benefit.
+
+## 5. Stage 1 ship — `00015` and the `/sync/upload` write verification
+
+Shipped 2026-08-03, in the order the CI/CD section prescribes (schema, then API).
+
+`00015_conflict_copy_link_kind.sql` widens `links_kind_check` to accept `conflict_copy`.
+It is a constraint swap, not a type change — `00003` created `links.kind` as a bare check
+rather than an enum. `supabase migration list` shows local == remote through `00015`.
+
+Deploy verified with a **write**, per the rule above. The three requests below are chosen
+so each one fails distinctly if the wrong thing shipped; a 401 probe proves only that the
+route is registered.
+
+```bash
+API='https://<api>.up.railway.app'
+NOTE_ID='<a client-generated v4 UUID>'   # must be real hex: the DTO rejects a bad one at 400
+
+# 1. PUT  -> 201 {"applied":["1"], ...}   the router writes under RLS with the user's JWT
+# 2. PATCH -> "conflict_copies":[]        updateWithConflictCopy: no base_updated_at, no copy
+# 3. replay op 1 verbatim -> "applied":["1"], NOT "failed"
+```
+
+Step 3 is the one worth keeping. `createWithId` is idempotent — a 23505 on an id the
+caller already owns is a replayed op, not a conflict. Before that fix, a resend threw at
+its own primary key and the op wedged the queue permanently, so a deploy missing it
+answers step 3 with `failed` + `kind: "conflict"` while steps 1 and 2 still look fine.
+
+Run each request from a shell that re-declares the token: the harness gives every
+`!` command a fresh shell, so a `TOKEN=` set in a previous block is gone. Clean up
+afterwards (`DELETE /notes/:id` then `DELETE /notes/:id/purge`) — a smoke-test note is
+real user data and will otherwise sync to every device.

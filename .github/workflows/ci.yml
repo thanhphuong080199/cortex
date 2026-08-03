@@ -38,6 +38,9 @@ jobs:
       # A7/B5/E8).
       - run: pnpm turbo run test --filter=@cortex/shared
 
+      - name: Test @cortex/sync
+        run: pnpm turbo run test --filter=@cortex/sync
+
   db-tests:
     name: db + api tests (against local Supabase stack)
     runs-on: ubuntu-latest
