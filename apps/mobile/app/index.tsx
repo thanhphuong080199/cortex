@@ -4,6 +4,7 @@ import { ActivityIndicator, Button, Text, View } from "react-native";
 import { signInWithGoogle, signOut } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
 import { CheckinWidget } from "@/screens/checkin-widget";
+import { MediaLogForm } from "@/screens/media-log-form";
 import { NoteList } from "@/screens/note-list";
 import { QuickCapture } from "@/screens/quick-capture";
 
@@ -37,6 +38,7 @@ export default function Home() {
         <View style={{ flex: 1, alignSelf: "stretch" }}>
           <QuickCapture />
           <CheckinWidget />
+          <MediaLogForm />
           <NoteList />
           <View style={{ alignItems: "center", gap: 8, padding: 16 }}>
             <Text>Signed in as {session.user.email}</Text>
