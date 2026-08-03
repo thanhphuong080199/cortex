@@ -824,8 +824,10 @@ Source) and it will deploy on push to `main`. Two caveats before enabling it:
 
 # Phase 1b — PowerSync Cloud setup
 
-One-time setup, done in the Supabase SQL editor and the PowerSync dashboard. None of it is
-a migration: `create role ... password` would commit a secret to git.
+Sections 1–4 are one-time setup, done in the Supabase SQL editor and the PowerSync
+dashboard. None of *that* is a migration: `create role ... password` would commit a secret
+to git. Section 5 is the ship log for Stage 1 and does cover a migration — same shape as
+`### 5. Post-review hardening — 00014` under the Phase 1c checklist.
 
 ## 1. Supabase — replication role and a SCOPED publication
 
@@ -959,7 +961,8 @@ Shipped 2026-08-03, in the order the CI/CD section prescribes (schema, then API)
 It is a constraint swap, not a type change — `00003` created `links.kind` as a bare check
 rather than an enum. `supabase migration list` shows local == remote through `00015`.
 
-Deploy verified with a **write**, per the rule above. The three requests below are chosen
+Deploy verified with a **write**, not `/health` (see
+[the rule above](#verify-a-deploy-with-a-write-not-with-health)). The three requests are chosen
 so each one fails distinctly if the wrong thing shipped; a 401 probe proves only that the
 route is registered.
 

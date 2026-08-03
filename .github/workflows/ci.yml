@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   checks:
-    name: build, typecheck, lint, shared tests
+    name: build, typecheck, lint, stack-free tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
