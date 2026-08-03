@@ -867,6 +867,28 @@ Exactly six rows. Anything else (especially `integrations`) means
 `sync-rules-isolation.test.ts` asserts this same property through
 `_test_publication_tables`, so a later widening fails the suite rather than going unnoticed.
 
+### The publication is now also in a migration — `00016_powersync_publication.sql`
+
+Task 12 moved the `create publication` above into version control, along with the
+`_test_publication_tables` helper the test needs. Two consequences:
+
+- **On the hosted project it is a no-op.** The `do $$ ... if not exists` guard sees the
+  publication this section already created by hand and skips it. The migration deliberately
+  does **not** follow up with `alter publication ... add table`, which would error on a
+  relation already in the publication.
+- **The helper function is not a no-op**, so `00016` still has to be pushed before the suite
+  can assert the publication against the hosted project:
+
+```bash
+supabase db push          # applies 00016 to the hosted project
+supabase migration list   # local == remote
+```
+
+A publication that lives only in a dashboard session is a layer nobody can review, diff or
+restore. The migration is what makes the local stack and CI carry the same six-table scope the
+hosted project was given by hand — which is what lets the test run anywhere instead of
+skipping, as its first draft did everywhere.
+
 ## 2. PowerSync instance
 
 Create an Organization → Project → Instance. Pick the region nearest the user.
