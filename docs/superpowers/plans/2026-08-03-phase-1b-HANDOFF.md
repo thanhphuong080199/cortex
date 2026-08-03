@@ -17,29 +17,42 @@ committed copy of what matters.
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
 | 2 — security baseline | 8–13 | **Complete.** All six tasks done and reviewed. |
 | 3 — shared filters | 14–16 | **Complete.** `282666d`, `b824a2a`, `083ab6a`. None independently reviewed. |
-| 4 — mobile parity | 17–20 | **Complete** (`c6757f9`, `1f900ce`, `9cfe51b`, `d93e324`), none independently reviewed. |
-| 4 — mobile parity | 21–23 | **Not started. Resume here.** |
+| 4 — mobile parity | 17–21 | **Complete** (`c6757f9`, `1f900ce`, `9cfe51b`, `d93e324`, `590469c`), none independently reviewed. |
+| 4 — mobile parity | 22–23 | **Not started. Resume here.** |
 
-### Resume here: Task 21
+### Resume here: Task 22
 
-Mood/energy check-in. Checkins are insert-or-delete only on the sync router — a PATCH is
-rejected `validation` — so the screen must create a new row rather than edit one.
+Media log. It is the task that finally exercises `pending_item`, which Task 18's `readDomainMeta`
+fix unblocked — before it, `domainMeta.pending_item` on the string a device sends was always
+`undefined` and offline media resolution silently never ran (spec §5.3).
 
-**Every local write must stamp its timestamps through `NOW_ISO` from `src/lib/sql.ts`.** Tasks
-18 and 20 both had to fix `datetime('now')` in the plan's SQL; assume Tasks 21–23 carry it too.
+**Check three things in the plan's SQL before trusting it:**
 
-**Tasks 18–20 have not been verified on a device.** The accumulated checklist:
+1. `datetime('now')` — Tasks 18, 20 and 21 all shipped it from the plan. Use `NOW_ISO` from
+   `src/lib/sql.ts`.
+2. **Which op kind the statement produces.** Task 21's undo was an `UPDATE` where the router
+   only accepts PUT and DELETE, and the failure is silent — reported in `failed` inside a 200,
+   batch completed, write gone. A media log writes `notes`, which takes all three, but check
+   the same way.
+3. `domain_meta` is written as a JSON **string** into a TEXT column. That is correct and the
+   server now parses it; do not "fix" it to an object.
 
-1. Capture online, then in airplane mode; both appear instantly; both reach web after reconnect.
+Task 22 may add a native module (an image picker). **If it does, the dev client needs
+rebuilding** — EAS `37039bce` does not contain it. Say so before the device checklist.
+
+**Tasks 18–21 have not been verified on a device.** Accumulated checklist:
+
+1. Capture online, then in airplane mode; both appear instantly; both reach web on reconnect.
 2. Three notes in the list, view switching, search for a word in one body only.
 3. Edit a note on web, wait for sync, search the OLD word — must return nothing (the
    replace-safe FTS trigger).
-4. **The conflict run, which nothing else can prove:** open a note, enable airplane mode, edit
-   the body. Edit the same note differently on web and save. Reconnect. Expect TWO notes — the
-   web body on the original, the phone body as a new inbox note.
+4. **The conflict run, which nothing else can prove:** open a note, airplane mode, edit the
+   body. Edit the same note differently on web, save. Reconnect. Expect TWO notes — the web
+   body on the original, the phone body as a new inbox note.
+5. Airplane mode: tap a mood, see "Logged ✓", tap Undo. Reconnect and confirm **no** check-in
+   row on web — that is the Task 21 bug's regression check.
 
-The existing dev client (EAS `37039bce`) still covers all of it — no task since has added a
-native module.
+Dev client EAS `37039bce` still covers 1–5; nothing since Task 17 has added a native module.
 
 ### Verification state — the full gate has been run
 
@@ -126,6 +139,40 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
 ---
 
 ## Stage 4 — what shipped
+
+### Task 21 — mood check-in, and an undo that could never reach the server (commit `590469c`)
+
+**The plan's undo is an `UPDATE`, and the router rejects it.** It issues
+`UPDATE checkins SET deleted_at = ...`, which PowerSync turns into a **PATCH**. The router
+takes exactly PUT and DELETE on checkins and throws `validation` on anything else, so the op
+lands in `failed` **while the response is still 200** — the connector completes the batch and
+the undo is discarded. The check-in stays on the server forever while the phone shows it gone.
+The plan's own Step 2 asks you to "confirm no check-in row arrives on web", which is precisely
+the check its own code fails.
+
+Undo is now a local `DELETE`, which becomes a DELETE op and reaches `CheckinService.softDelete`.
+Hard locally, soft on the server, deliberately: the row is gone from the device because the
+user asked for it, and the tombstone every synced table needs is the server's job.
+
+**Nothing pinned that server rule before.** Two e2e cases now do — a checkins PATCH is rejected
+and does not half-apply, and the DELETE mobile actually sends is accepted and tombstones.
+Deleting the router's `else throw` fails the first.
+
+`datetime('now')` was here too — **three tasks running** now (18, 20, 21). Assume Tasks 22–23
+have it.
+
+`updated_at` is not written. `packages/sync` declares the column on checkins but
+`public.checkins` has none (migration 00013), so a value written there lives on one device and
+is null the moment the server's row syncs back.
+
+The double-tap guard is a **ref, not the `busy` state**: state updates are async, so two quick
+taps both pass `disabled={busy}` before either re-render lands, and each is a separate
+check-in.
+
+10 mobile tests on real SQLite, 2 api e2e. Six mutations: the plan's undo fails 3 (including
+the behavioural "removes the row from this device"), its `datetime('now')` fails its own, and a
+reused id, a missing WHERE and a stray `updated_at` each fail theirs.
+Gate: **26/26, 0 cached, 465 tests**, Docker up.
 
 ### Task 20 — note editor and the conflict base (commit `d93e324`)
 
@@ -708,6 +755,10 @@ Each was judged non-blocking at the time and ledgered rather than fixed:
   now slightly out of step.
 - `secure-storage.ts` — no test covers `getItem` racing a concurrent `setItem` on the same
   key; the per-key queue covers it structurally but nothing proves it.
+- **`packages/sync` declares `updated_at` on `checkins`; `public.checkins` has no such
+  column** (migration 00013). Nothing reads it and the router ignores it, so it is inert — but
+  it is a column that can never hold a value, which is a trap for the next person writing
+  check-in code. The local schema is what should lose it.
 - **One pending edit base is attached to every queued notes PATCH for that note.** The
   connector keys bases by note id, so if a body edit and a lifecycle change are both queued for
   one note, the archive op carries the body's base too and can manufacture a second conflict
