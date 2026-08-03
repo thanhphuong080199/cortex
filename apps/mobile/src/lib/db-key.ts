@@ -44,7 +44,22 @@ function newKey(): string {
   return [...Crypto.getRandomBytes(32)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export async function getOrCreateDatabaseKey(): Promise<KeyOutcome> {
+/**
+ * What this device can actually enforce. Pass `hasStrongBiometrics()` from `app-lock.ts`.
+ *
+ * Required, with no default, on purpose: defaulting to `true` would hand every PIN-only device
+ * back the hard rejection this parameter exists to prevent, and it would do so silently.
+ */
+export interface DeviceSecurity {
+  /**
+   * A Class 3 biometric is enrolled, i.e. `canAuthenticate(BIOMETRIC_STRONG)` succeeds — the
+   * exact condition `SecureStore`'s `assertBiometricsSupport()` demands. Not `isEnrolledAsync`,
+   * which also answers true for Class 2 face unlock and would throw here anyway.
+   */
+  strongBiometrics: boolean;
+}
+
+export async function getOrCreateDatabaseKey(device: DeviceSecurity): Promise<KeyOutcome> {
   // Read the flag FIRST: it is the only thing that distinguishes "no key yet" from
   // "key destroyed by the OS", and both present as a null key. This read is un-gated, so
   // it cannot prompt and cannot fail on a cancelled prompt -- hence it sits outside the
@@ -53,6 +68,12 @@ export async function getOrCreateDatabaseKey(): Promise<KeyOutcome> {
 
   let existing: string | null = null;
   try {
+    // This read is mode-agnostic and needs no `device` argument, which is what lets one key
+    // survive a change of device security in either direction. Android takes the flag from the
+    // STORED item, not from these options (SecureStoreModule.readJSONEncodedItem line 130);
+    // AESEncryptor says so directly: "We aren't using requiresAuthentication from the options,
+    // because it's not a necessary option for read requests". So an un-gated key still reads
+    // back here, and a gated one still prompts, regardless of what is passed.
     existing = await SecureStore.getItemAsync(DB_KEY_NAME, { requireAuthentication: true });
   } catch (cause) {
     // A rejection is USUALLY the biometric PROMPT failing (user cancelled, too many attempts)
@@ -103,7 +124,15 @@ export async function getOrCreateDatabaseKey(): Promise<KeyOutcome> {
     // rejects this call. Map it to the same error the read path uses, so the caller does not
     // have to handle a raw platform exception from one path and a mapped one from the other
     // for what is, to the user, the identical action.
-    await SecureStore.setItemAsync(DB_KEY_NAME, key, { requireAuthentication: true });
+    await SecureStore.setItemAsync(DB_KEY_NAME, key, {
+      // The WRITE is where the mode is fixed, because this is the call that can throw.
+      // `assertBiometricsSupport()` rejects outright when no Class 3 biometric is enrolled, so
+      // asking for a gated write on a PIN-only device locks that user out of their own app --
+      // the outcome spec §7.6 kept `disableDeviceFallback: false` to avoid. Un-gated, the key
+      // is still Keystore-backed and the database is still encrypted; it is only unbound from
+      // a user-auth event, and nothing can invalidate it, so `lost` never fires for them.
+      requireAuthentication: device.strongBiometrics,
+    });
   } catch (cause) {
     // Same mapping, same reason to keep the cause: a full disk rejects here exactly like a
     // cancelled prompt does, and only `cause` tells the two apart after the fact.
@@ -129,6 +158,10 @@ export async function clearDatabaseKey(): Promise<void> {
 // the union, because the `lost` variant has no such field -- so the dangerous shortcut,
 // `const { key } = await getOrCreateDatabaseKey()`, is a type error rather than silent
 // corruption.
+//
+// It does NOT check that you passed the RIGHT `strongBiometrics`. Pass `hasStrongBiometrics()`
+// from `app-lock.ts`; hardcoding `true` reintroduces the PIN-only lockout, and hardcoding
+// `false` silently drops the auth binding on devices that could have had it.
 //
 // It does NOT verify that the branch you write actually wipes. Nothing here can. On `lost`,
 // delete the database FILE before opening anything: `unusableKey` is a key for a database

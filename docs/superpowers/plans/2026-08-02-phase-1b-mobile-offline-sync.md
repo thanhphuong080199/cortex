@@ -1994,7 +1994,34 @@ git commit -m "feat(mobile): SQLCipher key manager with Keystore invalidation re
   - `LOCK_GRACE_MS = 60_000`
   - `shouldRelock(backgroundedAt: number | null, now: number): boolean`
   - `authenticate(): Promise<boolean>`
+  - `hasStrongBiometrics(): Promise<boolean>` — whether the SQLCipher key can be auth-gated.
   - `<AppLockGate>` — renders children only after a successful unlock.
+
+> **AS SHIPPED.** Two additions to the plan below, both forced by a conflict inside the spec.
+>
+> §7.6 keeps `disableDeviceFallback: false` so a PIN-only device is not locked out, but Task 9's
+> key manager uses `requireAuthentication: true`, and `assertBiometricsSupport()` throws on both
+> the read and the write path when no **Class 3** biometric is enrolled. Those users clear the
+> lock with their PIN and then hit a hard rejection fetching the key — the very lockout §7.6
+> chose the fallback to avoid.
+>
+> 1. **`hasStrongBiometrics()` is the ordering hook**, and it uses `getEnrolledLevelAsync()`,
+>    **not** `isEnrolledAsync()`. The plan's test below mocks the latter, which is the trap:
+>    `isEnrolledAsync` is `canAuthenticateUsingWeakBiometrics()`, so a phone whose only enrolled
+>    biometric is 2D face unlock answers `true` while SecureStore still throws. Those are exactly
+>    the Class 2 devices §7.6 calls spoofable. `getEnrolledLevelAsync() === BIOMETRIC_STRONG` is
+>    the same predicate SecureStore itself checks.
+> 2. **`getOrCreateDatabaseKey({ strongBiometrics })` gates only the WRITE.** The Android read
+>    takes the flag from the stored item, not from the options, so one key survives a change of
+>    device security in either direction with no persisted mode. An un-gated key is still
+>    Keystore-backed and the database is still encrypted; it simply cannot be invalidated, so
+>    `lost` never fires on those devices. It is deliberately **not** re-gated if the user later
+>    enrols a biometric — that would silently arm the wipe path for someone who had no such
+>    exposure before.
+>
+> `AppLockGate` also guards the prompt against its own AppState churn: on some devices the
+> system biometric dialog moves AppState off `active`, which without a guard reads as a return
+> from background and re-locks the user it just authenticated.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3303,6 +3330,7 @@ export class ApiConnector implements PowerSyncBackendConnector {
 import { PowerSyncDatabase } from "@powersync/react-native";
 import { AppSchema } from "@cortex/sync";
 import { ApiConnector } from "./connector";
+import { hasStrongBiometrics } from "./app-lock";
 import { getOrCreateDatabaseKey } from "./db-key";
 
 let db: PowerSyncDatabase | null = null;
@@ -3322,7 +3350,12 @@ export function getPowerSync(): PowerSyncDatabase | null {
 export async function initPowerSync(): Promise<{ db: PowerSyncDatabase; wiped: boolean }> {
   if (db) return { db, wiped: false };
 
-  const outcome = await getOrCreateDatabaseKey();
+  // Required, and it must come from app-lock's `hasStrongBiometrics()`. Hardcoding `true`
+  // rejects every PIN-only device; hardcoding `false` drops the auth binding on devices that
+  // could have had it. See Task 10's AS SHIPPED note.
+  const outcome = await getOrCreateDatabaseKey({
+    strongBiometrics: await hasStrongBiometrics(),
+  });
   const wiped = outcome.status === "lost";
 
   // The old file must be GONE BEFORE the database is constructed, not cleared afterwards.
