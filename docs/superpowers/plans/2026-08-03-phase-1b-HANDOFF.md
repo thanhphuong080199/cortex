@@ -34,9 +34,14 @@ the three `@cortex/mobile` tasks ran fresh. Docker has been up since; the gate a
 (mobile 47, shared 54, sync 4, api 68, core 100, web 20, db 93). Every Supabase-backed suite ran
 rather than replayed.
 
-`--force` matters here beyond the Docker question: `turbo run build --filter=@cortex/web` came
-back `FULL TURBO, 2 cached` on a tree with uncommitted web changes during Task 16. Read the
-`Cached:` line before believing any gate.
+One clarification for whoever reads a `Cached:` line next. During Task 16,
+`turbo run build --filter=@cortex/web` answered `FULL TURBO, 2 cached` on a tree with
+uncommitted web changes, which looks like a stale replay but was **not** one:
+`turbo.json` gives `test` and `typecheck` `dependsOn: ["^build", "build"]`, so the filtered
+`typecheck lint test` run a moment earlier had already built web with those changes, and the
+explicit build legitimately hit that entry. Re-running with `--force` produced the same result.
+The rule still stands — read the `Cached:` line, and `--force` when a gate has to be evidence —
+but a cache hit on `build` right after a `test` run is expected, not a symptom.
 
 Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@cortex/api` and
 `@cortex/core` are **turbo cache replays, not runs**. That is acceptable for a diff confined to
