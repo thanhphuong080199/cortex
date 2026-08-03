@@ -41,6 +41,12 @@ jobs:
       - name: Test @cortex/sync
         run: pnpm turbo run test --filter=@cortex/sync
 
+      # apps/mobile's suites mock every native module (expo-secure-store et al) and touch
+      # no Supabase stack, so they belong here rather than in db-tests. Every later
+      # mobile suite lands in this same run, so this step is what keeps them in CI at all.
+      - name: Test @cortex/mobile
+        run: pnpm turbo run test --filter=@cortex/mobile
+
   db-tests:
     name: db + api tests (against local Supabase stack)
     runs-on: ubuntu-latest
