@@ -1,5 +1,7 @@
 import type { NoteDomain } from "@cortex/shared";
 
+import { NOW_ISO } from "./sql.js";
+
 /**
  * The local INSERT behind quick capture (spec §5.2).
  *
@@ -7,19 +9,8 @@ import type { NoteDomain } from "@cortex/shared";
  * no "pending" state, because PowerSync's upload queue is the pending state. Capture therefore
  * succeeds in airplane mode through exactly the same code path as online.
  *
- * TIMESTAMPS ARE ISO-8601 WITH A `Z`, NOT `datetime('now')`. SQLite's `datetime()` returns
- * `2026-08-03 10:00:00` -- space-separated, second precision, no zone. Two things break on
- * that:
- *
- *   - Sorting. Rows the server has echoed back carry ISO strings with a `T`. In ASCII a space
- *     (0x20) sorts before `T` (0x54), so within one day every locally captured note sorts
- *     ahead of every synced note regardless of its actual time. Task 19 orders by these.
- *   - The conflict-copy base. `syncOp.base_updated_at` is `z.iso.datetime()`, which rejects
- *     both the space form and a numeric offset -- it demands the `Z`. Task 20 reads
- *     `notes.updated_at` into `note_edit_base` and sends it back, so a non-ISO local value
- *     is rejected server-side rather than merely sorted oddly.
- *
- * `%f` is seconds with milliseconds (`05.123`), so this yields `2026-08-03T10:00:00.123Z`.
+ * Timestamps come from `NOW_ISO`, never `datetime('now')` -- see `sql.ts` for the three
+ * separate things the latter breaks.
  *
  * `uuid()` is registered by the PowerSync SQLite core extension, not by SQLite -- PowerSync's
  * own AttachmentQueue relies on it (`SELECT uuid() as id`).
@@ -33,7 +24,7 @@ import type { NoteDomain } from "@cortex/shared";
 export const CAPTURE_NOTE_SQL = `INSERT INTO notes (id, content, title, domain, domain_meta, lifecycle,
                     source_type, pinned, created_at, updated_at)
      VALUES (uuid(), ?, NULL, ?, '{}', 'inbox', 'quick', 0,
-             strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`;
+             ${NOW_ISO}, ${NOW_ISO})`;
 
 export interface CaptureInput {
   content: string;

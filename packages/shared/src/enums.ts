@@ -22,6 +22,10 @@ import { z } from "zod";
 // suggestionStatus -- they mean different things (a link's acceptance state vs. a
 // note's PARA-categorization state) and are allowed to diverge.
 export const noteLifecycle = z.enum(["inbox", "active", "evergreen", "archived"]);
+// Mirrors NoteDomain in dto/domains.ts. Mobile's editor writes this column directly into the
+// local replica, so it needs the union rather than a bare string -- an unchecked value there
+// fails the server's CHECK constraint only after it has synced.
+export type NoteLifecycle = z.infer<typeof noteLifecycle>;
 export const noteSourceType = z.enum(["quick", "web_clip", "voice", "email", "telegram", "import"]);
 export const paraCategory = z.enum(["project", "area", "resource", "archive"]);
 export const suggestionStatus = z.enum(["suggested", "accepted", "rejected"]);
