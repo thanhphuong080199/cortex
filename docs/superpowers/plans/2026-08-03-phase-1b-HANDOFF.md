@@ -1,14 +1,12 @@
 # Phase 1b — handoff, 2026-08-03
 
-Stopped mid-flight on a token budget. This is everything needed to resume without
-re-deriving it. Plan: `docs/superpowers/plans/2026-08-02-phase-1b-mobile-offline-sync.md`
-(23 tasks, 4 stages). Execution method: `superpowers:subagent-driven-development`.
+Plan: `docs/superpowers/plans/2026-08-02-phase-1b-mobile-offline-sync.md` (23 tasks, 4 stages).
+Execution method: `superpowers:subagent-driven-development`.
 
-Branch `feat/phase-1b-mobile-offline-sync`, head **1ba9453**, working tree clean, nothing
-pushed. The SDD ledger lives at
-`.superpowers/sdd/2026-08-02-phase-1b-mobile-offline-sync/progress.md` and holds the
-per-task detail — but `.superpowers/` is **gitignored**, so it exists only on this machine.
-This file is the committed copy of what matters.
+Branch `feat/phase-1b-mobile-offline-sync`, working tree clean, nothing pushed. The SDD ledger
+at `.superpowers/sdd/2026-08-02-phase-1b-mobile-offline-sync/progress.md` holds per-task detail,
+but `.superpowers/` is **gitignored** — it exists only on this machine. This file is the
+committed copy of what matters.
 
 ---
 
@@ -17,53 +15,145 @@ This file is the committed copy of what matters.
 | Stage | Tasks | State |
 | --- | --- | --- |
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
-| 2 — security baseline | 8–13 | Task 8 complete. **Task 9 implemented but NOT reviewed.** 10–13 not started. |
-| 3 — shared filters | 14–16 | Not started. |
+| 2 — security baseline | 8–13 | **Complete except Task 12**, which is blocked on Docker. |
+| 3 — shared filters | 14–16 | Not started. **Blocked on Docker.** |
 | 4 — mobile parity | 17–23 | Not started. |
 
-### The one thing to do first on resume
+### The blocker: Docker Desktop is down on this machine
 
-**Task 9's review never ran.** The code is committed (1ba9453) and its 12 tests pass, but
-it has had no independent review, and the implementer made **three deviations from the
-brief that were never adjudicated**. Do not build Task 10 on top of it until that review
-happens — Task 10 and Task 17 both consume this module's contract.
+Everything still open needs the local Supabase stack, so nothing further can be gated honestly
+until Docker Desktop is running:
 
-The review prompt was fully written and is worth reconstructing rather than improvising.
-The three deviations it must adjudicate:
+- **Task 12** (sync-rule isolation) seeds real rows for two users through `makeUser`/`admin`.
+- **Task 14** imports `createUserClient` and `makeUser` from the core test harness.
+- Tasks 15–16 build on 14.
 
-- **D1 — a Critical data-loss bug the implementer found in the plan, and their fix.** The
-  plan wrote the SQLCipher key first and the init flag second. They claim a crash between
-  the two leaves key-on-disk/flag-absent permanently (the load path never repaired the
-  flag), so a later biometric enrollment sees null key + no flag — the exact first-run
-  signature — and reports `created` over a live database, silently destroying local data.
-  They reproduced it against the plan's verbatim code (`expected 'created' to be 'lost'`)
-  before changing anything, then reordered to flag-first and added flag repair on the load
-  path. **The review must check what NEW crash window flag-first opens** (flag written, key
-  not) and whether a false `lost` can ever land on a run where the user has local unsynced
-  data — which would make it more than the "just a resync" the asymmetry argument assumes.
-- **D2 — writing an auth-gated value also prompts.** They traced `setItemImpl` →
-  `createEncryptedItem` → `authenticateCipher` → `BiometricPrompt` in the installed
-  expo-secure-store Android source, concluding a cancelled prompt rejected the *creation*
-  path with a raw platform error, and wrapped it to map to `biometric_prompt_failed` like
-  the read path. Verify the wrap does not swallow a genuine storage failure into a
-  misleading "user cancelled" signal — a caller must handle those differently.
-- **D3 — they challenge one of my plan corrections.** I had changed
-  `simulateBiometricEnrollment` to drop names from `authGated` as well as from the store.
-  They argue it is not load-bearing: the mock's own `else authGated.delete(k)` branch
-  already catches an un-gated recovery write, and the remaining wrong implementation is
-  caught by the `store.get(DB_KEY_NAME)` assertion on the preceding line. **Adjudicate
-  independently.** They separately confirm the distinct-bytes RNG correction IS
-  load-bearing, which matches what I found.
+Every gate run recorded on this branch since Task 8 shows **26/26 turbo tasks green with 23
+cached** — only the three `@cortex/mobile` tasks ran fresh. That is acceptable for diffs
+confined to `apps/mobile`, and every commit message says so explicitly, but it must never be
+reported as a full run. Once Docker is up, run `pnpm turbo run typecheck lint test --force`
+once to re-verify the Supabase-backed suites against everything Stage 2 changed.
 
-Two open questions the review should also settle, both cheap now and expensive later:
+---
 
-- `lost` is a destructive signal nothing enforces. `const { key } = await
-  getOrCreateDatabaseKey()` compiles fine and silently skips the required wipe. Task 13
-  wires this to a real wipe and Task 17 consumes it — decide now whether documentation is
-  enough or the type shape should make the dangerous path unrepresentable.
-- Risk 3: `requireAuthentication: true` throws when no biometric is enrolled, on both the
-  read and write paths. Task 10 builds the mandatory-biometric gate, but nothing orders the
-  two at runtime, and the flag-first reordering adds a wrinkle Task 10 must handle.
+## Stage 2 — what shipped
+
+Task 9 was implemented but unreviewed at the previous handoff. **That review has now run.**
+
+### Task 9 review outcome (commit `85c6bc2`)
+
+All three of the implementer's deviations were adjudicated:
+
+- **D1 — flag-first write ordering + load-path flag repair: CORRECT, kept.** The Critical they
+  found is real. The new crash window flag-first opens (flag written, key not) always resolves
+  to `lost`, and a false `lost` can never land on recoverable data: `lost` requires flag-present
+  and key-absent, and with the key absent any existing encrypted database is unopenable anyway,
+  so the wipe destroys nothing that was still readable. The only genuinely-false case is a flag
+  written on a run that never produced a database, which costs a resync on what is still
+  effectively a first run.
+  - Caveat for the record: the `it.each` case for `cortex.db.initialized` does **not** pin the
+    ordering on its own — with the load-path repair present, key-first passes it too. Only the
+    `cortex.db.key` case exercises flag-first directly.
+- **D2 — wrapping the creation-path write: CORRECT, with a required fix applied.** The mapping
+  is right, but a bare `catch` turned a corrupt keystore or a full disk into
+  `biometric_prompt_failed`, telling the caller to re-prompt a user who cannot fix it. Both
+  paths now carry `{ cause }`.
+- **D3 — the implementer was right; the plan correction was defensive, not load-bearing.**
+  An un-gated recovery write is caught by the mock's own `else authGated.delete(k)`, and a
+  missing write is caught by the `store.get(DB_KEY_NAME)` assertion on the preceding line. No
+  wrong implementation exists that the `authGated` deletion catches and the rest misses. Kept
+  as honest OS modelling only.
+
+Both open questions were settled:
+
+- **`lost` now names its key `unusableKey`.** With `key` on all three variants,
+  `const { key } = await getOrCreateDatabaseKey()` type-checked and silently skipped the wipe.
+  The asymmetry makes reading a key off the union a compile error until the caller branches on
+  `status`. This also caught a real bug in **Task 17's planned code**, which built the database
+  with `outcome.key` and called `disconnectAndClear()` afterwards — that has to init the
+  database before it can clear it, so it would fail on "file is not a database" rather than
+  recover. The plan now deletes the file first; see Task 17's note.
+- **Risk 3 (no biometric enrolled) is resolved in Task 10.** See below.
+
+### Task 10 — app lock, and the spec conflict it had to resolve (commit `ec5b7b4`)
+
+Spec §7.6 keeps `disableDeviceFallback: false` so a PIN-only device is not locked out, but the
+key manager's `requireAuthentication: true` throws on both read and write when no **Class 3**
+biometric is enrolled. Those users cleared the lock with their PIN and were then rejected
+fetching the key — the same lockout by another route.
+
+- `getOrCreateDatabaseKey({ strongBiometrics })` gates only the **write**. No mode is persisted
+  and none is needed: the Android read takes `requireAuthentication` from the *stored item*, not
+  from the options (`SecureStoreModule.readJSONEncodedItem` line 130; `AESEncryptor` comments it
+  explicitly). One key therefore survives a change of device security in both directions, and
+  both transitions are tested.
+- The un-gated key is deliberately **not** upgraded when a biometric appears later. Re-gating
+  would silently arm the invalidation path, and therefore the wipe, for a user who had no such
+  exposure before.
+- **`hasStrongBiometrics()` uses `getEnrolledLevelAsync()`, never `isEnrolledAsync()`.** The
+  latter is `canAuthenticateUsingWeakBiometrics()`, so a phone whose only enrolled biometric is
+  2D face unlock answers `true` while SecureStore still throws — crashing on exactly the Class 2
+  hardware §7.6 calls spoofable. The plan's original test mocked the wrong one.
+- `AppLockGate` guards against its own prompt: on some devices the system biometric dialog moves
+  AppState off `active`, which unguarded reads as a return from background and re-locks the user
+  it just authenticated, forever.
+
+### Task 11 — backup off, and it takes two mechanisms (commit `039d0ed`)
+
+`android:allowBackup="false"` verified in the merged manifest via prebuild. But on Android 12+
+that disables cloud backup and **not** device-to-device transfer. What covers D2D is
+`expo-secure-store`'s own `secure_store_data_extraction_rules.xml`, which includes only the
+`sharedpref` domain — so the `database` and `file` domains, where the SQLCipher file lives, are
+outside both. The previous handoff ledgered those rules as an incidental side effect of
+`expo install`; they are load-bearing. Full detail in `docs/deploy.md` § "Backup and transfer
+are OFF".
+
+`apps/mobile/android/` and `ios/` are now gitignored — this is a CNG project and the prebuild
+this task requires would otherwise have dropped hundreds of untracked files into the repo.
+
+### Task 13 — sign-out wipes (commit `3dd191e`)
+
+The plan's third test contradicted the plan's implementation: it called `wipeLocalData(db)` with
+a throwing database and asserted only that the key was cleared, but the `finally` re-raises, so
+that test failed against the very code it shipped with. Propagation was kept and the test fixed
+— `signOut` awaits this before `supabase.auth.signOut()`, so a caller that cannot distinguish a
+partial wipe from a complete one reports "signed out" over a device it did not finish cleaning.
+A fourth test covers the dangerous direction: a failure to clear the key itself.
+
+`signOut` passes `null` until Task 17 exists to hand over a database. Task 17 Step 6 already
+carries the replacement step.
+
+---
+
+## The one thing to do first on resume
+
+**Start Docker Desktop, then run `pnpm turbo run typecheck lint test --force` once.** Stage 2
+changed `db-key.ts`'s exported signature; nothing outside `apps/mobile` imports it, but that has
+only been verified by typecheck against cached Supabase suites.
+
+Then **Task 12**, which has a pre-flight finding already written into the plan:
+
+> The plan's dynamic half **cannot fail**. `.eq("user_id", alice.id)` filters to alice and the
+> assertion then checks every row is alice's — green with the sync rules deleted, with the
+> publication widened, with no rules file at all. It restates the query instead of testing it,
+> while guarding the one property standing between two users' notes. The fix is spelled out in
+> the plan at that test: execute the *rule's* predicate with alice's id substituted for
+> `auth.user_id()`, and assert both directions — alice's row present, bob's absent.
+
+---
+
+## Action required from the human — Task 8's security claim depends on it
+
+Still outstanding. Task 8 moved the Supabase session out of AsyncStorage into Android Keystore,
+but **the old session is still on any device that already had one**, in plaintext, and this
+build can no longer delete it (the `@react-native-async-storage/async-storage` dependency is
+gone). It is also inside whatever Auto Backup snapshots Google already took. A Supabase refresh
+token is long-lived and does not expire on its own.
+
+One-time fix, server-side, which kills the stale token wherever copies exist:
+**Supabase Dashboard → Authentication → Users → your account → revoke / sign out all sessions.**
+
+Not blocking any task. Blocking the claim that the refresh token is out of Auto Backup.
 
 ---
 
@@ -103,31 +193,21 @@ Three facts that cost real time to establish, all now in `docs/deploy.md`:
 
 ---
 
-## Action required from the human — Task 8's security claim depends on it
-
-Task 8 moved the Supabase session out of AsyncStorage into Android Keystore. But **the old
-session is still on any device that already had one**, in plaintext, and this build can no
-longer delete it (the `@react-native-async-storage/async-storage` dependency is gone). It is
-also inside whatever Auto Backup snapshots Google already took. A Supabase refresh token is
-long-lived and does not expire on its own.
-
-One-time fix, server-side, which kills the stale token wherever copies exist:
-**Supabase Dashboard → Authentication → Users → your account → revoke / sign out all
-sessions.** Stronger than deleting the local file, because it also invalidates the copies
-already on Drive.
-
-Not blocking any task. Blocking the claim that the refresh token is out of Auto Backup.
-
----
-
 ## Carried context for later tasks
 
-- **Task 10 / any mobile suite:** an `apps/mobile` test that reaches a real native module
-  dies under `environment: "node"` with a Rollup **Flow parse error**, not a useful message.
-  Every native module a suite touches must be `vi.mock`ed. Anything importing from `app/`
-  (RN components) hits this immediately.
-- **Task 13 (sign-out wipes the device):** `secure-storage.ts`'s orphan probe exists
-  precisely so a wipe cannot miss stranded chunks. Do not replace it with a fixed bound.
+- **Any mobile suite:** an `apps/mobile` test that reaches a real native module dies under
+  `environment: "node"` with a Rollup **Flow parse error**, not a useful message. Every native
+  module a suite touches must be `vi.mock`ed. Anything importing from `app/` (RN components)
+  hits this immediately — which is why `AppLockGate` has no test and all testable lock logic
+  lives in `app-lock.ts`.
+- **Task 17:** `getOrCreateDatabaseKey` now requires `{ strongBiometrics }`. Pass
+  `hasStrongBiometrics()` from `app-lock.ts`. Hardcoding `true` reintroduces the PIN-only
+  lockout; hardcoding `false` drops the auth binding on devices that could have had it.
+- **Task 17:** on `lost`, delete the database **file** (and its `-wal`/`-shm` siblings) before
+  constructing `PowerSyncDatabase`. `wipeLocalData` is **not** that path — `disconnectAndClear()`
+  needs to open the database in order to clear it, which is precisely what a lost key prevents.
+  Resolve the file's actual location against the installed `@powersync/react-native`; a wrong
+  path deletes nothing and fails silently.
 - **Task 17:** verify `@powersync/react-native` and `@powersync/common` dedupe to **one**
   physical install under pnpm. Two copies means `AppSchema` built from one `Schema` class
   handed to a `PowerSyncDatabase` constructed against another — failing far from its cause.
@@ -136,10 +216,12 @@ Not blocking any task. Blocking the claim that the refresh token is out of Auto 
 - **Task 17:** the Android dev client must be **rebuilt**. PowerSync and SQLCipher are
   native modules; a dev client built before phase 1b is a compiled binary and cannot load
   them. Expo Go cannot run this app at all.
-- **Task 9's `expo-secure-store` behaviour:** it returns null and self-deletes an entry it
-  cannot decrypt after reinstall (`SecureStoreModule.kt`, `BadPaddingException` path). For
-  the session that degrades to a re-login, which is intended; for the `requireAuthentication`
-  database key it is the invalidation-recovery path, with very different severity.
+- **Task 13's wipe** is done, but `secure-storage.ts`'s orphan probe is what stops a wipe
+  missing stranded chunks. Do not replace it with a fixed bound.
+- **`expo-secure-store` behaviour:** it returns null and self-deletes an entry it cannot decrypt
+  after reinstall (`SecureStoreModule.kt`, `BadPaddingException` path). For the session that
+  degrades to a re-login, which is intended; for the database key it is the invalidation-recovery
+  path, with very different severity.
 
 ## Deferred minors, for the whole-branch review after Task 23
 
@@ -161,10 +243,9 @@ Each was judged non-blocking at the time and ledgered rather than fixed:
   now slightly out of step.
 - `secure-storage.ts` — no test covers `getItem` racing a concurrent `setItem` on the same
   key; the per-key queue covers it structurally but nothing proves it.
-- The `expo-secure-store` config plugin replaced the app's default Auto Backup behaviour
-  with `include domain="sharedpref"` only, so the `database` and `file` domains are now
-  excluded from cloud backup and device transfer app-wide. Good for Stage 3's local corpus,
-  but it arrived as a side effect of `expo install` and belongs in spec §7.2 deliberately.
+- **Resolved by Task 11**, kept here for the trail: the `expo-secure-store` config plugin's
+  backup rules arrived as a side effect of `expo install`. They turned out to be the only thing
+  covering device-to-device transfer on Android 12+, and are now documented as such.
 
 ---
 
@@ -180,10 +261,16 @@ Each was judged non-blocking at the time and ledgered rather than fixed:
 - **A new test suite must be named in `.github/workflows/ci.yml` in the same task that
   creates it.** The `checks` job filters per package, so an unnamed suite runs nowhere but
   the implementer's machine. This happened twice: `@cortex/sync` (fixed in Task 7) and
-  `apps/mobile` (caught in Task 8's pre-flight, before it could bite Tasks 9–23).
-- **Pre-flight scan each task's tests for assertions the mock guarantees.** Three vacuous
-  tests have been caught so far — one before Stage 1, two in Task 9's pre-flight, and the
-  implementers caught more. A test that cannot fail is worse than no test.
+  `apps/mobile` (caught in Task 8's pre-flight). `apps/mobile` is now wired, so Tasks 10 and 13
+  needed no CI change.
+- **Pre-flight scan each task's tests for assertions the query or the mock guarantees.** Five
+  vacuous tests caught so far: one before Stage 1, two in Task 9's pre-flight, Task 13's
+  self-contradicting third test, and Task 12's `.eq(...)`-then-assert-the-same pair. A test that
+  cannot fail is worse than no test.
+- **Verify library behaviour against the installed source, not the docs.** Three decisions on
+  this branch turned on reading `expo-secure-store` and `expo-local-authentication` Kotlin:
+  writes prompt as well as reads, reads ignore the caller's `requireAuthentication`, and
+  `isEnrolledAsync` asks a weaker question than `assertBiometricsSupport` answers.
 - Never `pnpm --filter <pkg> test`; always `pnpm turbo run test --filter=<pkg>`.
 - Docker Desktop is frequently down on this machine, which makes `@cortex/db`, `@cortex/api`
   and `@cortex/core` **turbo cache replays rather than fresh runs**. Acceptable for a diff
