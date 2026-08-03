@@ -1057,3 +1057,90 @@ Run each request from a shell that re-declares the token: the harness gives ever
 `!` command a fresh shell, so a `TOKEN=` set in a previous block is gone. Clean up
 afterwards (`DELETE /notes/:id` then `DELETE /notes/:id/purge`) — a smoke-test note is
 real user data and will otherwise sync to every device.
+
+## 6. Stage 4 ship — native build flags and the dev-client rebuild
+
+Stage 4 added two **native** build flags and two native modules. None of them can be picked up
+by an existing dev client: it is a compiled binary.
+
+### The `op-sqlite` block, and how to actually verify it
+
+```jsonc
+// apps/mobile/package.json
+"op-sqlite": { "sqlcipher": true, "fts5": true }
+```
+
+- `sqlcipher` encrypts the local replica. Without it the whole corpus sits unencrypted.
+- `fts5` compiles `SQLITE_ENABLE_FTS5`. Without it the `notes_fts` virtual table fails at
+  runtime with "no such module: fts5" and offline search is dead.
+
+Both take effect at **Gradle configure time** and print their own confirmation:
+
+```
+[OP-SQLITE] Detected op-sqlite config from package.json at: <path>
+[OP-SQLITE] using sqlcipher.
+[OP-SQLITE] FTS5 enabled
+```
+
+All three lines must appear. If the first names a `package.json` other than
+`apps/mobile/package.json`, move the `op-sqlite` block to the file it names and rebuild —
+PowerSync's docs warn that monorepo hoisting can do this.
+
+**Do not use the grep the plan suggests.** `rg sqlcipher apps/mobile/android/*.gradle` matches
+nothing whether or not the flag is set, because the flag is consumed in op-sqlite's own
+`build.gradle` under `node_modules`. A green grep there is an unencrypted database that looks
+configured.
+
+**Verifying without an Android SDK.** The flags can be read out of the built APK instead, which
+is the merged artifact rather than the config that should produce it:
+
+```bash
+unzip -o -q <build>.apk "lib/arm64-v8a/libop-sqlite.so" -d ext
+grep -ac sqlite3_key ext/lib/arm64-v8a/libop-sqlite.so   # SQLCipher-only API
+grep -ac bm25        ext/lib/arm64-v8a/libop-sqlite.so   # FTS5-only
+grep -ac rtreecheck  ext/lib/arm64-v8a/libop-sqlite.so   # must be 0 — rtree is NOT enabled
+```
+
+The third line is what makes the first two mean something: a bare `fts5` substring survives in
+the SQLite amalgamation whether or not the feature is compiled, so a flag we deliberately left
+off has to come back zero from the same binary. Check all four ABIs — a per-arch divergence
+would ship an unencrypted database to some devices only.
+
+### PowerSync majors move together
+
+`@powersync/react-native`, `@powersync/common` (in both `apps/mobile` and `packages/sync`) and
+`@powersync/react` are pinned at `^2.0.0`. v2 is the major that switched from
+`@journeyapps/react-native-quick-sqlite` to `@op-engineering/op-sqlite`, which is what the
+`op-sqlite` block above configures.
+
+Dropping any one of them below 2 re-splits the `Schema` class identity: `AppSchema` is built in
+`packages/sync` and handed to a `PowerSyncDatabase` constructed in `apps/mobile`, and two
+physical copies of `@powersync/common` fail far from the cause. Check after any dependency
+change:
+
+```bash
+readlink -f apps/mobile/node_modules/@powersync/common
+readlink -f packages/sync/node_modules/@powersync/common
+# must be the SAME path
+```
+
+### Rebuild required after Stage 4
+
+`expo-dev-client`, `expo-file-system` and `expo-sharing` were all added during Stage 4, on top
+of the two native flags. Rebuild:
+
+```bash
+pnpm --filter @cortex/mobile exec eas build --profile development --platform android
+```
+
+`expo-dev-client` in particular is not optional — EAS refuses a `developmentClient` build
+without it.
+
+### Environment variables and the dev client
+
+A **development** build carries no JS: Metro serves it from your machine at runtime, so
+`EXPO_PUBLIC_*` come from your local `apps/mobile/.env` and EAS needs none set. A `preview` or
+`production` build inlines them at build time, so all four
+(`EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, `EXPO_PUBLIC_POWERSYNC_URL`,
+`EXPO_PUBLIC_API_URL`) **must** be configured on EAS before that build, or the app ships
+pointing at `undefined`.
