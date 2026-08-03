@@ -2339,6 +2339,24 @@ describe("the powersync publication — the layer beneath the sync rules", () =>
 });
 
 describe("sync rules — the same predicate against real data", () => {
+  // PRE-FLIGHT FINDING (2026-08-03) -- THE TWO TESTS BELOW CANNOT FAIL. DO NOT SHIP AS WRITTEN.
+  //
+  // `.eq("user_id", alice.id)` filters to alice, and the assertion then checks that every row
+  // is alice's. That is green with the sync rules deleted, with the publication widened to
+  // FOR ALL TABLES, with no rules file at all. It restates the query instead of testing it --
+  // and it is guarding the one property that stands between two users' notes.
+  //
+  // The dynamic half has to execute the RULE's predicate, not a hand-written one. Take the
+  // `- SELECT ... WHERE user_id = auth.user_id()` line out of `dataQueries` (already parsed
+  // above), substitute alice's id for `auth.user_id()`, execute THAT, and assert both
+  // directions: alice's seeded row IS present, and bob's seeded row is NOT. Both users are
+  // already seeded in beforeAll for exactly this. A missing WHERE clause then returns bob's
+  // row and the test fails, which is the whole point.
+  //
+  // Executing raw SQL needs a path that admin/PostgREST does not offer directly -- resolve it
+  // the same way `_test_publication_tables` is resolved above, and if that means a small
+  // test-only RPC, note that it has to exist on the hosted project too or the test silently
+  // skips there.
   // The rules' WHERE clause, executed as PostgREST would under a bucket. If this ever
   // returns another user's row, the bucket would ship it to the wrong device.
   it("returns only the owner's notes", async () => {
