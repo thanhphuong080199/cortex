@@ -51,31 +51,40 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
 
 ## Outstanding actions for the human
 
-**One open, from Task 17.** The two below were cleared 2026-08-03 and are kept so a later
-session does not re-raise them.
+**None. All three cleared**, recorded here so a later session does not re-raise them.
 
-0. **OPEN — rebuild the Android dev client, and read the Gradle output when you do.**
-   Two native flags now ride on `apps/mobile/package.json`'s `op-sqlite` block, and **neither
-   can be verified on this machine — there is no Android SDK installed**, so no Gradle
-   configure can run. They take effect at configure time and print their own confirmation:
+0. **Dev client rebuilt, and both native flags verified in the APK — done 2026-08-03.**
+   EAS build `37039bce-24ce-4f6e-9e9c-a8ef1125369d`, profile `development`, commit `72cbae0`,
+   finished. (`expo-dev-client` was missing and had to be added first — EAS refuses a
+   `developmentClient` build without it.)
 
-   ```
-   [OP-SQLITE] Detected op-sqlite config from package.json at: <path>
-   [OP-SQLITE] using sqlcipher.
-   [OP-SQLITE] FTS5 enabled
-   ```
+   There is no Android SDK on this machine, so the Gradle configure-time `[OP-SQLITE]` lines
+   could not be produced locally. Verified against the **built artifact** instead, which is
+   stronger than the log line and matches this branch's own rule about merged artifacts:
+   `libop-sqlite.so` was extracted from the APK and scanned for markers that exist only when
+   the feature is compiled in.
 
-   All three lines must appear. If the first names a different `package.json` than
-   `apps/mobile/package.json`, move the `op-sqlite` block to the file it names (PowerSync's
-   docs warn the monorepo hoisting can do this) and rebuild.
+   | Flag | Markers | Result |
+   | --- | --- | --- |
+   | `sqlcipher: true` | `sqlite3_key`, `sqlite3_rekey`, `PRAGMA cipher`, `cipher_version`, `sqlcipher_extra_init` | **present** |
+   | `fts5: true` | `bm25`, `detail=none`, `unindexed`, `fts5vocab`, `porter`, `trigram` | **present** |
 
-   **Do not accept the plan's check for this.** It says to grep `apps/mobile/android/*.gradle`
-   for `sqlcipher`; that matches nothing whether or not the flag is set, because the flag is
-   consumed in op-sqlite's own `build.gradle` under `node_modules`. A green grep there would be
-   an unencrypted database that looks configured — the exact failure the step exists to prevent.
+   **Negative controls make this conclusive rather than suggestive**, because a bare `fts5`
+   substring survives in the amalgamation whether or not the feature is compiled. The flags
+   deliberately NOT set are all absent from the same binary: `rtree` (`rtreecheck`, `rtree_i32`,
+   `RtreeNode`), sqlite-vec (`vec0`, `vec_distance`), CR-SQLite (`crsql_`) — every one at zero.
+   So the config genuinely differentiates, and `fts5`'s markers are there because it was enabled.
+   `unindexed` in particular is the exact column option Task 19's
+   `fts5(id UNINDEXED, content)` needs.
 
-   Missing `sqlcipher` means the local corpus is **unencrypted**. Missing `fts5` means Task 19's
-   `notes_fts` fails at runtime with "no such module: fts5".
+   **All four ABIs checked, not just one** — `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64` are
+   identical on all three properties. A per-arch divergence would ship an unencrypted database
+   to some devices only.
+
+   For the record, **do not accept the plan's check for this**. It says to grep
+   `apps/mobile/android/*.gradle` for `sqlcipher`; that matches nothing whether or not the flag
+   is set, because the flag is consumed in op-sqlite's own `build.gradle` under `node_modules`.
+   A green grep there would be an unencrypted database that looks configured.
 
 1. **`supabase db push` for `00016_powersync_publication.sql` — done.** `00001`–`00016` are
    local == remote. (The CLI is a devDependency: `npx supabase`, not `supabase`.) The migration's
@@ -123,8 +132,9 @@ change — build, typecheck, lint and its 4 tests pass unchanged on v2.
 `-DSQLITE_ENABLE_FTS5=1` when that flag is set (`android/build.gradle`), so without it
 Task 19's `CREATE VIRTUAL TABLE notes_fts USING fts5(...)` fails at runtime with "no such
 module: fts5". It is a **native** flag — discovering it at Task 19 would cost a second
-dev-client rebuild, so it went in here, with the rebuild this task already needs.
-Neither it nor `sqlcipher` is verified yet; see "Outstanding actions" item 0.
+dev-client rebuild, so it went in here, with the rebuild this task already needs. **Both it and
+`sqlcipher` are now verified in the built APK** — see "Outstanding actions" item 0 for the
+marker evidence and the negative controls.
 
 **`dbLocation` is pinned to op-sqlite's `ANDROID_DATABASE_PATH`, not left to default.** The
 plan said to resolve the path against the installed package, and doing that revealed the path
@@ -494,9 +504,9 @@ Three facts that cost real time to establish, all now in `docs/deploy.md`:
   `noteFiltersToSql`/`toSqlitePlaceholders` from shared, never from `@cortex/core`.
 - **Task 19 must create `notes_fts` as `fts5(id UNINDEXED, content)`** and keep it in step with
   `notes`. The clause `noteFiltersToSql` emits selects `id` from it; a rowid-keyed table returns
-  nothing for every search without erroring. See Stage 3 above. The **native** half is already
-  done — Task 17 set `fts5: true` — but it is unverified until the dev-client rebuild, so if
-  `notes_fts` fails with "no such module: fts5", that is the flag, not the SQL.
+  nothing for every search without erroring. See Stage 3 above. The **native** half is done and
+  verified in the built APK — Task 17 set `fts5: true`, and `unindexed`/`bm25`/`fts5vocab` are
+  present in `libop-sqlite.so` on all four ABIs. A failure here is the SQL, not the flag.
 - **`supabase migration up`, not `db reset`.** A reset breaks Kong→auth routing with stale
   Docker DNS, which surfaces as `AuthRetryableFetchError` and reads like a code regression. If it
   happens, restart the kong container rather than the stack.
