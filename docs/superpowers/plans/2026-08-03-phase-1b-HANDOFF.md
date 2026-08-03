@@ -17,23 +17,29 @@ committed copy of what matters.
 | 1 — server + shared | 1–7 | **Complete.** Every task reviewed clean. Shipped to production. |
 | 2 — security baseline | 8–13 | **Complete.** All six tasks done and reviewed. |
 | 3 — shared filters | 14–16 | **Complete.** `282666d`, `b824a2a`, `083ab6a`. None independently reviewed. |
-| 4 — mobile parity | 17–19 | **Complete** (`c6757f9`, `1f900ce`, `9cfe51b`), none independently reviewed. |
-| 4 — mobile parity | 20–23 | **Not started. Resume here.** |
+| 4 — mobile parity | 17–20 | **Complete** (`c6757f9`, `1f900ce`, `9cfe51b`, `d93e324`), none independently reviewed. |
+| 4 — mobile parity | 21–23 | **Not started. Resume here.** |
 
-### Resume here: Task 20
+### Resume here: Task 21
 
-Note editor, archive and tags. Read "Stage 4 — what shipped" below first — Tasks 17–19 changed
-the PowerSync major, the local timestamp format, and how the FTS index is maintained.
+Mood/energy check-in. Checkins are insert-or-delete only on the sync router — a PATCH is
+rejected `validation` — so the screen must create a new row rather than edit one.
 
-**Task 20 inherits the `note_edit_base` contract.** Task 17's connector reads
-`base_updated_at` out of that local-only table and sends it on a notes PATCH; Task 20 is what
-writes it. `syncOp.base_updated_at` is `z.iso.datetime()`, so the value must be the ISO form
-Task 18 settled on — `notes.updated_at` as replication delivers it, copied verbatim.
+**Every local write must stamp its timestamps through `NOW_ISO` from `src/lib/sql.ts`.** Tasks
+18 and 20 both had to fix `datetime('now')` in the plan's SQL; assume Tasks 21–23 carry it too.
 
-**Tasks 18 and 19 have not been verified on a device.** Capture online, capture in airplane
-mode, confirm both reach web; then three notes in the list, view switching, and a search for a
-word in one body only. Everything provable without a device is proven. The existing dev client
-(EAS `37039bce`) still works for both — neither task added a native module.
+**Tasks 18–20 have not been verified on a device.** The accumulated checklist:
+
+1. Capture online, then in airplane mode; both appear instantly; both reach web after reconnect.
+2. Three notes in the list, view switching, search for a word in one body only.
+3. Edit a note on web, wait for sync, search the OLD word — must return nothing (the
+   replace-safe FTS trigger).
+4. **The conflict run, which nothing else can prove:** open a note, enable airplane mode, edit
+   the body. Edit the same note differently on web and save. Reconnect. Expect TWO notes — the
+   web body on the original, the phone body as a new inbox note.
+
+The existing dev client (EAS `37039bce`) still covers all of it — no task since has added a
+native module.
 
 ### Verification state — the full gate has been run
 
@@ -120,6 +126,48 @@ Docker Desktop is frequently down on this machine. When it is, `@cortex/db`, `@c
 ---
 
 ## Stage 4 — what shipped
+
+### Task 20 — note editor and the conflict base (commit `d93e324`)
+
+**The plan captures the conflict base at the wrong moment, and the failure is silent.** It
+calls `recordEditBase` inside the first debounced save, passing `note.updated_at` as the row
+reads *then*. The editor seeds its text once and then leaves it alone, so a change arriving
+from the server mid-session advances `notes.updated_at` while the text on screen still reflects
+the OLDER body. Recording that newer value tells the server the user edited the current
+version — its `moved` check finds nothing, no conflict copy is written, and the stale-based
+edit overwrites the newer one. That is precisely the outcome §6.2 exists to prevent, arriving
+through the mechanism meant to prevent it.
+
+The base is now captured in a ref at the instant the content is seeded. The `note_edit_base`
+row is still only written on first save: writing it on open would leave a stale base behind for
+every note merely opened, and the connector only clears bases after an upload that actually
+happened.
+
+**`datetime('now')` was in all three mutations** — the Task 18 bug again, and worse here. This
+column becomes the NEXT session's `base_updated_at`, which the server validates as
+`z.iso.datetime()`, so the space-separated form is an upload **rejected outright** rather than
+a sorting oddity. The expression now lives once in `src/lib/sql.ts` as `NOW_ISO`, with
+`capture.ts` repointed at it. Two tasks in a row shipped this bug from the plan; assume
+Tasks 21–23 do too.
+
+**Tags are absent, and that is the plan's own inconsistency, not an omission here.** The task
+is titled "Note editor, archive and tags" but no step implements any tag UI, its Files list has
+nothing tag-related, and the plan's phase summary describes Stage 4 as "capture, list, editor,
+check-in, media log, export". The note list's `tag` filter works; nothing on mobile assigns a
+tag. **Decide whether phase 1b needs mobile tag assignment before the Task 23 gate** — if it
+does, it is unplanned work, not a fix.
+
+**A limitation to carry: the `sessionBase` fix cannot be unit-tested.** It lives in
+`note-editor.tsx`, and importing an RN component under `environment: "node"` dies with a Rollup
+Flow parse error. `recordEditBase` documents the contract and its own tests are thorough, but
+nothing proves the caller passes the seeded value rather than the current one. **Step 5's
+airplane-mode conflict run is the only thing that can**, which is why it is first on the device
+checklist above.
+
+11 new tests on real SQLite. The plan's `datetime('now')` fails 3; overwriting the base,
+guarding on "any base exists" rather than this note's, a trash that skips `updated_at`, and a
+hard delete each fail their own.
+Gate: **26/26, 0 cached, 453 tests**, Docker up.
 
 ### Task 19 — note list and the local FTS index (commit `9cfe51b`)
 
@@ -660,6 +708,11 @@ Each was judged non-blocking at the time and ledgered rather than fixed:
   now slightly out of step.
 - `secure-storage.ts` — no test covers `getItem` racing a concurrent `setItem` on the same
   key; the per-key queue covers it structurally but nothing proves it.
+- **One pending edit base is attached to every queued notes PATCH for that note.** The
+  connector keys bases by note id, so if a body edit and a lifecycle change are both queued for
+  one note, the archive op carries the body's base too and can manufacture a second conflict
+  copy for a change that never touched the body. Narrow (it needs both queued before an upload)
+  but real; the fix is probably to attach the base only to ops whose data contains `content`.
 - **A sync op the server rejects inside a 200 is now logged, but still lost.** The router
   applies ops independently and reports casualties in `failed`; the batch completes either way,
   so the op leaves the device's queue while its row stays in local SQLite and never reaches the
