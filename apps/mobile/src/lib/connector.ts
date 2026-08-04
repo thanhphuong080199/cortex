@@ -80,6 +80,13 @@ export class ApiConnector implements PowerSyncBackendConnector {
       // saw. Treated as no base, so that one stale edit applies as last-write-wins instead of
       // manufacturing a conflict copy against a body that was never on screen.
       if (row?.base_content != null) bases.set(entry.id, row.base_content);
+      // Whether a base gets attached is otherwise invisible on device: the row read here is the
+      // one piece of state that decides "conflict copy" vs "silent last-write-wins" for this op,
+      // and nothing else in this path logs anything at all.
+      console.log(
+        `[powersync] note PATCH ${entry.id}: base_row=${row ? "found" : "none"} base_content=` +
+          (row === null ? "n/a" : row.base_content === null ? "null (stale schema)" : "present"),
+      );
     }
 
     const {

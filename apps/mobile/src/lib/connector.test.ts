@@ -195,6 +195,48 @@ describe("ApiConnector.uploadData", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  /**
+   * Whether a base attaches is otherwise invisible on device -- the read here is the one piece
+   * of state that decides "conflict copy" vs "silent last-write-wins" for an op, and until now
+   * nothing on this path logged anything. One line per outcome, so a device log can distinguish
+   * "no base was ever recorded" from "a base was recorded and read correctly".
+   */
+  describe("logs which of the three base states a note PATCH found", () => {
+    it("present", async () => {
+      const db = database([patch]);
+      getOptional.mockResolvedValueOnce({ base_content: "original" });
+      const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await new ApiConnector().uploadData(db);
+
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining(`${noteId}: base_row=found base_content=present`));
+      logged.mockRestore();
+    });
+
+    it("no row at all", async () => {
+      const db = database([patch]);
+      const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await new ApiConnector().uploadData(db);
+
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining(`${noteId}: base_row=none base_content=n/a`));
+      logged.mockRestore();
+    });
+
+    it("a row left behind by the base_updated_at build", async () => {
+      const db = database([patch]);
+      getOptional.mockResolvedValueOnce({ base_content: null });
+      const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await new ApiConnector().uploadData(db);
+
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringContaining(`${noteId}: base_row=found base_content=null (stale schema)`),
+      );
+      logged.mockRestore();
+    });
+  });
+
   it("sends no base for a row left behind by the base_updated_at build", async () => {
     // note_edit_base is local-only, so an upgrade does not migrate it: rows written before the
     // column was renamed read back with base_content null. Null is not a body anyone edited --
