@@ -46,6 +46,40 @@ image locally before redeploying.
 `CoreErrorFilter`'s catch-all. A too-large body answered 500, which the sync connector reads
 as transient and retries forever. Both are fixed in `0c7cf42`.
 
+### 2026-08-04 — the app could not bundle, and had not been able to since ~Task 13
+
+The first EAS preview build failed in the Bundle JavaScript phase. Reproduced locally with
+`expo export`; **two independent causes**, and between them apps/mobile has been unbundlable
+for most of this branch while typecheck, lint and 159 tests stayed green.
+
+1. **`./x.js` imports.** Ten of them across eight files. The suffix is REQUIRED in the packages
+   that compile to `dist/` under NodeNext, so it looks correct, and both tsc and vitest resolve
+   it. Metro looks for a file of that literal name and fails. The `.tsx` screens already used
+   the extensionless form, which is why the inconsistency never showed.
+2. **`dist/` is not in the EAS archive.** `@cortex/shared` and `@cortex/sync` resolve through
+   `./dist/index.js`; `dist/` is gitignored and EAS archives from git. Locally Metro only
+   succeeds because dist/ happens to be present from the last turbo run. Fixed with an
+   `eas-build-post-install` hook.
+
+**Treat "the device checklist has never been run" as the correct reading of this branch.** It
+was not possible to run it. Every device-only claim in this document — the conflict run, the
+security table, all of it — is still entirely unverified, and now for a second, sharper reason
+than "nobody got round to it".
+
+**The gate now bundles** (`turbo run bundle`, wired into ci.yml, `expo export`, 1565 modules).
+Deliberately not named `build`: turbo gives typecheck/test a dependency on the package's own
+build, so that name would bundle the whole app before every mobile test run. Fixed in `2817d92`.
+
+**A preview APK now exists and is the right thing to test on.** EAS build
+`9f55d4d9-7f9d-49ec-83d1-0726e1483a31`, profile `preview`, gitCommit `2817d925`, FINISHED.
+It embeds the JS bundle, so it needs no Metro and no computer — which also means airplane mode
+is genuinely offline rather than "offline plus a dead bundler connection". The four
+`EXPO_PUBLIC_*` variables are now set in the EAS `preview` environment (`POWERSYNC_URL` and
+`API_URL` were missing; without them the app would have built fine and then synced nothing).
+
+Prefer this APK over the dev client for the checklist. Keep dev client `f603e36f` only for
+iterating on code.
+
 ### Device checklist — what round 1 changed about it
 
 **One prerequisite left.**
