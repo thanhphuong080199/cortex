@@ -147,19 +147,42 @@ async function applyNoteOp(
       domainMeta,
     });
   } else {
+    // `deleted_at` is a PATCH field, not just a DELETE op. The device trashes and restores with
+    // an UPDATE (`TRASH_NOTE_SQL` / `RESTORE_NOTE_SQL`), and PowerSync emits every UPDATE as a
+    // PATCH -- so trash arrives here, not in the DELETE branch above. Left out of `patch` it was
+    // dropped silently: the update ran with an empty body, the op still reported applied, and
+    // the next sync delivered the still-live row back to the phone. The note the user trashed
+    // reappeared, and nothing anywhere reported a problem.
+    //
+    // Routed to softDelete/restore rather than patched through: both carry the guard that makes
+    // them idempotent-ish (`is deleted_at null` / `not is null`) and softDelete is what the
+    // DELETE op already uses, so the two paths cannot drift.
+    // A restore runs BEFORE the patch and a soft delete AFTER it, because `update` only matches
+    // live rows: patch-then-restore leaves the edit rejected as not_found, and delete-then-patch
+    // does the same. Ordering it this way makes the row live for exactly as long as the patch
+    // needs it, in both directions.
+    if (data.deleted_at === null) await notes.restore(op.id);
+
     const patch = {
       ...(data.content !== undefined ? { content: String(data.content) } : {}),
       ...(data.title !== undefined ? { title: data.title as string | null } : {}),
       ...(data.lifecycle !== undefined ? { lifecycle: data.lifecycle as never } : {}),
       ...(data.domain !== undefined ? { domain: data.domain as never } : {}),
     };
-    const r = await notes.updateWithConflictCopy(op.id, patch, op.base_updated_at);
-    if (r.conflictCopy) {
-      result.conflict_copies.push({ op_id: op.op_id, note_id: r.conflictCopy.id });
-      // The copy itself is never dropped (that flag exists precisely so it isn't), but a
-      // failed link would otherwise vanish from this response with nothing to notice it by.
-      if (r.linkFailed) result.link_failures.push(op.op_id);
+    // An UPDATE that only touched deleted_at leaves nothing to patch, and `update()` rejects an
+    // empty body -- so the trash op would fail on the work it had just done. Skipped rather
+    // than returned, because the media resolution below still has to run.
+    if (Object.keys(patch).length > 0) {
+      const r = await notes.updateWithConflictCopy(op.id, patch, op.base_updated_at);
+      if (r.conflictCopy) {
+        result.conflict_copies.push({ op_id: op.op_id, note_id: r.conflictCopy.id });
+        // The copy itself is never dropped (that flag exists precisely so it isn't), but a
+        // failed link would otherwise vanish from this response with nothing to notice it by.
+        if (r.linkFailed) result.link_failures.push(op.op_id);
+      }
     }
+
+    if (data.deleted_at !== undefined && data.deleted_at !== null) await notes.softDelete(op.id);
   }
 
   // Offline media logs arrive as ordinary notes carrying pending_item; identity is

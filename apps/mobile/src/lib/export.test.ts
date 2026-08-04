@@ -2,7 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const deleted: string[] = [];
 let cacheHas = new Set<string>();
-const downloadFileAsync = vi.fn(async () => ({ uri: "file:///cache/cortex-export.zip" }));
+// Sequence, not just call counts. `wipe.test.ts` uses the same pattern: several of the
+// properties here ("clears the stale file BEFORE downloading over it") are orderings, and an
+// assertion that only counts calls holds just as well for the order that destroys the download.
+const order: string[] = [];
+const downloadFileAsync = vi.fn(async () => {
+  order.push("download");
+  return { uri: "file:///cache/cortex-export.zip" };
+});
 
 vi.mock("expo-file-system", () => ({
   Paths: { cache: "/cache/" },
@@ -19,6 +26,7 @@ vi.mock("expo-file-system", () => ({
       return cacheHas.has(this.path);
     }
     delete() {
+      order.push("delete");
       deleted.push(this.path);
       cacheHas.delete(this.path);
     }
@@ -35,9 +43,13 @@ const deps = { token: "jwt", apiUrl: "https://api.test" };
 
 beforeEach(() => {
   deleted.length = 0;
+  order.length = 0;
   cacheHas = new Set();
   downloadFileAsync.mockClear();
-  downloadFileAsync.mockResolvedValue({ uri: "file:///cache/cortex-export.zip" });
+  downloadFileAsync.mockImplementation(async () => {
+    order.push("download");
+    return { uri: "file:///cache/cortex-export.zip" };
+  });
   shareAsync.mockClear();
   isAvailableAsync.mockClear();
   isAvailableAsync.mockResolvedValue(true);
@@ -56,14 +68,30 @@ describe("exportArchive", () => {
   it("sends the user's token and downloads to the cache directory", async () => {
     await exportArchive(deps);
 
-    const [url, , options] = downloadFileAsync.mock.calls[0] as unknown as [
+    const [url, destination, options] = downloadFileAsync.mock.calls[0] as unknown as [
       string,
-      unknown,
+      { path?: string; uri?: string },
       { headers: Record<string, string> },
     ];
     expect(url).toBe("https://api.test/export");
     // Without the header the endpoint answers 401 and the "archive" is an error body.
     expect(options.headers.Authorization).toBe("Bearer jwt");
+    // The destination was previously skipped by an empty hole in this destructure, so the test
+    // named "downloads to the cache directory" never looked at the directory. A regression to
+    // Paths.document -- the trade export.ts spends a paragraph rejecting, because the file
+    // exists only to be handed to another app -- passed it unchanged.
+    expect(destination.path).toBe("/cache/");
+  });
+
+  it("deletes under the same name the server will send", () => {
+    // The download target is the cache DIRECTORY; the filename comes from the server's
+    // Content-Disposition (`cortex-export-<date>.zip`, export.controller.ts:15). So the
+    // same-day cleanup below only clears the right file while these two agree, and both
+    // derive the date from toISOString() in UTC. Pinned here because the coupling is
+    // invisible at either site on its own.
+    expect(exportFilename(new Date("2026-08-03T23:30:00.000Z"))).toBe(
+      "cortex-export-2026-08-03.zip",
+    );
   });
 
   it("hands the downloaded file to the share sheet", async () => {
@@ -84,6 +112,10 @@ describe("exportArchive", () => {
     // A second export on the same date reuses the filename; left in place it makes the
     // download fail rather than replace it.
     expect(deleted).toContain(`/cache/${exportFilename()}`);
+    // BEFORE, which is the whole point of the test's name: a delete moved after the download
+    // erases the file just written, and passed this test while doing it.
+    expect(order.indexOf("delete")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("delete")).toBeLessThan(order.indexOf("download"));
   });
 
   it("refuses to export when signed out", async () => {

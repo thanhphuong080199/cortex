@@ -129,8 +129,19 @@ describe("applyNoteFilters against the database", () => {
       { view: "inbox" },
     );
     if (error) throw error;
-    const rows = data as unknown as { updated_at: string }[];
-    const stamps = rows.map((r) => r.updated_at);
-    expect(stamps).toEqual([...stamps].sort().reverse());
+    const rows = data as unknown as { id: string; updated_at: string }[];
+
+    // Asserting `stamps === [...stamps].sort().reverse()` derives the expectation from the
+    // answer, so it says only "is sorted" -- vacuously true on 0 or 1 rows, and true on ties,
+    // which two notes created back-to-back can easily produce. This is the ONE property the
+    // equivalence suite cannot cross-check (both sides sort ids before comparing, and
+    // noteFiltersToSql emits no ORDER BY at all), so it has to be exact here.
+    //
+    // `inboxPlain` is created after `inboxMedia` and neither is updated afterwards, so newest
+    // first is an exact, known sequence.
+    expect(rows.map((r) => r.id)).toEqual([ids.inboxPlain, ids.inboxMedia]);
+    // And the stamps must genuinely differ: on a tie the order is arbitrary, so the assertion
+    // above would be pinning luck. Better to fail loudly than to flake later.
+    expect(rows[0]!.updated_at).not.toBe(rows[1]!.updated_at);
   });
 });

@@ -29,7 +29,12 @@ vi.mock("expo-file-system", () => ({
 
 vi.mock("@op-engineering/op-sqlite", () => ({ ANDROID_DATABASE_PATH: "/data/db/" }));
 
-const connect = vi.fn(async () => {});
+// Records into `order` as well as counting calls. Without this the ordering test below asserts
+// only that `connect` happened at all, and passes just as well with connect BEFORE the index is
+// built -- which is the sequence it exists to forbid.
+const connect = vi.fn(async () => {
+  order.push("connect");
+});
 vi.mock("@powersync/react-native", () => ({
   PowerSyncDatabase: class {
     constructor(readonly options: unknown) {
@@ -124,6 +129,7 @@ describe("initPowerSync", () => {
       "delete:/data/db/cortex.db-shm",
       "construct",
       "fts",
+      "connect",
     ]);
   });
 
@@ -134,7 +140,7 @@ describe("initPowerSync", () => {
     const { wiped } = await mod.initPowerSync();
 
     expect(wiped).toBe(false);
-    expect(order).toEqual(["construct", "fts"]);
+    expect(order).toEqual(["construct", "fts", "connect"]);
   });
 
   it("never deletes anything on a first run", async () => {
@@ -209,7 +215,10 @@ describe("initPowerSync", () => {
     // triggers on it yet -- indexed only by the NEXT launch's rebuild, so search silently
     // misses everything that arrived in between.
     expect(setupNotesFts).toHaveBeenCalledWith(db);
-    expect(order).toEqual(["construct", "fts"]);
+    // `connect` has to be IN the sequence, not merely counted: asserting ["construct","fts"]
+    // plus a call count holds identically when connect runs first, so the test named after the
+    // ordering was the one thing not asserting it.
+    expect(order).toEqual(["construct", "fts", "connect"]);
     expect(connect).toHaveBeenCalledOnce();
   });
 });

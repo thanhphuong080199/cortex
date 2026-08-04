@@ -148,11 +148,11 @@ describe("ApiConnector.uploadData", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it("discards the batch on a 4xx, because retrying it forever would wedge the queue", async () => {
+  it("discards the batch on a 400, because retrying it forever would wedge the queue", async () => {
     const db = database([patch]);
     fetchMock.mockResolvedValueOnce({ ok: false, status: 400 });
 
-    await expect(new ApiConnector().uploadData(db)).rejects.toThrow("rejected (400)");
+    await expect(new ApiConnector().uploadData(db)).rejects.toThrow("malformed (400)");
     expect(complete).toHaveBeenCalledOnce();
   });
 
@@ -204,6 +204,47 @@ describe("ApiConnector.uploadData", () => {
       [{ op_id: "1", kind: "validation" }],
     );
     logged.mockRestore();
+  });
+
+  /**
+   * `complete()` DISCARDS the user's offline writes, so which statuses reach it is the highest
+   * -consequence decision in this file. The whole 4xx range used to, which meant a batch too
+   * large for the server's body limit, an access token that expired in flight, or a rate limit
+   * each destroyed the queue -- and because PowerSync calls uploadData again straight away, one
+   * global cause walked the entire backlog to zero in seconds.
+   */
+  describe("only a malformed batch may be discarded", () => {
+    for (const status of [401, 403, 408, 413, 429]) {
+      it(`retries rather than discarding on ${status}`, async () => {
+        const db = database([patch]);
+        fetchMock.mockResolvedValueOnce({ ok: false, status, json: async () => ({}) });
+
+        await expect(new ApiConnector().uploadData(db)).rejects.toThrow(String(status));
+        // Unacknowledged is what makes PowerSync retry with backoff. Anything else here is
+        // the user's offline work, deleted.
+        expect(complete).not.toHaveBeenCalled();
+      });
+    }
+
+    for (const status of [400, 422]) {
+      it(`discards on ${status}, because the same bytes will never be accepted`, async () => {
+        const db = database([patch]);
+        fetchMock.mockResolvedValueOnce({ ok: false, status, json: async () => ({}) });
+
+        await expect(new ApiConnector().uploadData(db)).rejects.toThrow(String(status));
+        // The other half of the trade: a genuinely malformed batch must leave the queue, or
+        // every write behind it is stuck forever.
+        expect(complete).toHaveBeenCalledOnce();
+      });
+    }
+
+    it("leaves the batch alone on a 5xx", async () => {
+      const db = database([patch]);
+      fetchMock.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) });
+
+      await expect(new ApiConnector().uploadData(db)).rejects.toThrow("503");
+      expect(complete).not.toHaveBeenCalled();
+    });
   });
 
   it("still completes a batch whose response body cannot be read", async () => {

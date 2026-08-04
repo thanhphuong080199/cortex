@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   NOTE_VIEWS,
+  applyNoteFilters,
   matchesFilters,
   noteSelect,
   parseNoteFilters,
@@ -33,7 +34,9 @@ describe("parseNoteFilters", () => {
     expect(parseNoteFilters({ q: "   " }).q).toBeUndefined();
   });
   it("trims and drops a whitespace-only tag", () => {
-    expect(parseNoteFilters({ tag: "  t1 " }).tag).toBe("t1");
+    // A real uuid, because the tag is now validated as one -- see the dedicated block below.
+    const tag = "6f1a2b3c-4d5e-4f60-8a1b-2c3d4e5f6071";
+    expect(parseNoteFilters({ tag: `  ${tag} ` }).tag).toBe(tag);
     expect(parseNoteFilters({ tag: "   " }).tag).toBeUndefined();
   });
   it("omits absent keys rather than setting them undefined", () => {
@@ -105,6 +108,64 @@ describe("requiresRefetch", () => {
     // issue-log E5's other half.
     expect(requiresRefetch({ view: "inbox", q: "pricing" })).toBe(true);
     expect(requiresRefetch({ view: "inbox", tag: "t1" })).toBe(true);
+  });
+});
+
+describe("parseNoteFilters drops a tag that is not a uuid", () => {
+  const uuid = "6f1a2b3c-4d5e-4f60-8a1b-2c3d4e5f6071";
+
+  it("keeps a real uuid", () => {
+    expect(parseNoteFilters({ tag: uuid })).toEqual({ view: "inbox", tag: uuid });
+  });
+
+  it("drops one that is not, rather than passing it to the database", () => {
+    // `note_tags.tag_id` is a uuid column, so PostgREST answers `?tag=abc` with 22P02 and the
+    // whole page renders its error boundary, while SQLite silently returns nothing. Dropping
+    // it is the only answer that makes both show the same thing.
+    expect(parseNoteFilters({ tag: "abc" })).toEqual({ view: "inbox" });
+    expect(parseNoteFilters({ tag: "'; drop table notes; --" })).toEqual({ view: "inbox" });
+    expect(parseNoteFilters({ tag: `${uuid}x` })).toEqual({ view: "inbox" });
+  });
+
+  it("keeps the view it was asked for while dropping the bad tag", () => {
+    // The failure mode to avoid is throwing the whole filter away and silently showing inbox.
+    expect(parseNoteFilters({ view: "trash", tag: "abc" })).toEqual({ view: "trash" });
+  });
+});
+
+describe("applyNoteFilters and noteFiltersToSql agree about an empty q", () => {
+  it("neither engine searches when the query is only whitespace", () => {
+    // Unguarded these diverge on identical input: an empty tsquery matches zero rows while the
+    // SQLite side drops its clause and shows the view. Same NoteFilters, two answers.
+    const calls: string[] = [];
+    const builder = {
+      is: () => builder, not: () => builder, in: () => builder, eq: () => builder,
+      order: () => builder,
+      textSearch: () => {
+        calls.push("textSearch");
+        return builder;
+      },
+    };
+    applyNoteFilters(builder, { view: "inbox", q: "   " });
+
+    expect(calls).toEqual([]);
+    expect(noteFiltersToSql({ view: "inbox", q: "   " }).where).not.toContain("notes_fts");
+  });
+
+  it("both still search for a real query", () => {
+    const calls: string[] = [];
+    const builder = {
+      is: () => builder, not: () => builder, in: () => builder, eq: () => builder,
+      order: () => builder,
+      textSearch: () => {
+        calls.push("textSearch");
+        return builder;
+      },
+    };
+    applyNoteFilters(builder, { view: "inbox", q: "pricing" });
+
+    expect(calls).toEqual(["textSearch"]);
+    expect(noteFiltersToSql({ view: "inbox", q: "pricing" }).where).toContain("notes_fts");
   });
 });
 

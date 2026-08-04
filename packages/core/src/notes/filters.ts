@@ -13,6 +13,7 @@ export {
   noteSelect,
   parseNoteFilters,
   requiresRefetch,
+  toFtsQuery,
   toSqlitePlaceholders,
   type NoteFilters,
   type NoteView,

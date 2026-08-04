@@ -1,5 +1,6 @@
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import { AppModule } from "./app.module";
 import { CoreErrorFilter } from "./core-error.filter";
 import { parseApiEnv } from "./env";
@@ -19,7 +20,15 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  // Express defaults the JSON body to 100 kB, and a full sync batch is bigger than that:
+  // SYNC_UPLOAD_MAX_OPS is 500, whose envelope alone is ~75 kB before a single note's text.
+  // A phone coming back from a day offline therefore hit 413 on its first upload -- and a 413
+  // is indistinguishable to the client from any other rejection, so the batch was at risk of
+  // being dropped rather than retried. The connector now retries it; this is what makes the
+  // retry succeed instead of looping.
+  app.useBodyParser("json", { limit: "10mb" });
 
   // Maps packages/core's CoreError to 404/409/500 so PostgREST codes never reach
   // clients (spec §6). The e2e suites register the same filter on their test app.

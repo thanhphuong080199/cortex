@@ -131,6 +131,11 @@ describe("the editor's local mutations", () => {
 
     expect(note().lifecycle).toBe("archived");
     expect(note().updated_at).toMatch(ISO);
+    // The fixture's own updated_at is already ISO, so the regex above holds even if the
+    // statement stamped nothing at all. Its two siblings carry this assertion; this one did
+    // not, so a `SET lifecycle = ?` that dropped updated_at -- a change the server cannot
+    // order against any other -- shipped green.
+    expect(note().updated_at).not.toBe(T0);
   });
 
   it("soft-deletes rather than removing the row", async () => {

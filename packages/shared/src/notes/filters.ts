@@ -31,6 +31,9 @@ export interface NoteFilters {
 const one = (v: string | string[] | undefined): string | undefined =>
   Array.isArray(v) ? v[0] : v;
 
+/** Any RFC 4122 version; the database generates v4, but rejecting a real id is the worse error. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 /** Narrows untrusted search params. Anything unrecognised is dropped, never passed on. */
 export function parseNoteFilters(
   params: Record<string, string | string[] | undefined>,
@@ -41,7 +44,13 @@ export function parseNoteFilters(
     : "inbox";
 
   const q = one(params.q)?.trim();
-  const tag = one(params.tag)?.trim();
+  // `tag` is validated as a uuid, not merely trimmed, because the two appliers disagree about
+  // what a malformed one means and neither answer is acceptable. `note_tags.tag_id` is a uuid
+  // (00003), so PostgREST answers `/?tag=abc` with 22P02 and the whole page renders its error
+  // boundary, while SQLite compares a TEXT column and quietly returns nothing. Dropping it here
+  // is what the docstring above already promises, and makes both show the unfiltered view.
+  const rawTag = one(params.tag)?.trim();
+  const tag = rawTag && UUID.test(rawTag) ? rawTag : undefined;
   const rawDomain = one(params.domain);
   const domain = (noteDomain.options as readonly string[]).includes(rawDomain ?? "")
     ? rawDomain
@@ -90,7 +99,10 @@ export function applyNoteFilters<T>(query: T, f: NoteFilters): T {
   //   to_tsvector('english', content_text) @@ websearch_to_tsquery('english', q)
   // which matches notes_fts_idx. Drop it and PostgREST emits the bare form, which
   // resolves to the default-config operator, matches no index, and silently seq-scans.
-  if (f.q) q = q.textSearch("content_text", f.q, { type: "websearch", config: "english" });
+  // Guarded on the TRIMMED value so this agrees with noteFiltersToSql, which drops its clause
+  // when the query escapes to nothing. Unguarded the two diverge on the same input: an empty
+  // tsquery matches zero rows, while SQLite would show the whole view.
+  if (f.q?.trim()) q = q.textSearch("content_text", f.q, { type: "websearch", config: "english" });
   if (f.tag) q = q.eq("note_tags.tag_id", f.tag).is("note_tags.deleted_at", null);
   // Backed by notes_user_domain_idx. matchesFilters applies the same narrowing to
   // Realtime rows, so a live-patched note can never disagree with what a reload shows.

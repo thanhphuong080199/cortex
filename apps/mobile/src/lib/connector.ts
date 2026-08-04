@@ -90,12 +90,25 @@ export class ApiConnector implements PowerSyncBackendConnector {
     });
 
     if (!res.ok) {
-      // 4xx is a permanent client-side problem: retrying forever would wedge the queue.
-      // 5xx and network failures are transient -- leave the batch unacknowledged so
-      // PowerSync retries with backoff.
-      if (res.status >= 400 && res.status < 500) {
+      // Completing a batch DISCARDS the user's offline writes, so only a status that retrying
+      // genuinely cannot fix may do it. `4xx` as a whole is not that class:
+      //
+      //   401  the access token expired between getSession() and the guard's verify. The next
+      //        attempt carries a refreshed one.
+      //   408  a timeout.
+      //   413  the batch exceeded the server's body limit. Retrying the SAME batch does not
+      //        help, but discarding it is far worse -- and the remedy (a smaller cap, a bigger
+      //        limit) is a deploy, after which the queued writes must still be there.
+      //   429  rate limited, explicitly a "try later".
+      //
+      // and PowerSync calls uploadData again immediately after this returns, so any global
+      // cause walked the entire queue to zero, one batch at a time, in seconds.
+      //
+      // 400 and 422 are the malformed-payload answers: the same bytes will be rejected forever,
+      // so those alone are dropped rather than wedging the queue behind them.
+      if (res.status === 400 || res.status === 422) {
         await batch.complete();
-        throw new Error(`sync upload rejected (${res.status})`);
+        throw new Error(`sync upload rejected as malformed (${res.status})`);
       }
       throw new Error(`sync upload failed (${res.status})`);
     }

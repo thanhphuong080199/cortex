@@ -310,6 +310,79 @@ describe("POST /sync/upload", () => {
     expect(data!.deleted_at).toBeNull();
   });
 
+  /**
+   * The notes half of the same rule, which had no coverage at all -- and unlike checkins, the
+   * notes PATCH branch did not reject `deleted_at`, it silently ignored it.
+   *
+   * Mobile trashes with `UPDATE notes SET deleted_at = ...` (TRASH_NOTE_SQL), so trash reaches
+   * the server as a PATCH, never as a DELETE op. The patch was built from content/title/
+   * lifecycle/domain only, so `deleted_at` was dropped: the server row stayed live, replication
+   * delivered it back, and the note the user trashed reappeared on the phone with nothing
+   * reported anywhere.
+   */
+  it("soft-deletes on a notes PATCH carrying deleted_at, which is how mobile trashes", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "to be trashed" } }],
+    }).expect(201);
+
+    const res = await post(alice.token, {
+      ops: [{ op_id: "2", op: "PATCH", table: "notes", id,
+              data: { deleted_at: "2026-08-03T10:00:00.000Z",
+                      updated_at: "2026-08-03T10:00:00.000Z" } }],
+    }).expect(201);
+
+    expect(res.body.applied).toEqual(["2"]);
+    const client = createUserClient(alice.token);
+    const { data } = await client.from("notes").select("deleted_at, content").eq("id", id).single();
+    // The assertion that matters: the SERVER row is tombstoned. Asserting only `applied` would
+    // have passed against the broken version, which reported success while changing nothing.
+    expect(data!.deleted_at).not.toBeNull();
+    expect(data!.content).toBe("to be trashed");
+  });
+
+  it("restores on a notes PATCH carrying deleted_at: null", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "there and back" } }],
+    }).expect(201);
+    await post(alice.token, {
+      ops: [{ op_id: "2", op: "PATCH", table: "notes", id,
+              data: { deleted_at: "2026-08-03T10:00:00.000Z" } }],
+    }).expect(201);
+
+    const res = await post(alice.token, {
+      ops: [{ op_id: "3", op: "PATCH", table: "notes", id, data: { deleted_at: null } }],
+    }).expect(201);
+
+    expect(res.body.applied).toEqual(["3"]);
+    const client = createUserClient(alice.token);
+    const { data } = await client.from("notes").select("deleted_at").eq("id", id).single();
+    // `null` has to mean restore rather than "field absent" -- treating the two alike leaves a
+    // note the user pulled out of the trash still deleted on every other device.
+    expect(data!.deleted_at).toBeNull();
+  });
+
+  it("applies a PATCH that carries deleted_at alongside a body edit", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "before" } }],
+    }).expect(201);
+
+    const res = await post(alice.token, {
+      ops: [{ op_id: "2", op: "PATCH", table: "notes", id,
+              data: { deleted_at: "2026-08-03T10:00:00.000Z", content: "after" } }],
+    }).expect(201);
+
+    // Neither half may swallow the other: the early return that skips an empty patch must not
+    // skip a real one, and the content update must not undo the soft delete.
+    expect(res.body.applied).toEqual(["2"]);
+    const client = createUserClient(alice.token);
+    const { data } = await client.from("notes").select("deleted_at, content").eq("id", id).single();
+    expect(data!.deleted_at).not.toBeNull();
+    expect(data!.content).toBe("after");
+  });
+
   it("accepts the DELETE that mobile's undo actually sends", async () => {
     const id = uuid();
     await post(alice.token, {
