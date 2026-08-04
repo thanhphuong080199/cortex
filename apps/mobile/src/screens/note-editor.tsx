@@ -29,6 +29,17 @@ export function NoteEditor({ id }: { id: string }) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /**
+   * What the autosave last did, said out loud.
+   *
+   * This screen has no Save button on purpose -- edits are debounced and written locally -- but
+   * an editable box with no button and no acknowledgement is indistinguishable from one that is
+   * broken, and the first person to use it asked where the save button had gone. It also gives
+   * `save`'s failures somewhere to surface: they were previously thrown away by a bare `void`,
+   * so a write that never landed looked exactly like one that did.
+   */
+  const [saveState, setSaveState] = useState<"idle" | "pending" | "saved" | "failed">("idle");
+
+  /**
    * The `updated_at` of the row whose body was seeded into the box — captured at seed time and
    * never refreshed.
    *
@@ -64,9 +75,15 @@ export function NoteEditor({ id }: { id: string }) {
 
   function onChange(next: string) {
     setContent(next);
+    setSaveState("pending");
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
-      void save(next);
+      void save(next).then(
+        () => setSaveState("saved"),
+        // The user cannot retry a debounce, so the only useful thing this can do is stop the
+        // loss being silent -- the same reasoning as the connector's rejected-ops log.
+        () => setSaveState("failed"),
+      );
     }, SAVE_DEBOUNCE_MS);
   }
 
@@ -102,8 +119,23 @@ export function NoteEditor({ id }: { id: string }) {
           borderColor: "#ccc",
           borderRadius: 8,
           padding: 12,
+          // Android centres a multiline box's text vertically without this, so a one-line note
+          // floats in the middle of a 240pt box and reads as a layout fault.
+          textAlignVertical: "top",
         }}
       />
+      <Text
+        accessibilityLiveRegion="polite"
+        style={{ fontSize: 12, color: saveState === "failed" ? "crimson" : "#666" }}
+      >
+        {saveState === "pending"
+          ? "Saving…"
+          : saveState === "saved"
+            ? "Saved on this device"
+            : saveState === "failed"
+              ? "Could not save this edit on this device."
+              : "Edits save automatically"}
+      </Text>
       <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
         {noteLifecycle.options.map((l: NoteLifecycle) => (
           <Pressable

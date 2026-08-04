@@ -9,8 +9,6 @@ import { ExportButton } from "@/screens/export-button";
 import { MediaLogForm } from "@/screens/media-log-form";
 import { NoteList } from "@/screens/note-list";
 import { QuickCapture } from "@/screens/quick-capture";
-// TEMPORARY: remove with src/screens/sync-debug.tsx once the empty-list bug is closed.
-import { SyncDebug } from "@/screens/sync-debug";
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
@@ -66,19 +64,28 @@ export default function Home() {
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 16 }}>
       {session ? (
-        // Capture sits above the note list slot Task 19 fills.
+        // Everything on this screen is handed to NoteList, which scrolls it. As siblings of the
+        // list in a plain View, these fixed-height widgets left it `flex: 1` of nothing -- it
+        // rendered every row at zero height, with no scroll anywhere to reach them, and the
+        // screen looked exactly as though the user had no notes at all.
         <View style={{ flex: 1, alignSelf: "stretch" }}>
-          <SyncDebug />
-          <QuickCapture />
-          <CheckinWidget />
-          <MediaLogForm />
-          <NoteList />
-          <View style={{ alignItems: "center", gap: 8, padding: 16 }}>
-            <ExportButton />
-            <Text>Signed in as {session.user.email}</Text>
-            <Button title="Sign out" onPress={() => void handleSignOut()} disabled={loading} />
-            {error ? <Text style={{ color: "crimson" }}>{error}</Text> : null}
-          </View>
+          <NoteList
+            header={
+              <>
+                <QuickCapture />
+                <CheckinWidget />
+                <MediaLogForm />
+              </>
+            }
+            footer={
+              <View style={{ alignItems: "center", gap: 8, padding: 16 }}>
+                <ExportButton />
+                <Text>Signed in as {session.user.email}</Text>
+                <Button title="Sign out" onPress={() => void handleSignOut()} disabled={loading} />
+                {error ? <Text style={{ color: "crimson" }}>{error}</Text> : null}
+              </View>
+            }
+          />
         </View>
       ) : (
         <>

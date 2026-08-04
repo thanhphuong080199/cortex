@@ -20,8 +20,29 @@ import { FlatList, Pressable, Text, TextInput, View } from "react-native";
  *
  * `useQuery` is reactive: a synced change or a local write re-renders with no refetch call and
  * no subscription bookkeeping.
+ *
+ * THIS LIST IS THE SCREEN'S ONLY SCROLLING SURFACE, and `header`/`footer` exist to keep it that
+ * way. Everything above it -- capture, check-in, media log -- used to be siblings in a plain
+ * `View`, where their fixed heights consumed the whole screen and this component's `flex: 1`
+ * resolved to nothing. The list still rendered every row; it was simply zero pixels tall, and
+ * with no scroll anywhere on the screen there was no way to reach it. From the outside that is
+ * indistinguishable from having no notes -- `ListEmptyComponent` is invisible for the same
+ * reason -- which is what sent an entire investigation after the sync layer, where all ten rows
+ * had in fact arrived correctly.
+ *
+ * Passing them as `ListHeaderComponent` rather than wrapping the screen in a `ScrollView` is
+ * deliberate: a `FlatList` inside a vertical `ScrollView` nests two scroll views, which React
+ * Native warns about and which breaks virtualisation.
  */
-export function NoteList() {
+export function NoteList({
+  header,
+  footer,
+}: {
+  // `ReactElement`, not `ReactNode`: FlatList's List*Component props reject bare strings and
+  // number children, so the wider type only defers the error to the call site.
+  header?: React.ReactElement;
+  footer?: React.ReactElement;
+} = {}) {
   const [filters, setFilters] = useState<NoteFilters>({ view: "inbox" });
 
   const { sql, params } = useMemo(() => {
@@ -43,8 +64,11 @@ export function NoteList() {
     updated_at: string;
   }>(sql, params);
 
-  return (
-    <View style={{ flex: 1, gap: 12, padding: 16 }}>
+  // An element, not a component: `ListHeaderComponent={() => ...}` would give React a new
+  // component type on every render, unmounting the TextInput and losing focus on each keystroke.
+  const listHeader = (
+    <View style={{ gap: 12 }}>
+      {header}
       <TextInput
         placeholder="Search"
         accessibilityLabel="Search notes"
@@ -83,19 +107,27 @@ export function NoteList() {
         // exactly how a silently-matching-nothing search index would present.
         <Text style={{ color: "crimson" }}>Could not read notes on this device.</Text>
       ) : null}
-      <FlatList
-        data={notes}
-        keyExtractor={(n) => n.id}
-        renderItem={({ item }) => (
-          <Link href={`/notes/${item.id}`} asChild>
-            <Pressable style={{ paddingVertical: 12 }} accessibilityRole="link">
-              <Text numberOfLines={2}>{item.title ?? item.content}</Text>
-              <Text style={{ opacity: 0.6, fontSize: 12 }}>{item.lifecycle}</Text>
-            </Pressable>
-          </Link>
-        )}
-        ListEmptyComponent={<Text style={{ opacity: 0.6 }}>Nothing here yet.</Text>}
-      />
     </View>
+  );
+
+  return (
+    <FlatList
+      style={{ flex: 1 }}
+      contentContainerStyle={{ gap: 12, padding: 16 }}
+      data={notes}
+      keyExtractor={(n) => n.id}
+      renderItem={({ item }) => (
+        <Link href={`/notes/${item.id}`} asChild>
+          <Pressable style={{ paddingVertical: 12 }} accessibilityRole="link">
+            <Text numberOfLines={2}>{item.title ?? item.content}</Text>
+            <Text style={{ opacity: 0.6, fontSize: 12 }}>{item.lifecycle}</Text>
+          </Pressable>
+        </Link>
+      )}
+      ListHeaderComponent={listHeader}
+      ListFooterComponent={footer}
+      ListEmptyComponent={<Text style={{ opacity: 0.6 }}>Nothing here yet.</Text>}
+      keyboardShouldPersistTaps="handled"
+    />
   );
 }

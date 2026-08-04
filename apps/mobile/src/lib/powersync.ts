@@ -107,7 +107,25 @@ export async function initPowerSync(): Promise<{ db: PowerSyncDatabase; wiped: b
     // what creates `ps_data__notes` for the triggers to hang off.
     await setupNotesFts(opened);
 
-    await opened.connect(new ApiConnector());
+    /**
+     * NOT awaited, and that is the whole point.
+     *
+     * `connect()` resolves only once the sync status has passed through `connecting` and back
+     * out again (AbstractStreamingSyncImplementation.connect). On a real device it was observed
+     * never to do so: four consecutive launches produced `powersync_control(start)` and an
+     * `EstablishSyncStream` request, and `"connected":true` appeared exactly zero times.
+     *
+     * Awaited, that holds `db` at null forever, and `PowerSyncProvider` renders a spinner over
+     * the entire app -- including the sign-in button, which lives inside it. An offline-first
+     * app was unusable, offline or online, because a network call had not come back. The local
+     * database is fully usable the moment it is open; connecting is what fills it, later.
+     *
+     * Rejections are logged rather than thrown: nothing here can act on one, and an unhandled
+     * rejection in React Native is a redbox over a working app.
+     */
+    void opened.connect(new ApiConnector()).catch((cause: unknown) => {
+      console.error("PowerSync could not connect; local data is still available", cause);
+    });
     db = opened;
     return { db: opened, wiped };
   })();

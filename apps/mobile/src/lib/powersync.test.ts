@@ -221,4 +221,33 @@ describe("initPowerSync", () => {
     expect(order).toEqual(["construct", "fts", "connect"]);
     expect(connect).toHaveBeenCalledOnce();
   });
+
+  it("opens the database even when connecting never finishes", async () => {
+    // Not hypothetical, and not a slow connection: on a real device `connect()` was observed
+    // never to settle at all. It resolves only once the sync status has passed through
+    // `connecting` and back out (AbstractStreamingSyncImplementation.connect), and across four
+    // consecutive launches `"connected":true` was logged exactly zero times.
+    //
+    // Awaited, that held `db` at null forever and PowerSyncProvider covered the whole app in a
+    // spinner -- including the sign-in button, which renders inside it. An offline-first app was
+    // unusable, offline AND online, because a network call had not come back. The local database
+    // is ready the moment it is open; connecting only fills it, later.
+    //
+    // The timeout is what makes this bite. Without it a re-awaited `connect` simply hangs the
+    // test runner until vitest kills the file, which reads as an unrelated infrastructure
+    // failure rather than as this regression.
+    connect.mockImplementationOnce(() => new Promise<void>(() => {}));
+    const mod = await freshModule();
+
+    const { db } = await Promise.race([
+      mod.initPowerSync(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("initPowerSync awaited connect()")), 1000),
+      ),
+    ]);
+
+    expect(db).not.toBeNull();
+    expect(mod.getPowerSync()).not.toBeNull();
+    expect(connect).toHaveBeenCalledOnce();
+  });
 });
