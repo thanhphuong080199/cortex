@@ -17,9 +17,16 @@ const rules = readFileSync(rulesPath, "utf8");
  * order to record why they are absent. Asserting over the raw file (as the plan's draft did)
  * fails on exactly those explanations, so staying green would mean deleting the most useful
  * comments in the file. The property worth enforcing is that none of it appears in a rule.
+ *
+ * SPLIT ON `\r?\n`, NOT `\n`. With a CRLF checkout -- git's default on Windows, and this repo
+ * warns `LF will be replaced by CRLF` on every commit -- splitting on `\n` leaves a `\r` at the
+ * end of every line. `\r` is a line terminator to a JavaScript regex, so `.` will not cross it,
+ * `#.*$` matches nothing, and NOT ONE COMMENT IS STRIPPED: `directives` silently becomes the
+ * raw file, which is precisely the thing this const exists to avoid. On Linux it passed and on
+ * Windows it failed, which is the worst of both.
  */
 const directives = rules
-  .split("\n")
+  .split(/\r?\n/)
   .map((l) => l.replace(/#.*$/, "").trimEnd())
   .filter((l) => l.trim().length > 0)
   .join("\n");
