@@ -78,6 +78,40 @@ describe("POST /sync/upload", () => {
   });
 
   /**
+   * PowerSync resends a batch whenever the response is lost, so the connector can replay the
+   * exact same op -- same op_id, same base_content -- against a server row unchanged since the
+   * first attempt. Before the conflict copy's id was derived from op_id (finding #4), each
+   * replay minted a fresh random id and the inbox grew a duplicate note per retry.
+   */
+  it("a resent conflict PATCH does not duplicate the conflict copy", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "original" } }],
+    }).expect(201);
+    await post(alice.token, {
+      ops: [{ op_id: "2", op: "PATCH", table: "notes", id, data: { content: "web edit" } }],
+    }).expect(201);
+
+    const conflictOp = {
+      op_id: "3", op: "PATCH", table: "notes", id, data: { content: "phone edit" },
+      base_content: "original",
+    };
+
+    const first = await post(alice.token, { ops: [conflictOp] }).expect(201);
+    expect(first.body.conflict_copies).toHaveLength(1);
+
+    const resend = await post(alice.token, { ops: [conflictOp] }).expect(201);
+    expect(resend.body.conflict_copies).toHaveLength(1);
+    expect(resend.body.conflict_copies[0].note_id).toBe(first.body.conflict_copies[0].note_id);
+
+    // Scoped to THIS note's links, not content -- other tests in this file also use "phone
+    // edit" against the same shared `alice` fixture.
+    const { data } = await createUserClient(alice.token).from("links")
+      .select("from_note_id").eq("to_note_id", id).eq("kind", "conflict_copy");
+    expect(data).toHaveLength(1);
+  });
+
+  /**
    * The case the device actually hit, and the one nothing covered: an ordinary edit, nobody
    * else touching the note, and a conflict copy every single time.
    *

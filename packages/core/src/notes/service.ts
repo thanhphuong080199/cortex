@@ -1,6 +1,23 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { createHash } from "node:crypto";
 import { validateDomainMeta, type CreateNoteInput, type UpdateNoteInput } from "@cortex/shared";
 import { mapPostgrestError } from "../errors.js";
+
+/**
+ * Deterministic (RFC 4122 v5-style) id for a conflict copy, derived from the op that created
+ * it. PowerSync resends a batch whenever the response is lost, so the same op_id can arrive
+ * twice; `createWithId` already turns "this id exists and is mine" into a no-op via its 23505
+ * fallback. Reusing that path here is what stops a replayed conflict PATCH from manufacturing
+ * a second copy (handoff, round 2, finding #4) -- a random id, one per call, would defeat it:
+ * two different ids for the same replayed op are two different rows.
+ */
+function conflictCopyId(userId: string, noteId: string, opId: string): string {
+  const hash = createHash("sha1").update(`${userId}:${noteId}:${opId}`).digest();
+  hash[6] = (hash[6]! & 0x0f) | 0x50;
+  hash[8] = (hash[8]! & 0x3f) | 0x80;
+  const hex = hash.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
 
 export interface Note {
   id: string; user_id: string; title: string | null; content: string;
@@ -146,11 +163,16 @@ export class NoteService {
    *
    * An empty string is a real base -- a note edited down to nothing and then edited again --
    * so the guard tests `undefined`, not falsiness.
+   *
+   * `opId` is the CRUD entry's own id (spec §6.1's `op_id`). It is only used to derive the
+   * conflict copy's id when one is actually created, but it is a required parameter regardless
+   * -- an optional one would let a future call site silently drop it and reopen finding #4.
    */
   async updateWithConflictCopy(
     id: string,
     input: UpdateNoteInput,
-    baseContent?: string,
+    baseContent: string | undefined,
+    opId: string,
   ): Promise<{ note: Note; conflictCopy: Note | null; linkFailed?: boolean }> {
     if (baseContent === undefined || input.content === undefined) {
       return { note: await this.update(id, input), conflictCopy: null };
@@ -176,7 +198,7 @@ export class NoteService {
       ? await this.update(id, metadata as UpdateNoteInput)
       : await this.getById(id);
 
-    const conflictCopy = await this.create({
+    const conflictCopy = await this.createWithId(conflictCopyId(this.userId, id, opId), {
       content: input.content,
       title: note.title ?? undefined,
     });
