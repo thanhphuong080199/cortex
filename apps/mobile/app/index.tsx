@@ -9,6 +9,8 @@ import { ExportButton } from "@/screens/export-button";
 import { MediaLogForm } from "@/screens/media-log-form";
 import { NoteList } from "@/screens/note-list";
 import { QuickCapture } from "@/screens/quick-capture";
+// TEMPORARY: remove with src/screens/sync-debug.tsx once the empty-list bug is closed.
+import { SyncDebug } from "@/screens/sync-debug";
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
@@ -66,6 +68,7 @@ export default function Home() {
       {session ? (
         // Capture sits above the note list slot Task 19 fills.
         <View style={{ flex: 1, alignSelf: "stretch" }}>
+          <SyncDebug />
           <QuickCapture />
           <CheckinWidget />
           <MediaLogForm />
