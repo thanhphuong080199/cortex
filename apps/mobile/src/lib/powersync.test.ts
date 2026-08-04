@@ -35,12 +35,18 @@ vi.mock("@op-engineering/op-sqlite", () => ({ ANDROID_DATABASE_PATH: "/data/db/"
 const connect = vi.fn(async () => {
   order.push("connect");
 });
+let statusListener: ((status: unknown) => void) | undefined;
+const registerListener = vi.fn((listener: { statusChanged?: (status: unknown) => void }) => {
+  statusListener = listener.statusChanged;
+  return () => {};
+});
 vi.mock("@powersync/react-native", () => ({
   PowerSyncDatabase: class {
     constructor(readonly options: unknown) {
       order.push("construct");
     }
     connect = connect;
+    registerListener = registerListener;
   },
 }));
 
@@ -71,6 +77,8 @@ beforeEach(() => {
   setupNotesFts.mockClear();
   getOrCreateDatabaseKey.mockClear();
   connect.mockClear();
+  registerListener.mockClear();
+  statusListener = undefined;
 });
 
 /** A fresh module instance, because `initPowerSync` memoises into module state. */
@@ -220,6 +228,40 @@ describe("initPowerSync", () => {
     // ordering was the one thing not asserting it.
     expect(order).toEqual(["construct", "fts", "connect"]);
     expect(connect).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * The STILL OPEN question from the handoff -- whether `connected` ever flips true on a real
+   * device, and if so when relative to an upload -- has no way to be answered without this: the
+   * app previously surfaced no sync status anywhere, permanently or otherwise.
+   */
+  it("logs a status line on every sync status transition", async () => {
+    const mod = await freshModule();
+    await mod.initPowerSync();
+    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    expect(registerListener).toHaveBeenCalledOnce();
+    statusListener?.({
+      connected: true,
+      connecting: false,
+      downloading: false,
+      uploading: false,
+      hasSynced: true,
+      lastSyncedAt: new Date("2026-08-04T00:00:00.000Z"),
+      downloadError: undefined,
+    });
+
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining("connected=true"));
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining("lastSyncedAt=2026-08-04T00:00:00.000Z"));
+    logged.mockRestore();
+  });
+
+  it("registers the status listener before connecting, so no transition can be missed", async () => {
+    const mod = await freshModule();
+    await mod.initPowerSync();
+
+    expect(order.indexOf("connect")).toBeGreaterThan(-1);
+    expect(registerListener.mock.invocationCallOrder[0]).toBeLessThan(connect.mock.invocationCallOrder[0]!);
   });
 
   it("opens the database even when connecting never finishes", async () => {

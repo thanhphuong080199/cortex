@@ -132,6 +132,10 @@ export class ApiConnector implements PowerSyncBackendConnector {
     if (result?.failed?.length) {
       console.error("sync upload: ops rejected by the server", result.failed);
     }
+    // Pairs with the `[powersync]` status log in powersync.ts: the STILL OPEN question is
+    // whether a completed upload is what nudges a stalled download stream, so an upload that
+    // never logs makes that impossible to see in the same trace.
+    console.log(`[powersync] upload complete: ${batch.crud.length} op(s)`);
 
     await batch.complete();
     // The bases these ops were checked against are spent -- ONCE nothing else in the queue

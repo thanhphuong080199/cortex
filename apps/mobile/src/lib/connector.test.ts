@@ -308,6 +308,21 @@ describe("ApiConnector.uploadData", () => {
     });
   });
 
+  /**
+   * Pairs with the `[powersync]` status log in powersync.ts -- the STILL OPEN question is
+   * whether a completed upload is what nudges a stalled download stream, and that is
+   * unanswerable if an upload never logs anything on success.
+   */
+  it("logs a line on a successful upload, for correlation with sync status transitions", async () => {
+    const db = database([patch]);
+    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await new ApiConnector().uploadData(db);
+
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining("[powersync] upload complete: 1 op"));
+    logged.mockRestore();
+  });
+
   it("still completes a batch whose response body cannot be read", async () => {
     const db = database([patch]);
     fetchMock.mockResolvedValueOnce({

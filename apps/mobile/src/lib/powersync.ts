@@ -102,6 +102,26 @@ export async function initPowerSync(): Promise<{ db: PowerSyncDatabase; wiped: b
       },
     });
 
+    // Before connect, so no transition -- including the very first one -- can fire before
+    // anything is listening.
+    //
+    // The STILL OPEN question from the handoff: on the one device this has run on,
+    // `"connected":true` was never observed, yet uploads succeeded and a save was later seen to
+    // bring the rest of the backlog down with it. Nothing in the app previously surfaced sync
+    // status at all, so that observation came from a temporary trace-level SDK logger, added and
+    // removed for one session. This is the permanent, low-volume replacement: one line per
+    // status transition, not a firehose of the SDK's internal protocol.
+    opened.registerListener({
+      statusChanged: (status) => {
+        console.log(
+          `[powersync] connected=${status.connected} connecting=${status.connecting} ` +
+            `downloading=${status.downloading} uploading=${status.uploading} ` +
+            `hasSynced=${status.hasSynced} lastSyncedAt=${status.lastSyncedAt?.toISOString() ?? "never"} ` +
+            `downloadError=${status.downloadError?.message ?? "none"}`,
+        );
+      },
+    });
+
     // Before connect, so the first batch replication delivers is already covered by the
     // triggers rather than racing them. `execute` waits for the schema to be applied, which is
     // what creates `ps_data__notes` for the triggers to hang off.
