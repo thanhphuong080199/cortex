@@ -27,6 +27,20 @@ export class CoreErrorFilter implements ExceptionFilter {
     if (exception instanceof HttpException) {
       return res.status(exception.getStatus()).json(exception.getResponse());
     }
+
+    // Express middleware throws http-errors, NOT HttpException, so everything raised before a
+    // controller is reached -- body-parser above all -- fell through to the 500 below. A
+    // request body over the limit answered `500 Internal error`, which is a lie in the one
+    // direction that matters: the sync connector reads 5xx as transient and retries forever,
+    // so a batch the server will never accept became an infinite loop instead of a clear
+    // rejection. Found by deploying: the production log showed PayloadTooLargeError under a
+    // 500. Only the status is echoed, never the message, which can name internals.
+    const status = (exception as { status?: unknown; statusCode?: unknown } | null)?.status
+      ?? (exception as { statusCode?: unknown } | null)?.statusCode;
+    if (typeof status === "number" && status >= 400 && status < 500) {
+      this.logger.error(exception instanceof Error ? exception.stack : String(exception));
+      return res.status(status).json({ message: "Request rejected" });
+    }
     this.logger.error(exception instanceof Error ? exception.stack : String(exception));
     return res.status(500).json({ message: "Internal error" });
   }
