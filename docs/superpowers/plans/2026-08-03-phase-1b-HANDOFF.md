@@ -22,16 +22,39 @@ editor that could swallow an entire session of typing, a `tag` URL param that cr
 page, and **seven tests that could not fail** (two in `packages/db`, four in `apps/mobile`,
 one in `packages/core`). `@cortex/web`'s whole suite was running nowhere in CI.
 
+### Deployed 2026-08-04 — and the deploy itself found two more bugs
+
+`railway up` → deployment `5a78c149`, **SUCCESS**, serving the round-1 fixes. Verified against
+the live URL with three unauthenticated probes, since neither needs a token:
+
+| Probe | Old build | New build |
+|---|---|---|
+| `GET /health` | 200 | 200 |
+| `POST /sync/upload`, 500 KB body, no auth | **500** | **401** (body parses, then auth rejects) |
+| same, 12 MB body | **500** | **413** |
+
+**The first `railway up` FAILED, and that is a finding the test suite could never produce.**
+The API image had not built since Task 15: `@cortex/core` gained better-sqlite3 as a test-only
+devDependency, the image installs `--filter @cortex/api...` which pulls core's devDependencies,
+and node:22-alpine is musl — no prebuild, so node-gyp ran and died on missing Python. No gate
+on this branch builds the image. Fixed with `--ignore-scripts` (see the Dockerfile comment for
+why that is safe and why `apk add python3` was rejected), verified by building and running the
+image locally before redeploying.
+
+**The 500s in that table were the second bug.** Express middleware throws http-errors, not
+`HttpException`, so everything raised before a controller — body-parser above all — fell into
+`CoreErrorFilter`'s catch-all. A too-large body answered 500, which the sync connector reads
+as transient and retries forever. Both are fixed in `0c7cf42`.
+
 ### Device checklist — what round 1 changed about it
 
-**Two prerequisites, in this order.**
+**One prerequisite left.**
 
-1. **`railway up` must run before the trash check means anything.** The trash fix is
-   server-side, and `apps/mobile/.env` points `EXPO_PUBLIC_API_URL` at the production Railway
-   API. Testing against a deploy that predates `9f7088d` reproduces the bug, correctly.
-2. **No new dev client build is needed.** Round 1 added no native module — `lib/in-flight.ts`
-   is plain JS — so EAS `f603e36f` still loads everything over Metro. (`37039bce` is still too
-   old: it predates `expo-sharing`/`expo-file-system`.)
+- **No new dev client build is needed.** Round 1 added no native module — `lib/in-flight.ts`
+  is plain JS — so EAS `f603e36f` still loads everything over Metro. (`37039bce` is still too
+  old: it predates `expo-sharing`/`expo-file-system`.)
+- The API prerequisite is **discharged**: production now runs the trash fix, so the trash
+  check below tests the fix rather than the old bug.
 
 **Five checks to add, one per round-1 fix. Each is only observable on a device.**
 
