@@ -1,3 +1,109 @@
+# Phase 1b — handoff, 2026-08-03 (updated 2026-08-04)
+
+## 2026-08-04 — the whole-branch review ran. Round 1 of 2.
+
+Four reviewers over Tasks 14–23, plus an inline pass on the `.tsx` files (which no reviewer
+was given, because no test can reach them). **Six commits: `033b2fa`, `84e3b40`, `9f7088d`.**
+Gate after each: 26/26, 0 cached, Docker up — 526 tests at the end.
+
+**The review was worth running.** It found two CRITICALs, both of which would have shipped:
+
+1. **Trashing a note never reached the server** and the note reappeared on the next sync.
+   Mobile trashes with an UPDATE, PowerSync emits UPDATE as PATCH, and the router's PATCH
+   branch silently dropped `deleted_at`. Found independently by two reviewers. Fixed in
+   `9f7088d`, server-side, with three e2e cases that fail against the old router.
+2. **Any 4xx discarded the user's offline writes.** 413 was not hypothetical — Express
+   defaults the body limit to 100 kB and a 500-op batch is ~75 kB of envelope alone. Now only
+   400/422 may complete a batch; the body limit is 10mb.
+
+Plus, fixed the same day: FTS5 search escaping (typing an apostrophe broke search outright),
+the double-tap guard that existed in one screen and not the three others that write, a note
+editor that could swallow an entire session of typing, a `tag` URL param that crashed the web
+page, and **seven tests that could not fail** (two in `packages/db`, four in `apps/mobile`,
+one in `packages/core`). `@cortex/web`'s whole suite was running nowhere in CI.
+
+### Round 2 — open findings, ranked. None of these is fixed.
+
+**1. CRITICAL (security) — `note_tags` and `links` have single-column FKs, so a child row can
+carry one user's `user_id` while its parent note belongs to another.** Migration `00014`
+named this exact hazard and fixed it for `notes.media_item_id` with a composite FK into
+`(id, user_id)`; the precedent was never extended to `note_tags.note_id`, `note_tags.tag_id`,
+`links.from_note_id`, `links.to_note_id`. Phase 1b is what made these tables client-writable
+with client-chosen FK values (`router.ts` upserts `{...op.data, id, user_id}` straight in).
+A modified client PUTs a link whose `from_note_id` is another user's note; the row buckets
+into the attacker's stream on `user_id` and replication delivers the foreign note id to their
+device. **Honest bound: what crosses is row *ids*, not note bodies** — the `notes` sync rule
+still filters on `user_id` — plus an existence oracle (23503 vs success). Fix is mechanical
+and modelled in-repo: unique index on `(id, user_id)` + composite FK. Needs a migration and
+a hosted `supabase db push`.
+
+**2. CRITICAL — the only test covering that shape cannot fail.**
+`sync-rules-isolation.test.ts:257-293` reads back rows its own `beforeAll` seeded, which are
+correct by construction, and never attempts the violating insert. It passes unconditionally,
+today and under item 1. Write it to attempt the cross-owner insert: it should fail before the
+migration in item 1 and pass after, which also proves the migration bites.
+
+**3. IMPORTANT — an offline capture's `created_at` is overwritten with the reconnect time.**
+The router never passes `created_at`, and both `notes` and `checkins` default it to `now()`.
+A mood logged Monday on a plane becomes a Wednesday row when the phone reconnects, so the
+timeline and every chart over it are silently wrong. The `NOW_ISO` work is correct locally
+and simply has no receiver. Fix: accept `created_at` on the PUT paths of both `createWithId`s.
+
+**4. IMPORTANT — a replayed conflict PATCH creates a new conflict copy every time.**
+`updateWithConflictCopy` has no dedupe, and `note_edit_base` is cleared only after
+`batch.complete()`, so a lost response resends the same base and manufactures C2, C3… — N
+duplicate notes in the inbox for one flaky upload.
+
+**5. IMPORTANT — the conflict path can discard the losing body.** The metadata `update()`
+runs before `create()` writes the copy and can throw (a domain change whose existing meta
+fails the new domain's schema), so the op fails after the phone's text has left the queue and
+before the copy exists. Creating the copy first makes the same failure non-destructive.
+
+**6. IMPORTANT — the edit base is deleted after `complete()`.** A keystroke landing between
+the read and the delete produces a second CRUD entry whose base row is then deleted, so the
+next upload carries no base and silently last-write-wins over a concurrent web edit. Same
+across a `haveMore` boundary. Delete only for note ids with nothing left queued.
+
+**7. IMPORTANT — a failed open leaks the constructed `PowerSyncDatabase`.** If `setupNotesFts`
+or `connect` throws, the catch nulls `opening` and rethrows without `close()`, so the retry
+the code exists to enable opens a SECOND handle over the same encrypted file — the exact
+state the in-flight guard is for.
+
+**8. IMPORTANT — the sync-rules static assertions are blind to any query line not literally
+starting `- SELECT`.** Lowercase, quoted, or block-scalar rules are invisible to every
+assertion in the file, including the table-set equality. An unscoped duplicate `notes` query
+in that form ships every user's notes to every device with all six static tests green.
+
+**9. IMPORTANT — a replayed PUT for a since-deleted note reports `not_found`.**
+`createWithId`'s 23505 fallback reads through `getById`, which filters `deleted_at`. The
+replay branch wants "does this id exist and is it mine", not "is it live". Note this is the
+*opposite* asymmetry from the ledgered `CheckinService.createWithId` item below.
+
+**Minor, all recorded rather than fixed:** benign duplicate DELETEs pollute the `failed`
+channel that is the only loss-detection surface; the conflict copy loses `domain`,
+`domain_meta` and `media_item_id`; `resolveNoteMediaLink` writes the client's `domain_meta`
+unvalidated on the PATCH path; an undone check-in will resurrect once anything reads
+`checkins` locally (server soft-deletes, the sync rule has no `deleted_at` filter); a partial
+export download leaves a truncated zip in cache; the share-sheet availability check runs after
+the download rather than before; `trashNote` has no `deleted_at IS NULL` guard;
+`note_tags`/`media_items.external_meta` mismatches between the device schema and Postgres are
+latent until something writes those tables; web's refetch re-applies `matchesFilters` over
+rows the query already narrowed; web's `useCallback` keys on object identity.
+
+**A ledgered item below is WRONG and must not be actioned.** The deferred list says
+`packages/sync` declares `updated_at` on `checkins` while `public.checkins` has no such
+column. `00014_phase1c_hardening.sql:20-22` added it, with a `moddatetime` trigger,
+explicitly for PowerSync ordering. `schema.ts` is correct; removing the column would be the
+regression.
+
+**Judgement call, deliberately not changed:** web's refetch keeps its client-side
+`matchesFilters` pass. A reviewer argued it is a second description of the narrowing on the
+very path the refactor single-sources. Task 16 kept it knowingly as a net, it is a strict
+no-op today, and both directions have a failure mode. Left as-is, recorded here so the next
+session does not rediscover the argument.
+
+---
+
 # Phase 1b — handoff, 2026-08-03
 
 Plan: `docs/superpowers/plans/2026-08-02-phase-1b-mobile-offline-sync.md` (23 tasks, 4 stages).
