@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 
 import { logCheckin, undoCheckin } from "../lib/checkins";
+import { createInFlightGuard } from "../lib/in-flight";
 
 const MOOD_LABELS = ["very bad", "bad", "okay", "good", "very good"];
 
@@ -19,18 +20,19 @@ export function CheckinWidget() {
   const [busy, setBusy] = useState(false);
   // `disabled={busy}` is not enough on its own: state updates are async, so two quick taps can
   // both pass the check before either re-render lands, and each one is a separate check-in.
-  const inFlight = useRef(false);
+  // The guard this widget introduced now lives in lib/in-flight, where it is tested and where
+  // capture, the media form and export share it.
+  const guard = useRef(createInFlightGuard()).current;
 
   async function run(action: () => Promise<void>) {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setBusy(true);
-    try {
-      await action();
-    } finally {
-      inFlight.current = false;
-      setBusy(false);
-    }
+    await guard(async () => {
+      setBusy(true);
+      try {
+        await action();
+      } finally {
+        setBusy(false);
+      }
+    });
   }
 
   return (

@@ -1,8 +1,9 @@
 import { mediaKind, mediaStatus, type MediaKind, type MediaStatus } from "@cortex/shared";
 import { usePowerSync, useQuery } from "@powersync/react-native";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 
+import { createInFlightGuard } from "../lib/in-flight";
 import { logMedia } from "../lib/media-log";
 
 // Both DERIVED, never parallel lists. A hand-written copy of the kinds drifted from
@@ -24,6 +25,10 @@ export function MediaLogForm() {
   const [status, setStatus] = useState<MediaStatus>("finished");
   const [impression, setImpression] = useState("");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(false);
+  // Two taps in one frame both read `saving === false`, and two logs are two notes plus two
+  // entries against the same media item. See lib/in-flight.
+  const run = useRef(createInFlightGuard()).current;
 
   // Local autocomplete over the replica -- bounded, ordered and kind-scoped, the same shape
   // B7 imposed on the web version.
@@ -33,17 +38,24 @@ export function MediaLogForm() {
   );
 
   async function save() {
-    if (saving) return;
-    setSaving(true);
-    try {
-      const wrote = await logMedia(db, { kind, title, status, rating, impression });
-      if (!wrote) return;
-      setTitle("");
-      setImpression("");
-      setRating(null);
-    } finally {
-      setSaving(false);
-    }
+    await run(async () => {
+      setSaving(true);
+      setError(false);
+      try {
+        const wrote = await logMedia(db, { kind, title, status, rating, impression });
+        if (!wrote) return;
+        setTitle("");
+        setImpression("");
+        setRating(null);
+      } catch {
+        // Previously this threw into a `void`ed promise: the form kept its contents, cleared
+        // nothing, said nothing, and the log did not exist. Quick capture already reports the
+        // same failure -- an unwritten log is exactly as lost as an unwritten note.
+        setError(true);
+      } finally {
+        setSaving(false);
+      }
+    });
   }
 
   const matches = suggestions
@@ -136,6 +148,11 @@ export function MediaLogForm() {
           padding: 10,
         }}
       />
+      {error ? (
+        <Text style={{ color: "crimson" }}>
+          Could not save to this device. Your entry is still here — try again.
+        </Text>
+      ) : null}
       <Pressable
         onPress={() => {
           void save();

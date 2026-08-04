@@ -52,6 +52,9 @@ export function NoteEditor({ id }: { id: string }) {
 
   async function save(next: string) {
     const base = sessionBase.current;
+    // Unreachable while the input only renders after seeding (below), and deliberately kept:
+    // saving with no base is worse than not saving, because the upload then carries no base at
+    // all and the server cannot detect a conflict on it.
     if (!base) return;
     // Base first: if the write lands and the base does not, the upload carries no base and the
     // server cannot detect the conflict at all.
@@ -74,10 +77,22 @@ export function NoteEditor({ id }: { id: string }) {
 
   if (!note) return <Text style={{ padding: 16 }}>Note not found on this device.</Text>;
 
+  /**
+   * No editable box until the body AND the base are seeded, which happens together in the effect
+   * above.
+   *
+   * Rendering the input first is a silent data-loss window, not just a cosmetic flash of an
+   * empty note. A keystroke landing between the first commit and that effect sets `content`, so
+   * `content === null` is false forever after and the effect never seeds `sessionBase` -- and
+   * `save` then returns early on every keystroke for the rest of the session. The user types a
+   * whole note into a box that writes nothing and reports nothing.
+   */
+  if (content === null) return <Text style={{ padding: 16 }}>Opening…</Text>;
+
   return (
     <ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}>
       <TextInput
-        value={content ?? ""}
+        value={content}
         onChangeText={onChange}
         multiline
         accessibilityLabel="Note content"

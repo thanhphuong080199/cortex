@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
 import { captureNote } from "../lib/capture";
+import { createInFlightGuard } from "../lib/in-flight";
 
 /**
  * Capture is one local INSERT and nothing else (spec §5.2). There is no "pending" indicator
@@ -23,6 +24,10 @@ export function QuickCapture() {
   const [error, setError] = useState(false);
   const [saving, setSaving] = useState(false);
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // `saving` greys the button out; this is what actually stops the second tap. State does not
+  // change until a re-render, so two taps in one frame both read `saving === false` -- and two
+  // INSERTs are two notes, the second invisible until it syncs. See lib/in-flight.
+  const run = useRef(createInFlightGuard()).current;
 
   useEffect(() => {
     return () => {
@@ -31,26 +36,25 @@ export function QuickCapture() {
   }, []);
 
   async function save() {
-    // Guard against the double-tap, not just the empty note: two INSERTs are two notes, and
-    // the second is invisible until it has synced.
-    if (saving) return;
-    setSaving(true);
-    setError(false);
-    try {
-      const wrote = await captureNote(db, { content, domain });
-      if (!wrote) return;
-      setContent("");
-      setDomain(null);
-      setSaved(true);
-      if (savedTimer.current) clearTimeout(savedTimer.current);
-      savedTimer.current = setTimeout(() => setSaved(false), 1500);
-    } catch {
-      // The local write failing is the one case where the note is genuinely gone. Keep the
-      // text in the box so the user still has it, and say so.
-      setError(true);
-    } finally {
-      setSaving(false);
-    }
+    await run(async () => {
+      setSaving(true);
+      setError(false);
+      try {
+        const wrote = await captureNote(db, { content, domain });
+        if (!wrote) return;
+        setContent("");
+        setDomain(null);
+        setSaved(true);
+        if (savedTimer.current) clearTimeout(savedTimer.current);
+        savedTimer.current = setTimeout(() => setSaved(false), 1500);
+      } catch {
+        // The local write failing is the one case where the note is genuinely gone. Keep the
+        // text in the box so the user still has it, and say so.
+        setError(true);
+      } finally {
+        setSaving(false);
+      }
+    });
   }
 
   return (
