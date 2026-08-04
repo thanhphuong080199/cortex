@@ -3,10 +3,14 @@ import { AppSchema } from "@cortex/sync";
 import { PowerSyncDatabase } from "@powersync/react-native";
 import { File } from "expo-file-system";
 
-import { hasStrongBiometrics } from "./app-lock.js";
-import { ApiConnector } from "./connector.js";
-import { getOrCreateDatabaseKey } from "./db-key.js";
-import { setupNotesFts } from "./fts.js";
+// Extensionless, NOT the `./x.js` form the rest of the monorepo uses. Those packages compile
+// to dist/ under NodeNext, where the suffix is required; apps/mobile is bundled by Metro, which
+// resolves `./app-lock.js` against a file that does not exist and fails the build outright.
+// `expo/tsconfig.base` uses bundler resolution, so extensionless is the correct idiom here.
+import { hasStrongBiometrics } from "./app-lock";
+import { ApiConnector } from "./connector";
+import { getOrCreateDatabaseKey } from "./db-key";
+import { setupNotesFts } from "./fts";
 
 export const DB_FILENAME = "cortex.db";
 

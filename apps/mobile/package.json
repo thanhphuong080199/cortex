@@ -13,7 +13,9 @@
     "ios": "expo run:ios",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "bundle": "expo export --platform android --output-dir .expo-export",
+    "eas-build-post-install": "cd ../.. && pnpm turbo run build --filter=@cortex/sync --filter=@cortex/shared"
   },
   "dependencies": {
     "@cortex/shared": "workspace:*",

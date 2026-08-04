@@ -1,6 +1,6 @@
 import type { MediaKind, MediaStatus } from "@cortex/shared";
 
-import { NOW_ISO } from "./sql.js";
+import { NOW_ISO } from "./sql";
 
 /**
  * Offline media logging (spec §5.3): the log is written as an ORDINARY NOTE carrying

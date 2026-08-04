@@ -1,6 +1,6 @@
 import { randomUUID } from "expo-crypto";
 
-import { NOW_ISO } from "./sql.js";
+import { NOW_ISO } from "./sql";
 
 /**
  * Mood check-ins (life-domains spec §2.3). Inserts and deletes only -- a wrong mood is undone

@@ -1,6 +1,6 @@
 import type { NoteLifecycle } from "@cortex/shared";
 
-import { NOW_ISO } from "./sql.js";
+import { NOW_ISO } from "./sql";
 
 /**
  * The three local mutations the editor performs.

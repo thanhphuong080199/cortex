@@ -5,7 +5,7 @@ import type {
 } from "@powersync/common";
 import { SYNC_UPLOAD_MAX_OPS, type SyncOp } from "@cortex/shared";
 
-import { supabase } from "./supabase.js";
+import { supabase } from "./supabase";
 
 /**
  * PowerSync's CrudEntry in the shape POST /sync/upload validates.

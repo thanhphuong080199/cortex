@@ -1,4 +1,4 @@
-import { clearDatabaseKey } from "./db-key.js";
+import { clearDatabaseKey } from "./db-key";
 
 /**
  * Removes every trace of the signed-in user from the device (phase 1b spec §7.7).

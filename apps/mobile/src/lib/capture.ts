@@ -1,6 +1,6 @@
 import type { NoteDomain } from "@cortex/shared";
 
-import { NOW_ISO } from "./sql.js";
+import { NOW_ISO } from "./sql";
 
 /**
  * The local INSERT behind quick capture (spec §5.2).

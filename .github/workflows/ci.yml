@@ -47,6 +47,13 @@ jobs:
       - name: Test @cortex/mobile
         run: pnpm turbo run test --filter=@cortex/mobile
 
+      # The only step that loads modules the way the DEVICE does. tsc accepts NodeNext's
+      # `./x.js` suffix and vitest resolves it too, but Metro looks for a file of that name and
+      # fails -- so apps/mobile was unbundlable from Task 13 onward while typecheck, lint and
+      # every test stayed green, and the first thing to notice was an EAS build 20 minutes in.
+      - name: Bundle @cortex/mobile
+        run: pnpm turbo run bundle --filter=@cortex/mobile
+
       # apps/web's suite needs no Supabase stack either, and until this step existed it ran
       # nowhere but a developer's machine: `build typecheck lint` cover web, but the `test`
       # task is filtered per package in both jobs, so a broken assertion in note-views.test.ts
