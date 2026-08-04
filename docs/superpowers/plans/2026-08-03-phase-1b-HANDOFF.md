@@ -1,5 +1,129 @@
 # Phase 1b — handoff, 2026-08-03 (updated 2026-08-04)
 
+## 2026-08-04, session 2 — the first real device run. Four bugs, and none of them was sync.
+
+The branch is now **pushed** (`feat/phase-1b-mobile-offline-sync`) and there is a **GitHub
+Actions APK build**, so device testing no longer depends on EAS quota. No PR is open for phase
+1b; the only thing merged to `main` is the workflow file (PR #5).
+
+Commits this session, oldest first:
+
+| Commit | What |
+|---|---|
+| `504b518` | TEMPORARY sync diagnostic (removed again in `ec537dc`) |
+| `ec537dc` | empty note list + `connect()` deadlock + save indicator |
+| `f95359e` | Android APK workflow |
+| `0589613` | workflow named its deps, died on the ref lacking one |
+| `76ecfed` | sync-rule assertions stripped no comments on CRLF |
+| `cc52fcb` | conflict base is a body, not a timestamp |
+
+### 1. The note list was empty because it was rendered zero pixels tall
+
+Hours went into the sync layer. The sync layer was correct the whole time. On-device probes:
+
+```
+ps_data__notes = 10     notes(view) = 10     inbox(filter) = 10
+ps_crud = 0             ps_buckets = 2       useQuery(list) rows=10 error=none
+```
+
+`NoteList` was a sibling of QuickCapture, CheckinWidget and MediaLogForm inside a plain `View`.
+Their fixed heights consumed the screen, its `flex: 1` resolved to nothing, and every row
+rendered at zero height with no scroll anywhere to reach them. Indistinguishable from having no
+notes — `ListEmptyComponent` is invisible for the same reason. It also produced the report that
+the app had "no edit feature": no row could be tapped.
+
+Fixed by making the list the screen's ONLY scrolling surface (`ListHeaderComponent` /
+`ListFooterComponent`), not by wrapping the screen in a `ScrollView`, which would nest two
+scroll views and break virtualisation.
+
+**Nine hypotheses were wrong before the instruments were added**: sync rules not deployed, split
+`@powersync/common`, `useQuery` result shape, missing stream subscription, publication scope,
+token mismatch, FTS triggers, a sign-in deadlock, replication. Every one was eliminated by
+measurement, none by argument. The measurement took one run.
+
+### 2. `await connect()` held the whole app behind a spinner
+
+`connect()` resolves only once the sync status passes through `connecting` and back out
+(`AbstractStreamingSyncImplementation.connect`). On this device it never did — four launches,
+`powersync_control(start)` and an `EstablishSyncStream` each time, `"connected":true` **zero**
+times. Awaited, `db` stayed null forever and `PowerSyncProvider` covered the app, including the
+sign-in button inside it. Now fired and logged, not awaited. Regression test hangs `connect`
+deliberately and fails on a timeout; verified by reinstating the `await`.
+
+### 3. The conflict base was a timestamp no client could ever hold
+
+Reported from the device: any edit, online or offline, unraced, updated the note AND forked a
+second one. Two independent causes, same symptom:
+
+1. `notes.updated_at` is **server-owned** — ignored on insert (`default now()`), overwritten by
+   `notes_set_updated_at` on update. A device-created note holds a device clock; the server
+   holds a Postgres clock.
+2. Even for a downloaded note the serialisers disagree: PowerSync writes
+   `2026-08-04T04:13:37.916374Z`, PostgREST returns `2026-08-04T04:13:37.916374+00:00`. Same
+   instant, different zone suffix — compared with `!==`.
+
+The base is the note **body** now, end to end: `syncOp.base_content`,
+`note_edit_base.base_content`, `sessionBase` holding the seeded body. `Date.parse` was rejected:
+it fixes (2) and leaves (1). An empty body is a real base, so every guard tests
+`undefined`/`null`, never falsiness — a falsy check anywhere turns that edit into unconditional
+last-write-wins.
+
+**`note_edit_base` is local-only and does not migrate on upgrade.** Rows from the old build read
+back `base_content` null; the connector treats null as no base rather than forwarding it.
+
+**Why the suite never caught it:** every test in `conflict-copy.test.ts` fed `note.updated_at`
+straight back from the response that produced it — the one input no client can hold. Fed a body
+instead, `applies normally when the base matches` became a real assertion for the first time.
+
+### 4. `sync-rules-isolation` stripped no comments on a CRLF checkout
+
+`split("\n")` leaves `\r` on every line; `\r` is a line terminator to a JS regex, so `.` will
+not cross it and `#.*$` matches nothing. `directives` silently became the raw file — the exact
+thing it exists to avoid. Red on Windows, green on Linux. This repo warns `LF will be replaced
+by CRLF` on every commit, so CRLF is the normal case here.
+
+### STILL OPEN — server-to-device sync does not run
+
+`"connected":true` has never been observed. Uploads work (`completed_upload` seen; notes reach
+the web). The ten local rows came from an earlier session. Consequences for the checklist:
+
+- Checklist step 3 (edit on web, sync, search the old word) **cannot pass**.
+- Security table's last row (purge on web disappears from the phone) **cannot pass**.
+- Everything else is unaffected, and conflict detection no longer depends on download working
+  at all, now that the base is a body.
+
+Server side is provably healthy — PowerSync Diagnostics App shows bucket
+`1#user_data|0["5f9ef175-…"]` **Ready**, `notes` 10/10 synced, stream `user_data` active and
+default, and that app is itself a PowerSync client syncing fine against the same instance. So
+the fault is client-side and still unlocated. **Next step is instrumentation, not argument:** a
+trace-level logger (`createConsoleLogger({ minLevel: LogLevels.trace })`) is what made the
+sync engine's `powersync_control` conversation visible at all — the SDK defaults to `info`, and
+at that level a stalled connection leaves no trace anywhere, including in the PowerSync
+instance's own logs.
+
+### Builds and CI
+
+- **EAS preview APK, commit `ec537dc`** (before the conflict fix):
+  `https://expo.dev/artifacts/eas/3okWbAV3yXt_fMJMpY3M9WUNDkWjiwEc-sWX4gRXhTA.apk`
+- **GitHub Actions** `.github/workflows/android-apk.yml` — `workflow_dispatch` plus `push` to
+  `main`. First green run took 24m49s. Signed with the Expo template's DEBUG keystore, so its
+  signature differs from EAS's: installing one over the other needs an uninstall first, and it
+  is not Play-Store material.
+- Four `EXPO_PUBLIC_*` repository **variables** (not secrets — they are compiled into the
+  bundle) are set and asserted non-empty before the slow part of the job.
+- EAS reported `New builds are blocked until your billing period resets`, then built anyway.
+  Treat the quota as nearly exhausted.
+
+### Process notes this session earned
+
+- **A diagnostic hidden behind the bug it diagnoses is useless.** The panel that answered the
+  empty-list question in one run was invisible for hours because `await connect()` put a spinner
+  over it. Make the instrument reachable first, even if that means a temporary change.
+- **`gh`/`eas` polling flags must be verified.** `eas build:view --non-interactive` is not a
+  valid flag; a background poller failed silently for ~21 minutes while reporting progress.
+- Read the `Cached:` line. A full `--force` run is what proves a gate ran; the final gate here
+  was 27/27, **0 cached**, 539 tests.
+
 ## 2026-08-04 — the whole-branch review ran. Round 1 of 2.
 
 Four reviewers over Tasks 14–23, plus an inline pass on the `.tsx` files (which no reviewer
@@ -82,11 +206,23 @@ iterating on code.
 
 ### Device checklist — what round 1 changed about it
 
+> **Superseded in places by session 2 (top of this file).** Dev client `f603e36f` is dead: it
+> predates `@op-engineering/op-sqlite` and throws `Base module not found` at import, taking every
+> route's default export with it. Dev client `bd5832eb` replaces it and shares the working
+> preview APK's native fingerprint (`072c009a…`). Two checklist rows cannot pass at all until
+> server-to-device sync is fixed — see STILL OPEN above.
+>
+> **The dev client CAN test airplane mode**, contrary to the note below: it needs Metro only at
+> launch. Be online when the app starts, then switch to airplane mode and do not reload. No
+> checklist step requires a cold start while offline. `adb backup` needs Android platform-tools,
+> which are not installed on this machine.
+
 **One prerequisite left.**
 
 - **No new dev client build is needed.** Round 1 added no native module — `lib/in-flight.ts`
   is plain JS — so EAS `f603e36f` still loads everything over Metro. (`37039bce` is still too
-  old: it predates `expo-sharing`/`expo-file-system`.)
+  old: it predates `expo-sharing`/`expo-file-system`.) **Wrong as of session 2** — see the note
+  above; `f603e36f` cannot start.
 - The API prerequisite is **discharged**: production now runs the trash fix, so the trash
   check below tests the fix rather than the old bug.
 
