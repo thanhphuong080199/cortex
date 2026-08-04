@@ -61,8 +61,9 @@ describe("captureNote", () => {
    * `datetime()` yields `2026-08-03 10:00:00`: space-separated, no zone, second precision.
    * Rows echoed back by the server carry a `T` and a `Z`, and a space sorts BEFORE `T` in
    * ASCII -- so within a single day every locally captured note would sort ahead of every
-   * synced one whatever its real time. `base_updated_at` is `z.iso.datetime()` on the server,
-   * which rejects the space form outright.
+   * synced one whatever its real time. (The conflict base no longer reads this column -- it
+   * carries the note body, because `updated_at` is server-owned and the device's value never
+   * matched -- so sort order is now the whole of what this format protects.)
    */
   it("stores timestamps as ISO-8601 UTC with milliseconds", async () => {
     await captureNote(target(db), { content: "x", domain: null });

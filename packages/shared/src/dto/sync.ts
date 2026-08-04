@@ -27,10 +27,32 @@ export const syncOp = z.object({
   // still works but is deprecated and would leave two styles in one package.
   id: z.uuid(),
   data: z.record(z.string(), z.unknown()).nullish(),
-  // The notes.updated_at the client's edit was based on. The ROUTER sends it only on a
-  // notes PATCH -- this schema does not gate that, and accepting a stray one elsewhere is
-  // harmless because nothing downstream reads it.
-  base_updated_at: z.iso.datetime().optional(),
+  /**
+   * The note BODY the client's edit was based on. The connector sends it only on a notes
+   * PATCH -- this schema does not gate that, and accepting a stray one elsewhere is harmless
+   * because nothing downstream reads it.
+   *
+   * It was `base_updated_at: z.iso.datetime()` and that could not work, for two independent
+   * reasons that both produced the same symptom: a conflict copy on EVERY edit, with nothing
+   * in conflict.
+   *
+   *   1. `notes.updated_at` is server-owned. The insert path ignores whatever the client sends
+   *      (`default now()`), and `notes_set_updated_at` overwrites it on every update. A note
+   *      created on a device therefore holds the DEVICE clock locally and a Postgres clock on
+   *      the server -- two different instants, never equal.
+   *   2. Even for a note the device downloaded, the two serialisers disagree. PowerSync writes
+   *      `2026-08-04T04:13:37.916374Z`; PostgREST returns `2026-08-04T04:13:37.916374+00:00`.
+   *      Same instant, same precision, different zone suffix -- and the server compared them
+   *      as strings.
+   *
+   * Both are gone here rather than papered over with `Date.parse`, which would fix (2) and
+   * leave (1). A body is the thing the user actually edited: it needs no clock, survives any
+   * serialiser, and does not depend on the device having completed a download first.
+   *
+   * An empty string is a legitimate base -- a user may edit a note down to nothing and then
+   * edit it again -- so callers must test for `undefined`, never for falsiness.
+   */
+  base_content: z.string().optional(),
 });
 export type SyncOp = z.infer<typeof syncOp>;
 

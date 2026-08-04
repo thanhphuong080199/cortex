@@ -10,10 +10,10 @@ import { NOW_ISO } from "./sql";
  * SQL left in a `.tsx` is SQL nothing can execute in a test — and these carry the timestamp
  * format the entire conflict path depends on.
  *
- * Every one stamps `updated_at` through `NOW_ISO`. That column is what the NEXT editing session
- * records as its `base_updated_at` and what the connector sends to a server that validates it
- * as `z.iso.datetime()`, so a `datetime('now')` here is not a formatting nit — it is an upload
- * the server rejects.
+ * Every one stamps `updated_at` through `NOW_ISO`. The conflict base no longer reads that column
+ * -- it is a body now, because `updated_at` is server-owned and the two never matched -- but the
+ * format still decides how locally written rows SORT against synced ones, which is the first of
+ * the three failures documented in `sql.ts`.
  */
 export interface NoteEditTarget {
   execute(sql: string, params?: unknown[]): Promise<unknown>;

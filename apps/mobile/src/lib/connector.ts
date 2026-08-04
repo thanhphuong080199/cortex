@@ -15,7 +15,7 @@ import { supabase } from "./supabase";
  * one that parses under plain Node, so a future value import here fails loudly at the import
  * rather than as a Rollup Flow parse error deep inside React Native.
  */
-export function crudEntryToSyncOp(entry: CrudEntry, baseUpdatedAt?: string): SyncOp {
+export function crudEntryToSyncOp(entry: CrudEntry, baseContent?: string): SyncOp {
   const op: SyncOp = {
     op_id: String(entry.clientId),
     op: entry.op as SyncOp["op"],
@@ -31,8 +31,12 @@ export function crudEntryToSyncOp(entry: CrudEntry, baseUpdatedAt?: string): Syn
   // would be meaningless and the server ignores it, so do not send one. The `op` half of this
   // guard matters as much as the `table` half: a base on a PUT would tell the server a
   // full-row overwrite was based on a revision, manufacturing a conflict copy for a create.
-  if (baseUpdatedAt && entry.table === "notes" && entry.op === "PATCH") {
-    op.base_updated_at = baseUpdatedAt;
+  //
+  // `!== undefined`, NOT truthiness: the base is a body now, and "" is a real one -- a note
+  // edited down to nothing and then edited again. Dropped, it would reach the server as "no
+  // base at all" and apply unconditionally, which is the last-write-wins this exists to stop.
+  if (baseContent !== undefined && entry.table === "notes" && entry.op === "PATCH") {
+    op.base_content = baseContent;
   }
   return op;
 }
@@ -66,11 +70,16 @@ export class ApiConnector implements PowerSyncBackendConnector {
     const bases = new Map<string, string>();
     for (const entry of batch.crud) {
       if (entry.table !== "notes" || entry.op !== "PATCH") continue;
-      const row = await database.getOptional<{ base_updated_at: string }>(
-        "SELECT base_updated_at FROM note_edit_base WHERE note_id = ?",
+      const row = await database.getOptional<{ base_content: string | null }>(
+        "SELECT base_content FROM note_edit_base WHERE note_id = ?",
         [entry.id],
       );
-      if (row) bases.set(entry.id, row.base_updated_at);
+      // A row whose `base_content` is null is one written by a build that stored
+      // `base_updated_at` in this local-only table. The renamed column reads back as null there,
+      // and null is not a body anyone edited -- sending it would be a lie about what the user
+      // saw. Treated as no base, so that one stale edit applies as last-write-wins instead of
+      // manufacturing a conflict copy against a body that was never on screen.
+      if (row?.base_content != null) bases.set(entry.id, row.base_content);
     }
 
     const {

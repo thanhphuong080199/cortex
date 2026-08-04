@@ -126,8 +126,8 @@ export class NoteService {
   }
 
   /**
-   * The offline write path's update (phase 1b spec §6). `baseUpdatedAt` is the
-   * notes.updated_at the client's edit was based on.
+   * The offline write path's update (phase 1b spec §6). `baseContent` is the note BODY the
+   * client's edit was based on.
    *
    * Body conflicts are the only ones worth machinery: metadata columns are small and
    * independently settable, so last-write-wins on those is invisible, while
@@ -136,22 +136,34 @@ export class NoteService {
    * Comparison is on `content`, NOT `content_text` -- the latter is a generated column
    * (strip_markdown(content), 00002_content.sql:6) and is not client-writable, so two
    * genuinely different bodies can share one content_text.
+   *
+   * THE BASE IS A BODY, NOT A TIMESTAMP, and that is a correction rather than a preference.
+   * `base_updated_at` produced a conflict copy on every single edit: `updated_at` is
+   * server-owned (`default now()` plus the `notes_set_updated_at` trigger), so a device-created
+   * note never holds the server's value, and even a downloaded one is written by PowerSync as
+   * `...916374Z` against PostgREST's `...916374+00:00`. Comparing bodies needs no clock and no
+   * agreement between two serialisers.
+   *
+   * An empty string is a real base -- a note edited down to nothing and then edited again --
+   * so the guard tests `undefined`, not falsiness.
    */
   async updateWithConflictCopy(
     id: string,
     input: UpdateNoteInput,
-    baseUpdatedAt?: string,
+    baseContent?: string,
   ): Promise<{ note: Note; conflictCopy: Note | null; linkFailed?: boolean }> {
-    if (baseUpdatedAt === undefined || input.content === undefined) {
+    if (baseContent === undefined || input.content === undefined) {
       return { note: await this.update(id, input), conflictCopy: null };
     }
 
     const { data: current, error: readError } = await this.client.from("notes")
-      .select("content, updated_at")
+      .select("content")
       .eq("id", id).eq("user_id", this.userId).is("deleted_at", null).single();
     if (readError) throw mapPostgrestError(readError);
 
-    const moved = current.updated_at !== baseUpdatedAt;
+    // "Someone changed the body since the client last saw it." Under the old timestamp form
+    // this was `moved`, and it was true even when nobody had touched the note.
+    const moved = current.content !== baseContent;
     const diverged = current.content !== input.content;
     if (!moved || !diverged) {
       return { note: await this.update(id, input), conflictCopy: null };

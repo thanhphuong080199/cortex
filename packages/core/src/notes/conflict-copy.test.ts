@@ -14,17 +14,17 @@ beforeAll(async () => {
 describe("NoteService.updateWithConflictCopy", () => {
   it("applies normally when the base matches", async () => {
     const note = await svc.create({ content: "original" });
-    const r = await svc.updateWithConflictCopy(note.id, { content: "offline edit" }, note.updated_at);
+    const r = await svc.updateWithConflictCopy(note.id, { content: "offline edit" }, note.content);
     expect(r.conflictCopy).toBeNull();
     expect(r.note.content).toBe("offline edit");
   });
 
   it("keeps the server body and copies the incoming one when both diverged", async () => {
     const note = await svc.create({ content: "original" });
-    const base = note.updated_at;
+    const base = note.content;
     // Someone else (web) edits first; the offline client still holds `base`.
     const server = await svc.update(note.id, { content: "web edit" });
-    expect(server.updated_at).not.toBe(base);
+    expect(server.content).not.toBe(base);
 
     const r = await svc.updateWithConflictCopy(note.id, { content: "phone edit" }, base);
 
@@ -36,7 +36,7 @@ describe("NoteService.updateWithConflictCopy", () => {
 
   it("links the copy back to the original", async () => {
     const note = await svc.create({ content: "original" });
-    const base = note.updated_at;
+    const base = note.content;
     await svc.update(note.id, { content: "web edit" });
     const r = await svc.updateWithConflictCopy(note.id, { content: "phone edit" }, base);
 
@@ -47,13 +47,50 @@ describe("NoteService.updateWithConflictCopy", () => {
     expect(data!.to_note_id).toBe(note.id);
   });
 
-  it("is NOT a conflict when the row moved but content is identical", async () => {
+  it("is NOT a conflict when the row was touched but its body is identical", async () => {
     const note = await svc.create({ content: "same" });
-    const base = note.updated_at;
+    const base = note.content;
     await svc.update(note.id, { lifecycle: "active" });   // moves updated_at, not content
     const r = await svc.updateWithConflictCopy(note.id, { content: "same" }, base);
     expect(r.conflictCopy).toBeNull();
     expect(r.note.content).toBe("same");
+  });
+
+  /**
+   * The case the device hit, and the one this whole file failed to cover: an ordinary edit with
+   * nobody racing it produced a conflict copy every single time.
+   *
+   * Under `base_updated_at` that was unavoidable. `updated_at` is server-owned -- ignored on
+   * insert (`default now()`), overwritten by `notes_set_updated_at` on update -- so a note
+   * created on a device holds a device clock the server never issued, and a downloaded one is
+   * written by PowerSync as `2026-08-04T04:13:37.916374Z` where PostgREST returns
+   * `...916374+00:00`. Compared as strings, the row had always "moved".
+   *
+   * Every test above fed `note.updated_at` back from the response that produced it, so the
+   * matching branch was only ever exercised with a byte-identical PostgREST string -- the one
+   * input no client can ever hold.
+   */
+  it("does not copy an edit that nobody raced, however the base was obtained", async () => {
+    const note = await svc.create({ content: "original" });
+    // Deliberately NOT `note.updated_at`: the point is that a base the client actually has --
+    // the body it displayed -- is enough, with no clock and no serialiser agreement.
+    const r = await svc.updateWithConflictCopy(note.id, { content: "phone edit" }, "original");
+    expect(r.conflictCopy).toBeNull();
+    expect(r.note.content).toBe("phone edit");
+  });
+
+  it("treats an empty body as a real base, not as an absent one", async () => {
+    // A note edited down to nothing has "" as the next session's base. If any guard on the path
+    // tests falsiness, that base vanishes and the edit applies unconditionally -- last-write-wins
+    // over whatever the server holds, on the note whose text the user just destroyed.
+    const note = await svc.create({ content: "original" });
+    await svc.update(note.id, { content: "" });
+    await svc.update(note.id, { content: "web wrote something here" });
+
+    const r = await svc.updateWithConflictCopy(note.id, { content: "phone edit" }, "");
+
+    expect(r.conflictCopy).not.toBeNull();
+    expect(r.note.content).toBe("web wrote something here");
   });
 
   it("applies unconditionally when no base is supplied", async () => {
@@ -68,7 +105,7 @@ describe("NoteService.updateWithConflictCopy", () => {
     // Force the link insert to fail by pointing the service at a client whose `links`
     // writes are rejected -- the copy must still exist and be returned.
     const note = await svc.create({ content: "original" });
-    const base = note.updated_at;
+    const base = note.content;
     await svc.update(note.id, { content: "web edit" });
 
     const sabotaged = createUserClient(alice.token);
@@ -88,7 +125,7 @@ describe("NoteService.updateWithConflictCopy", () => {
 
   it("omits linkFailed entirely on the happy path", async () => {
     const note = await svc.create({ content: "original" });
-    const base = note.updated_at;
+    const base = note.content;
     await svc.update(note.id, { content: "web edit" });
     const r = await svc.updateWithConflictCopy(note.id, { content: "phone edit" }, base);
     expect(r.linkFailed).toBeUndefined();
@@ -96,7 +133,7 @@ describe("NoteService.updateWithConflictCopy", () => {
 
   it("copies only the body, applying metadata to the surviving note", async () => {
     const note = await svc.create({ content: "original" });
-    const base = note.updated_at;
+    const base = note.content;
     await svc.update(note.id, { content: "web edit" });
     const r = await svc.updateWithConflictCopy(
       note.id, { content: "phone edit", lifecycle: "archived" }, base,

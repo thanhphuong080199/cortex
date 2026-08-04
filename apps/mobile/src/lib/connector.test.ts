@@ -11,7 +11,9 @@ const { ApiConnector, crudEntryToSyncOp } = await import("./connector.js");
 const { SYNC_UPLOAD_MAX_OPS } = await import("@cortex/shared");
 
 const id = "11111111-1111-4111-8111-111111111111";
-const base = "2026-08-02T10:00:00.000Z";
+// A BODY, not a timestamp. `updated_at` is server-owned, so the value this used to carry was
+// one the server had never issued, and every edit came back as a conflict copy.
+const base = "the body this edit started from";
 
 describe("crudEntryToSyncOp", () => {
   it("maps a PUT with its row data", () => {
@@ -33,12 +35,24 @@ describe("crudEntryToSyncOp", () => {
     expect(Object.hasOwn(op, "data")).toBe(false);
   });
 
-  it("attaches base_updated_at to a notes PATCH", () => {
+  it("attaches base_content to a notes PATCH", () => {
     const op = crudEntryToSyncOp(
       { clientId: 5, op: "PATCH", table: "notes", id, opData: { content: "x" } } as never,
       base,
     );
-    expect(op.base_updated_at).toBe(base);
+    expect(op.base_content).toBe(base);
+  });
+
+  it("attaches an EMPTY base body rather than dropping it", () => {
+    // A note edited down to nothing has "" as its base. Guarded on truthiness, the key would be
+    // absent, the server would read "no base at all", and the edit would apply unconditionally --
+    // last-write-wins on exactly the note whose previous content the user destroyed.
+    const op = crudEntryToSyncOp(
+      { clientId: 8, op: "PATCH", table: "notes", id, opData: { content: "x" } } as never,
+      "",
+    );
+    expect(op.base_content).toBe("");
+    expect(Object.hasOwn(op, "base_content")).toBe(true);
   });
 
   it("never attaches a base to a non-notes table", () => {
@@ -46,7 +60,7 @@ describe("crudEntryToSyncOp", () => {
       { clientId: 6, op: "PATCH", table: "checkins", id, opData: { mood: 2 } } as never,
       base,
     );
-    expect(op.base_updated_at).toBeUndefined();
+    expect(op.base_content).toBeUndefined();
   });
 
   /**
@@ -60,7 +74,7 @@ describe("crudEntryToSyncOp", () => {
       { clientId: 7, op: "PUT", table: "notes", id, opData: { content: "x" } } as never,
       base,
     );
-    expect(op.base_updated_at).toBeUndefined();
+    expect(op.base_content).toBeUndefined();
   });
 
   /**
@@ -126,12 +140,12 @@ describe("ApiConnector.uploadData", () => {
 
   it("attaches the recorded edit base to a notes PATCH and spends it on success", async () => {
     const db = database([patch]);
-    getOptional.mockResolvedValueOnce({ base_updated_at: "2026-08-02T10:00:00.000Z" });
+    getOptional.mockResolvedValueOnce({ base_content: "the body this edit started from" });
 
     await new ApiConnector().uploadData(db);
 
     const body = JSON.parse((fetchMock.mock.calls[0] as never[])[1]!["body"] as string);
-    expect(body.ops[0].base_updated_at).toBe("2026-08-02T10:00:00.000Z");
+    expect(body.ops[0].base_content).toBe("the body this edit started from");
     expect(complete).toHaveBeenCalledOnce();
     // A base that outlives the op it was checked against gets applied to the user's NEXT edit
     // and manufactures a conflict copy for a conflict that never happened.
@@ -144,8 +158,22 @@ describe("ApiConnector.uploadData", () => {
     await new ApiConnector().uploadData(db);
 
     const body = JSON.parse((fetchMock.mock.calls[0] as never[])[1]!["body"] as string);
-    expect(body.ops[0].base_updated_at).toBeUndefined();
+    expect(body.ops[0].base_content).toBeUndefined();
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("sends no base for a row left behind by the base_updated_at build", async () => {
+    // note_edit_base is local-only, so an upgrade does not migrate it: rows written before the
+    // column was renamed read back with base_content null. Null is not a body anyone edited --
+    // forwarding it would claim the user started from an empty note and conflict-copy every
+    // edit, which is the bug this whole change exists to remove.
+    const db = database([patch]);
+    getOptional.mockResolvedValueOnce({ base_content: null });
+
+    await new ApiConnector().uploadData(db);
+
+    const body = JSON.parse((fetchMock.mock.calls[0] as never[])[1]!["body"] as string);
+    expect(Object.hasOwn(body.ops[0], "base_content")).toBe(false);
   });
 
   it("discards the batch on a 400, because retrying it forever would wedge the queue", async () => {

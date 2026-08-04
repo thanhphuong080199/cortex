@@ -40,16 +40,20 @@ export function NoteEditor({ id }: { id: string }) {
   const [saveState, setSaveState] = useState<"idle" | "pending" | "saved" | "failed">("idle");
 
   /**
-   * The `updated_at` of the row whose body was seeded into the box — captured at seed time and
-   * never refreshed.
+   * The BODY that was seeded into the box — captured at seed time and never refreshed.
    *
-   * Reading `note.updated_at` at save time instead would be wrong in the one case that
-   * matters. The content is seeded once and then left alone, so a change arriving from the
-   * server mid-session advances `notes.updated_at` while the text on screen still reflects the
-   * OLDER body. Recording that newer value as the base tells the server the user edited the
-   * current version; its `moved` check finds nothing, no conflict copy is made, and the
-   * stale-based edit silently overwrites the newer one — which is exactly the outcome spec
-   * §6.2 exists to prevent, arriving through the mechanism meant to prevent it.
+   * It was `note.updated_at`, and that turned every edit into a conflict copy: `updated_at` is
+   * server-owned, so this device's value was either its own clock (for a note captured here) or
+   * PowerSync's `...916374Z` against the `...916374+00:00` PostgREST hands the server. The body
+   * is what the user actually edited, and it needs no clock and no shared serialiser.
+   *
+   * Reading `note.content` at save time instead would be wrong in the one case that matters.
+   * The box is seeded once and then left alone, so a change arriving from the server
+   * mid-session replaces the row's body while the text on screen still reflects the OLDER one.
+   * Recording that newer body as the base tells the server the user edited the current version;
+   * its check finds nothing moved, no conflict copy is made, and the stale-based edit silently
+   * overwrites the newer one — exactly the outcome spec §6.2 exists to prevent, arriving
+   * through the mechanism meant to prevent it.
    */
   const sessionBase = useRef<string | null>(null);
 
@@ -57,16 +61,20 @@ export function NoteEditor({ id }: { id: string }) {
   useEffect(() => {
     if (note && content === null) {
       setContent(note.content);
-      sessionBase.current = note.updated_at;
+      sessionBase.current = note.content;
     }
   }, [note, content]);
 
   async function save(next: string) {
     const base = sessionBase.current;
+    // `=== null`, NOT falsiness. The base is a body now, and "" is a real one: a note edited
+    // down to nothing still opens, seeds an empty box, and must still save. Under `if (!base)`
+    // that note would type into a box that writes nothing for the rest of the session.
+    //
     // Unreachable while the input only renders after seeding (below), and deliberately kept:
     // saving with no base is worse than not saving, because the upload then carries no base at
     // all and the server cannot detect a conflict on it.
-    if (!base) return;
+    if (base === null) return;
     // Base first: if the write lands and the base does not, the upload carries no base and the
     // server cannot detect the conflict at all.
     await recordEditBase(db, id, base);

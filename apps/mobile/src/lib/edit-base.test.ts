@@ -20,7 +20,7 @@ function sqlite() {
   )`);
   // localOnly in packages/sync/src/schema.ts, so it never syncs -- but it is a real table on
   // the device and the connector reads it by note_id.
-  db.exec(`CREATE TABLE note_edit_base (id TEXT PRIMARY KEY, note_id TEXT, base_updated_at TEXT)`);
+  db.exec(`CREATE TABLE note_edit_base (id TEXT PRIMARY KEY, note_id TEXT, base_content TEXT)`);
   return db;
 }
 
@@ -36,6 +36,10 @@ function target(db: Database.Database): EditBaseTarget & NoteEditTarget {
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const T0 = "2026-08-02T10:00:00.000Z";
 const T1 = "2026-08-02T11:00:00.000Z";
+// The base is a BODY, not a timestamp: `updated_at` is server-owned, so the value this table
+// used to hold was one the server had never issued and every edit read as a conflict.
+const B0 = "body";
+const B1 = "a later body";
 
 let db: Database.Database;
 beforeEach(() => {
@@ -55,36 +59,47 @@ const note = () =>
 
 describe("recordEditBase", () => {
   it("records the base on the first edit of a session", async () => {
-    await recordEditBase(target(db), "n1", T0);
+    await recordEditBase(target(db), "n1", B0);
 
     const [row] = bases();
     expect(row.note_id).toBe("n1");
-    expect(row.base_updated_at).toBe(T0);
+    expect(row.base_content).toBe(B0);
     // The connector reads this by note_id, so a row without one is invisible to it.
     expect(row.id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
+  it("stores an empty body as a base rather than skipping it", async () => {
+    // "" is a real base: a note edited down to nothing opens again with an empty box, and the
+    // next edit is still based on that emptiness. Every falsy check on this path -- here, in the
+    // connector, in the editor's save guard -- would drop it, and the upload would then carry no
+    // base at all and apply as last-write-wins, which is what the base exists to prevent.
+    await recordEditBase(target(db), "n1", "");
+
+    expect(bases()).toHaveLength(1);
+    expect(bases()[0].base_content).toBe("");
+  });
+
   it("does NOT overwrite an existing base", async () => {
-    await recordEditBase(target(db), "n1", T0);
-    await recordEditBase(target(db), "n1", T1);
+    await recordEditBase(target(db), "n1", B0);
+    await recordEditBase(target(db), "n1", B1);
 
     // Advancing it would walk the base forward to the user's own last keystroke, the server's
-    // `moved` check would never fire, and conflict handling would silently become
-    // last-write-wins -- the exact thing spec 6.2 exists to prevent.
+    // check would never fire, and conflict handling would silently become last-write-wins --
+    // the exact thing spec 6.2 exists to prevent.
     expect(bases()).toHaveLength(1);
-    expect(bases()[0].base_updated_at).toBe(T0);
+    expect(bases()[0].base_content).toBe(B0);
   });
 
   it("keeps a base left over from a session that never uploaded", async () => {
-    db.prepare(
-      "INSERT INTO note_edit_base (id, note_id, base_updated_at) VALUES ('x', 'n1', ?)",
-    ).run(T0);
+    db.prepare("INSERT INTO note_edit_base (id, note_id, base_content) VALUES ('x', 'n1', ?)").run(
+      B0,
+    );
 
-    await recordEditBase(target(db), "n1", T1);
+    await recordEditBase(target(db), "n1", B1);
 
     // That leftover means an edit exists which was never uploaded, and it is still based on
-    // the older value. Replacing it would tell the server the edit was newer than it is.
-    expect(bases()[0].base_updated_at).toBe(T0);
+    // the older body. Replacing it would tell the server the edit was newer than it is.
+    expect(bases()[0].base_content).toBe(B0);
   });
 
   it("tracks each note separately", async () => {
@@ -92,13 +107,13 @@ describe("recordEditBase", () => {
       "INSERT INTO notes (id, content, lifecycle, updated_at) VALUES ('n2', 'other', 'inbox', ?)",
     ).run(T1);
 
-    await recordEditBase(target(db), "n1", T0);
-    await recordEditBase(target(db), "n2", T1);
+    await recordEditBase(target(db), "n1", B0);
+    await recordEditBase(target(db), "n2", B1);
 
     // A guard keyed on "any base exists" rather than on this note would silently skip the
     // second note, and only that note's conflicts would go undetected.
     expect(bases()).toHaveLength(2);
-    expect(bases().map((b) => b.base_updated_at).sort()).toEqual([T0, T1]);
+    expect(bases().map((b) => b.base_content).sort()).toEqual([B1, B0].sort());
   });
 
   it("writes nothing when a base is already there", async () => {
@@ -108,7 +123,7 @@ describe("recordEditBase", () => {
       execute: write,
     };
 
-    await recordEditBase(found, "n1", T1);
+    await recordEditBase(found, "n1", B1);
 
     expect(write).not.toHaveBeenCalled();
   });
@@ -120,8 +135,9 @@ describe("the editor's local mutations", () => {
 
     const n = note();
     expect(n.content).toBe("edited body");
-    // This column becomes the NEXT session's base_updated_at and is validated server-side as
-    // z.iso.datetime(). `datetime('now')` here is an upload the server rejects, not a nit.
+    // The conflict base no longer reads this column, but the format still decides how locally
+    // written rows sort against synced ones -- `datetime('now')` puts every one of them below
+    // every synced row within the same day. See sql.ts.
     expect(n.updated_at).toMatch(ISO);
     expect(n.updated_at).not.toBe(T0);
   });

@@ -58,13 +58,17 @@ const checkins = new Table({
 });
 
 /**
- * Local-only: the notes.updated_at each in-progress local edit was based on. It is the
- * input to the server's conflict-copy check (spec §6.2) and is meaningless anywhere but
- * this device, so it must never sync -- hence localOnly, which also keeps it out of the
- * upload queue entirely.
+ * Local-only: the note BODY each in-progress local edit was based on. It is the input to the
+ * server's conflict-copy check (spec §6.2) and is meaningless anywhere but this device, so it
+ * must never sync -- hence localOnly, which also keeps it out of the upload queue entirely.
+ *
+ * It held `base_updated_at` until that was found to fire a conflict copy on every edit:
+ * `notes.updated_at` is server-owned, so the value here was either a device clock the server
+ * had never seen, or PowerSync's `...Z` spelling of a timestamp PostgREST returns as
+ * `...+00:00`. A body needs neither a shared clock nor a shared serialiser.
  */
 const note_edit_base = new Table(
-  { note_id: column.text, base_updated_at: column.text },
+  { note_id: column.text, base_content: column.text },
   { localOnly: true },
 );
 

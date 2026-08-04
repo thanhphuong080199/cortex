@@ -1044,7 +1044,7 @@ API='https://<api>.up.railway.app'
 NOTE_ID='<a client-generated v4 UUID>'   # must be real hex: the DTO rejects a bad one at 400
 
 # 1. PUT  -> 201 {"applied":["1"], ...}   the router writes under RLS with the user's JWT
-# 2. PATCH -> "conflict_copies":[]        updateWithConflictCopy: no base_updated_at, no copy
+# 2. PATCH -> "conflict_copies":[]        updateWithConflictCopy: no base_content, no copy
 # 3. replay op 1 verbatim -> "applied":["1"], NOT "failed"
 ```
 

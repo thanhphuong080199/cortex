@@ -173,7 +173,7 @@ async function applyNoteOp(
     // empty body -- so the trash op would fail on the work it had just done. Skipped rather
     // than returned, because the media resolution below still has to run.
     if (Object.keys(patch).length > 0) {
-      const r = await notes.updateWithConflictCopy(op.id, patch, op.base_updated_at);
+      const r = await notes.updateWithConflictCopy(op.id, patch, op.base_content);
       if (r.conflictCopy) {
         result.conflict_copies.push({ op_id: op.op_id, note_id: r.conflictCopy.id });
         // The copy itself is never dropped (that flag exists precisely so it isn't), but a

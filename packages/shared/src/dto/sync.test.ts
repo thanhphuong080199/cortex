@@ -29,11 +29,22 @@ describe("syncUploadInput", () => {
     expect(syncUploadInput.safeParse({ ops: [{ ...op, id: "nope" }] }).success).toBe(false);
   });
 
-  it("accepts base_updated_at on a notes PATCH", () => {
+  it("accepts base_content on a notes PATCH", () => {
     const r = syncUploadInput.safeParse({
-      ops: [{ ...op, op: "PATCH", base_updated_at: "2026-08-02T10:00:00.000Z" }],
+      ops: [{ ...op, op: "PATCH", base_content: "the body this edit started from" }],
     });
     expect(r.success).toBe(true);
+  });
+
+  it("accepts an EMPTY base_content", () => {
+    // "" is a real base -- a note edited down to nothing, then edited again. A `.min(1)` here,
+    // or any falsy guard on the way to it, turns that note's next edit into an unconditional
+    // last-write-wins over whatever the server holds.
+    const r = syncUploadInput.safeParse({ ops: [{ ...op, op: "PATCH", base_content: "" }] });
+    expect(r.success).toBe(true);
+    // Parsed back out, not just accepted: a schema that admits "" and then drops it on the way
+    // through leaves the server with no base at all, which is the failure this guards.
+    expect(r.data?.ops[0]?.base_content).toBe("");
   });
 
   it("exposes exactly the six synced tables", () => {

@@ -59,7 +59,7 @@ describe("POST /sync/upload", () => {
     await post(alice.token, {
       ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "original" } }],
     }).expect(201);
-    // Web edits it, moving updated_at away from the phone's stale base.
+    // Web edits it, moving the server body away from the one the phone started from.
     await post(alice.token, {
       ops: [{ op_id: "2", op: "PATCH", table: "notes", id, data: { content: "web edit" } }],
     }).expect(201);
@@ -67,7 +67,7 @@ describe("POST /sync/upload", () => {
     const res = await post(alice.token, {
       ops: [{
         op_id: "3", op: "PATCH", table: "notes", id, data: { content: "phone edit" },
-        base_updated_at: "2020-01-01T00:00:00.000Z",
+        base_content: "original",
       }],
     }).expect(201);
     expect(res.body.applied).toEqual(["3"]);
@@ -75,6 +75,36 @@ describe("POST /sync/upload", () => {
     expect(res.body.conflict_copies[0].op_id).toBe("3");
     // The link write is not sabotaged on the normal path -- it must not appear here.
     expect(res.body.link_failures).toEqual([]);
+  });
+
+  /**
+   * The case the device actually hit, and the one nothing covered: an ordinary edit, nobody
+   * else touching the note, and a conflict copy every single time.
+   *
+   * `base_updated_at` could not have worked. `updated_at` is server-owned -- ignored on insert
+   * (`default now()`) and overwritten by `notes_set_updated_at` on update -- so a note created
+   * on a device holds a device clock the server has never issued, and even a downloaded one is
+   * written by PowerSync as `...916374Z` where PostgREST returns `...916374+00:00`. The server
+   * compared those strings, found the row "moved" every time, and copied every edit.
+   *
+   * Every existing test fed `note.updated_at` straight back from the response that produced it,
+   * so the matching branch was only ever exercised with a byte-identical PostgREST string.
+   */
+  it("does NOT copy an edit that nobody raced", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "original" } }],
+    }).expect(201);
+
+    const res = await post(alice.token, {
+      ops: [{
+        op_id: "2", op: "PATCH", table: "notes", id, data: { content: "phone edit" },
+        base_content: "original",
+      }],
+    }).expect(201);
+
+    expect(res.body.applied).toEqual(["2"]);
+    expect(res.body.conflict_copies).toEqual([]);
   });
 
   it("resolves an offline media note to a media_item", async () => {

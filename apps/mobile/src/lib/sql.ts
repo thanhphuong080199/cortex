@@ -7,10 +7,11 @@
  *   - Sorting. Rows replication delivers carry ISO with a `T`, and `ORDER BY` on a TEXT column
  *     is a byte comparison in which a space (0x20) sorts below `T` (0x54). Within one day every
  *     locally written row sorts beneath every synced one whatever its real time.
- *   - The conflict base. `syncOp.base_updated_at` is `z.iso.datetime()`, which rejects both the
- *     space form and a numeric offset. An editor that stamps `updated_at` the wrong way poisons
- *     the base the NEXT editing session reads out of that same column, and the upload is
- *     rejected server-side rather than merely mis-sorted.
+ *   - Round-tripping through the API. Anything sending this column to a server that validates
+ *     `z.iso.datetime()` is rejected outright: that schema accepts neither the space form nor a
+ *     numeric offset. (The conflict base no longer reads this column — it carries the note body
+ *     instead, because `updated_at` is server-owned and the device's value never matched — but
+ *     the column is still written on every local edit and still crosses that boundary.)
  *   - Round-tripping. `Date.parse` treats the space form as local time, so anything computing
  *     from it drifts by the device's offset.
  *
