@@ -1,0 +1,113 @@
+name: Android APK
+
+# Manual by default. A release APK compiles op-sqlite's C++ (SQLCipher + FTS5) from source, so
+# this is a ~20-40 minute job -- far too slow to hang off every pull request, and the CI workflow
+# already covers everything about apps/mobile that is checkable in seconds. `workflow_dispatch`
+# lets it run against any branch from the Actions tab; the `push` trigger keeps main's APK current
+# without anyone remembering to ask.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "apps/mobile/**"
+      - "packages/shared/**"
+      - "packages/sync/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/android-apk.yml"
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: build release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # EXPO_PUBLIC_* is compiled INTO the bundle, so anyone holding the APK can read every one of
+    # these. Repository variables rather than secrets says that plainly; storing them as secrets
+    # would imply a confidentiality this mechanism cannot provide, and GitHub would then mask the
+    # values in logs, making a wrong URL harder to spot rather than easier.
+    env:
+      EXPO_PUBLIC_SUPABASE_URL: ${{ vars.EXPO_PUBLIC_SUPABASE_URL }}
+      EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+      EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
+      EXPO_PUBLIC_POWERSYNC_URL: ${{ vars.EXPO_PUBLIC_POWERSYNC_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # BEFORE anything slow. A missing EXPO_PUBLIC_* does not fail the build -- `process.env.X`
+      # is simply inlined as undefined -- so the job would go green after forty minutes and hand
+      # back an APK that starts, signs in, and syncs nothing. That exact pair (POWERSYNC_URL and
+      # API_URL unset) already happened once on EAS.
+      - name: Assert the four EXPO_PUBLIC_* variables are set
+        run: |
+          missing=""
+          for v in EXPO_PUBLIC_SUPABASE_URL EXPO_PUBLIC_SUPABASE_ANON_KEY \
+                   EXPO_PUBLIC_API_URL EXPO_PUBLIC_POWERSYNC_URL; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::unset repository variable(s):$missing — set them under Settings → Secrets and variables → Actions → Variables"
+            exit 1
+          fi
+          echo "api=$EXPO_PUBLIC_API_URL powersync=$EXPO_PUBLIC_POWERSYNC_URL supabase=$EXPO_PUBLIC_SUPABASE_URL"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # React Native 0.86's Gradle plugin targets JDK 17. The runner ships several JDKs and
+      # defaults to a newer one, which fails on Kotlin/AGP version checks rather than anything
+      # informative, so pin it.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: pnpm install --frozen-lockfile
+
+      # @cortex/shared and @cortex/sync are consumed as compiled dist/, and Metro resolves them
+      # that way during `expo export:embed` inside the Gradle build. This is the same step EAS
+      # runs as `eas-build-post-install` in apps/mobile/package.json; without it the bundle phase
+      # fails with "Unable to resolve module @cortex/shared", twenty minutes in.
+      - name: Build the workspace packages the bundle imports
+        run: pnpm turbo run build --filter=@cortex/sync --filter=@cortex/shared
+
+      # apps/mobile/android is gitignored on purpose: app.json is the source of truth and this
+      # regenerates it, which is where `allowBackup="false"` comes from. --no-install because the
+      # workspace is already installed and prebuild would otherwise shell out to npm.
+      - name: Prebuild the Android project
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --platform android --no-install
+
+      # assembleRelease also runs `expo export:embed`, so EXPO_PUBLIC_* has to be in the
+      # environment HERE, not only at prebuild time.
+      - name: Assemble release APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      # The template signs `release` with its own debug keystore (see android/app/build.gradle),
+      # which is fine for internal testing and NOT fine for the Play Store. It also means this
+      # APK's signature differs from anything EAS built, so the first install over an EAS build
+      # needs an uninstall first.
+      - name: Report what was built
+        run: |
+          apk=apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          ls -lh "$apk"
+          echo "sha256: $(sha256sum "$apk" | cut -d' ' -f1)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cortex-${{ github.sha }}.apk
+          path: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
