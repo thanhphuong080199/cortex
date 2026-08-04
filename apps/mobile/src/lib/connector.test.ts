@@ -101,11 +101,26 @@ describe("ApiConnector.uploadData", () => {
   let getCrudBatch: ReturnType<typeof vi.fn>;
   let fetchMock: ReturnType<typeof vi.fn>;
 
-  function database(crud: unknown[], haveMore = false) {
-    complete = vi.fn(async () => {});
+  /**
+   * `remainingAfterUpload` models what a peek at the queue finds once `complete()` has run --
+   * default empty, i.e. nothing else was queued for any note in `crud`. Pass entries here to
+   * simulate a keystroke that queued a fresh CRUD entry for the same note between the read and
+   * the delete.
+   */
+  function database(
+    crud: unknown[],
+    { haveMore = false, remainingAfterUpload = [] as unknown[] } = {},
+  ) {
+    let completed = false;
+    complete = vi.fn(async () => {
+      completed = true;
+    });
     execute = vi.fn(async () => {});
     getOptional = vi.fn(async () => null);
-    getCrudBatch = vi.fn(async () => (crud.length ? { crud, haveMore, complete } : null));
+    getCrudBatch = vi.fn(async () => {
+      const current = completed ? remainingAfterUpload : crud;
+      return current.length ? { crud: current, haveMore, complete } : null;
+    });
     return { getCrudBatch, getOptional, execute } as never;
   }
 
@@ -150,6 +165,24 @@ describe("ApiConnector.uploadData", () => {
     // A base that outlives the op it was checked against gets applied to the user's NEXT edit
     // and manufactures a conflict copy for a conflict that never happened.
     expect(execute).toHaveBeenCalledWith("DELETE FROM note_edit_base WHERE note_id = ?", [noteId]);
+  });
+
+  /**
+   * Finding #6 (handoff, round 2): a keystroke landing between the base read and the delete
+   * queues a fresh CRUD entry for the same note. If the delete runs anyway, that next upload
+   * carries no base and silently last-write-wins over a concurrent web edit -- the exact
+   * conflict-copy machinery in `updateWithConflictCopy` exists to prevent.
+   */
+  it("keeps the base when another edit for the same note is still queued", async () => {
+    const db = database([patch], {
+      remainingAfterUpload: [{ clientId: 2, op: "PATCH", table: "notes", id: noteId, opData: { content: "y" } }],
+    });
+    getOptional.mockResolvedValueOnce({ base_content: "the body this edit started from" });
+
+    await new ApiConnector().uploadData(db);
+
+    expect(complete).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("sends no base when none was recorded", async () => {

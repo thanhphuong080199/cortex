@@ -134,9 +134,16 @@ export class ApiConnector implements PowerSyncBackendConnector {
     }
 
     await batch.complete();
-    // The bases these ops were checked against are spent; keeping them would apply a stale
-    // base to the user's NEXT edit and manufacture a conflict copy that never happened.
+    // The bases these ops were checked against are spent -- ONCE nothing else in the queue
+    // still needs them. A keystroke landing between the read above and this line can queue a
+    // fresh CRUD entry for the same note before `complete()` runs; deleting the base regardless
+    // would strand that next upload with no base at all, which applies as silent
+    // last-write-wins over a concurrent web edit (handoff, round 2, finding #6). A non-
+    // destructive peek at what is left in the queue decides per note.
+    const remaining = await database.getCrudBatch(SYNC_UPLOAD_MAX_OPS);
+    const stillQueued = new Set((remaining?.crud ?? []).map((entry) => entry.id));
     for (const id of bases.keys()) {
+      if (stillQueued.has(id)) continue;
       await database.execute("DELETE FROM note_edit_base WHERE note_id = ?", [id]);
     }
   }
