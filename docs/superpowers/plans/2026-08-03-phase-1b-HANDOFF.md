@@ -22,6 +22,31 @@ editor that could swallow an entire session of typing, a `tag` URL param that cr
 page, and **seven tests that could not fail** (two in `packages/db`, four in `apps/mobile`,
 one in `packages/core`). `@cortex/web`'s whole suite was running nowhere in CI.
 
+### Device checklist — what round 1 changed about it
+
+**Two prerequisites, in this order.**
+
+1. **`railway up` must run before the trash check means anything.** The trash fix is
+   server-side, and `apps/mobile/.env` points `EXPO_PUBLIC_API_URL` at the production Railway
+   API. Testing against a deploy that predates `9f7088d` reproduces the bug, correctly.
+2. **No new dev client build is needed.** Round 1 added no native module — `lib/in-flight.ts`
+   is plain JS — so EAS `f603e36f` still loads everything over Metro. (`37039bce` is still too
+   old: it predates `expo-sharing`/`expo-file-system`.)
+
+**Five checks to add, one per round-1 fix. Each is only observable on a device.**
+
+| Check | Expected |
+|---|---|
+| Airplane mode, trash a note, reconnect | Trashed on web, and it does **not** reappear on the phone. This is the CRITICAL fix; nothing below matters more. |
+| Restore that note from trash, reconnect | Live again on web, and stays live on the phone |
+| Search a word with an apostrophe (`don't`) | Results, never "Could not read notes on this device" |
+| Double-tap Save on capture, and on the media form | Exactly ONE note / one log, not two |
+| Open a note and start typing immediately | The text is still there after leaving and reopening |
+
+The 413 fix cannot be checked by hand without a large backlog; it is covered by the connector
+tests instead. Its device-visible symptom, if it were still broken, is offline writes
+disappearing on the first reconnect after a long offline stretch.
+
 ### Round 2 — open findings, ranked. None of these is fixed.
 
 **1. CRITICAL (security) — `note_tags` and `links` have single-column FKs, so a child row can
