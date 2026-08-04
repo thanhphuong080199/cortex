@@ -19,10 +19,12 @@ async function seedNote(content: string): Promise<string> {
 
 /** Trash, then purge — the two-step the UI performs. */
 async function purge(id: string) {
-  await alice.client
+  const { error: trashError } = await alice.client
     .from("notes")
     .update({ deleted_at: new Date().toISOString() })
     .eq("id", id);
+  // Checked, so a failure surfaces here rather than as a confusing assertion three lines down.
+  if (trashError) throw trashError;
   const { error } = await alice.client
     .from("notes")
     .delete()
@@ -54,14 +56,24 @@ describe("purge is a hard delete, so it can propagate as a tombstone", () => {
 
   it("leaves no orphaned note_tags rows behind to resurrect the reference", async () => {
     const id = await seedNote("tagged then purged");
-    const { data: tag } = await alice.client
+    const { data: tag, error: tagError } = await alice.client
       .from("tags")
       .insert({ user_id: alice.id, name: `purge-tag-${Date.now()}` })
       .select("id")
       .single();
-    await alice.client
+    if (tagError) throw tagError;
+    // `source` is NOT NULL with no default (00003). Omitting it is a 23502 that the original
+    // unchecked insert swallowed, so this test seeded no join row at all and its `toEqual([])`
+    // below held over a set that was empty before the purge ever ran.
+    const { error: linkError } = await alice.client
       .from("note_tags")
-      .insert({ user_id: alice.id, note_id: id, tag_id: tag!.id });
+      .insert({ user_id: alice.id, note_id: id, tag_id: tag!.id, source: "user" });
+    if (linkError) throw linkError;
+
+    // The row must EXIST before the purge, or `toEqual([])` below is satisfied by a join row
+    // that was never created and the cascade is never exercised at all.
+    const { data: before } = await admin.from("note_tags").select("id").eq("note_id", id);
+    expect(before).toHaveLength(1);
 
     await purge(id);
 
@@ -78,10 +90,20 @@ describe("purge is a hard delete, so it can propagate as a tombstone", () => {
   it("removes links pointing at the purged note from BOTH directions", async () => {
     const purged = await seedNote("purged end of a link");
     const survivor = await seedNote("surviving end of a link");
-    await alice.client.from("links").insert([
-      { user_id: alice.id, from_note_id: purged, to_note_id: survivor, kind: "related" },
-      { user_id: alice.id, from_note_id: survivor, to_note_id: purged, kind: "related" },
+    // `reference`, not `related`: links_kind_check allows only semantic | manual | reference |
+    // conflict_copy (00003, widened by 00015). An invalid kind is a 23514 that, unchecked,
+    // inserts nothing and leaves both assertions below passing over an empty set.
+    const { error } = await alice.client.from("links").insert([
+      { user_id: alice.id, from_note_id: purged, to_note_id: survivor, kind: "reference" },
+      { user_id: alice.id, from_note_id: survivor, to_note_id: purged, kind: "reference" },
     ]);
+    if (error) throw error;
+
+    // Both directions must EXIST first, or the cascade assertions prove nothing.
+    const { data: seededOut } = await admin.from("links").select("id").eq("from_note_id", purged);
+    const { data: seededIn } = await admin.from("links").select("id").eq("to_note_id", purged);
+    expect(seededOut).toHaveLength(1);
+    expect(seededIn).toHaveLength(1);
 
     await purge(purged);
 
@@ -107,16 +129,9 @@ describe("purge is a hard delete, so it can propagate as a tombstone", () => {
     expect(data).toHaveLength(1);
   });
 
-  /**
-   * The guard that makes purge a deliberate second step rather than something a stray DELETE
-   * can do. Without it, any delete path reaches live notes directly.
-   */
-  it("refuses to purge a note that was never trashed", async () => {
-    const id = await seedNote("still live");
-
-    await alice.client.from("notes").delete().eq("id", id).not("deleted_at", "is", null);
-
-    const { data } = await admin.from("notes").select("id").eq("id", id);
-    expect(data).toHaveLength(1);
-  });
+  // REMOVED: "refuses to purge a note that was never trashed". It could not fail — the DELETE
+  // it issued carried `.not("deleted_at","is",null)` itself, so the live row was excluded by
+  // the test's own predicate, and the docstring claimed a database guard that does not exist
+  // (`notes_own` in 00002 has no deleted_at condition). The trashed-first rule is enforced in
+  // NoteService.purge and is already tested there, against the real surface.
 });

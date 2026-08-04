@@ -4,7 +4,9 @@ import {
   matchesFilters,
   noteSelect,
   parseNoteFilters,
+  noteFiltersToSql,
   requiresRefetch,
+  toFtsQuery,
 } from "./filters.js";
 
 describe("parseNoteFilters", () => {
@@ -103,5 +105,58 @@ describe("requiresRefetch", () => {
     // issue-log E5's other half.
     expect(requiresRefetch({ view: "inbox", q: "pricing" })).toBe(true);
     expect(requiresRefetch({ view: "inbox", tag: "t1" })).toBe(true);
+  });
+});
+
+describe("toFtsQuery", () => {
+  /**
+   * The whole point: FTS5 parses the BOUND string as a query expression, so ordinary typing
+   * used to raise a syntax error. These pin the shape; that the shape actually EXECUTES on
+   * FTS5 -- and that the unescaped input genuinely throws -- is asserted against real SQLite
+   * in apps/mobile/src/lib/fts.test.ts, which is where the emitted clause runs.
+   */
+  it("quotes an apostrophe instead of letting FTS5 parse it", () => {
+    expect(toFtsQuery("don't")).toBe(`"don't"`);
+  });
+
+  it("escapes an embedded double quote by doubling it", () => {
+    expect(toFtsQuery('foo"')).toBe('"foo"""');
+  });
+
+  it("strips operators of their meaning rather than rejecting them", () => {
+    // A search box is not a query language. `websearch_to_tsquery` is forgiving too.
+    expect(toFtsQuery("hello AND")).toBe('"hello" "AND"');
+    expect(toFtsQuery("-hello")).toBe('"-hello"');
+    expect(toFtsQuery("content:hello")).toBe('"content:hello"');
+  });
+
+  it("joins multiple words as separate terms", () => {
+    expect(toFtsQuery("plain text")).toBe('"plain" "text"');
+  });
+
+  it("collapses runs of whitespace", () => {
+    expect(toFtsQuery("  a\t\n b  ")).toBe('"a" "b"');
+  });
+
+  it("returns empty for input that tokenises to nothing", () => {
+    // The caller drops the clause on this: `notes_fts match ''` is itself a syntax error.
+    expect(toFtsQuery("   ")).toBe("");
+    expect(toFtsQuery("")).toBe("");
+  });
+});
+
+describe("noteFiltersToSql q handling", () => {
+  it("binds the escaped query, never the raw input", () => {
+    const { where, params } = noteFiltersToSql({ view: "inbox", q: "don't" });
+    expect(where).toContain("notes_fts match");
+    expect(params).toContain(`"don't"`);
+    expect(params).not.toContain("don't");
+  });
+
+  it("omits the FTS clause entirely when the query tokenises to nothing", () => {
+    const { where, params } = noteFiltersToSql({ view: "inbox", q: "   " });
+    // Emitting an empty MATCH would make every such search throw instead of showing the view.
+    expect(where).not.toContain("notes_fts");
+    expect(params).toEqual(["inbox"]);
   });
 });

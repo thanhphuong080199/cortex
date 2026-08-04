@@ -131,6 +131,38 @@ export function requiresRefetch(f: NoteFilters): boolean {
 }
 
 /**
+ * Turns raw search input into an FTS5 query expression that cannot throw.
+ *
+ * FTS5 parses the string BOUND to `match` as a query language, not as literal text, so binding
+ * the value prevents injection but not parsing. Executed against real SQLite
+ * (apps/mobile/src/lib/fts.test.ts), ordinary typing raises:
+ *
+ *     don't          -> fts5: syntax error near "'"
+ *     foo"           -> unterminated string
+ *     hello AND      -> fts5: syntax error near ""
+ *     !!!            -> fts5: syntax error near "!"
+ *     content:hello  -> NO error; silently read as a column filter, returning other rows
+ *
+ * So typing an apostrophe broke search outright, and the search box re-runs this on every
+ * keystroke. Postgres `websearch_to_tsquery` accepts every one of them, which makes this the
+ * largest real divergence between the two engines.
+ *
+ * Each whitespace-separated token becomes a quoted string literal (`"` doubled to escape),
+ * joined by FTS5's implicit AND. Operators lose their meaning -- `AND`, `OR` and `NEAR` become
+ * words to search for, while `*`, `-` and `:` are punctuation the unicode61 tokenizer drops, so
+ * `-hello` searches for `hello`. That is the right trade for a search box: `websearch_to_tsquery`
+ * is forgiving rather than expressive too, and a user typing an apostrophe wants their note back,
+ * not a syntax error.
+ */
+export function toFtsQuery(q: string): string {
+  return q
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => `"${token.replace(/"/g, '""')}"`)
+    .join(" ");
+}
+
+/**
  * The same narrowing as a SQL WHERE clause, for mobile's local SQLite replica.
  *
  * Deliberately a SECOND implementation rather than an abstraction over both engines:
@@ -173,7 +205,13 @@ export function noteFiltersToSql(f: NoteFilters): {
   // Full text uses SQLite FTS5, a different engine from Postgres FTS -- see the equivalence
   // suite, which asserts structural agreement and each engine's own q behaviour rather than
   // pretending the two rank identically.
-  if (f.q) clauses.push(`n.id in (select id from notes_fts where notes_fts match ${p(f.q)})`);
+  //
+  // The bound value is the ESCAPED query -- see toFtsQuery. A q of nothing but whitespace
+  // escapes to the empty string, and the clause is then left out rather than bound: `match ''`
+  // is itself a syntax error, and "no search" is what parseNoteFilters already makes of an
+  // empty q.
+  const fts = f.q ? toFtsQuery(f.q) : "";
+  if (fts) clauses.push(`n.id in (select id from notes_fts where notes_fts match ${p(fts)})`);
 
   return {
     where: clauses.join(" and "),

@@ -215,3 +215,79 @@ describe("search composes with the view narrowing rather than fighting it", () =
     expect(search(db, { view: "inbox", q: "nonexistentterm" })).toEqual([]);
   });
 });
+
+/**
+ * FTS5 parses the string BOUND to `match` as a query expression, so binding it prevents
+ * injection but not parsing. The search box feeds raw keystrokes straight in
+ * (`note-list.tsx`), and the screen renders a thrown query as "Could not read notes on this
+ * device" -- so before `toFtsQuery`, typing an apostrophe broke search outright.
+ *
+ * Each case asserts the RAW string's behaviour as well as the escaped one. Without that the
+ * suite cannot show the escaping is load-bearing: every assertion below would pass just as
+ * well against an implementation that never escaped anything, if FTS5 happened to tolerate
+ * the input.
+ */
+describe("raw user input reaches FTS5 as text, not as a query language", () => {
+  /** What `toFtsQuery` protects against: the same string bound without it. */
+  function raw(database: Database.Database, q: string): string[] {
+    return (
+      database.prepare("SELECT id FROM notes_fts WHERE notes_fts MATCH ?").all(q) as {
+        id: string;
+      }[]
+    ).map((r) => r.id);
+  }
+
+  beforeEach(() => {
+    put(db, "apostrophe", { content: "don't panic and carry a towel" });
+    put(db, "plain", { content: "hello world" });
+    put(db, "literal", { content: "content:hello is written out here" });
+  });
+
+  it("finds the note when the user types an apostrophe", () => {
+    expect(search(db, { view: "inbox", q: "don't" })).toEqual(["apostrophe"]);
+    // The unescaped form does not return the wrong rows -- it throws, taking the whole list
+    // with it. This is the bug in its original form.
+    expect(() => raw(db, "don't")).toThrow(/syntax error/);
+  });
+
+  it("survives an unbalanced double quote", () => {
+    expect(search(db, { view: "inbox", q: 'foo"' })).toEqual([]);
+    expect(() => raw(db, 'foo"')).toThrow(/unterminated string/);
+  });
+
+  it("searches for a trailing operator word instead of obeying it", () => {
+    // `AND` is an FTS5 operator, and a dangling one is a syntax error. Quoted it is just a
+    // word -- which the apostrophe note happens to contain, so this also proves the token
+    // survives escaping rather than being dropped.
+    expect(search(db, { view: "inbox", q: "hello AND" })).toEqual([]);
+    expect(search(db, { view: "inbox", q: "panic AND" })).toEqual(["apostrophe"]);
+    expect(() => raw(db, "hello AND")).toThrow(/syntax error/);
+  });
+
+  it("treats a colon as text rather than as a column filter", () => {
+    // The dangerous one: this input does NOT throw unescaped. FTS5 reads `content:hello` as
+    // "column content matches hello" and quietly returns every note containing "hello", so
+    // the failure is a wrong answer rather than an error nobody could miss.
+    expect(search(db, { view: "inbox", q: "content:hello" })).toEqual(["literal"]);
+    expect(raw(db, "content:hello").sort()).toEqual(["literal", "plain"]);
+  });
+
+  it("returns no matches, rather than raising, for a query that is all punctuation", () => {
+    // `"!!!"` is a valid phrase that matches nothing, which is what the web side does with
+    // the same input. An empty list is a fine answer here; an error is not.
+    expect(search(db, { view: "inbox", q: "!!!" })).toEqual([]);
+    expect(() => raw(db, "!!!")).toThrow(/syntax error/);
+  });
+
+  it("drops the clause entirely when the query is only whitespace", () => {
+    // `match ''` is itself a syntax error, so an escaped-but-empty query still has to be
+    // left out of the SQL rather than bound. The search box trims, but nothing in
+    // `noteFiltersToSql`'s contract says its caller must.
+    expect(search(db, { view: "inbox", q: "  \t " }).sort()).toEqual([
+      "apostrophe",
+      "literal",
+      "plain",
+    ]);
+    expect(() => raw(db, "")).toThrow(/syntax error/);
+  });
+});
