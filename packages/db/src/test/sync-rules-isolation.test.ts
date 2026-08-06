@@ -298,3 +298,49 @@ describe("child rows agree with the owner of their parent note", () => {
     }
   });
 });
+
+/**
+ * The write-side half of the leak above. Reading back seeded rows only proves the fixture
+ * behaved; it never attempts the row the rules file cannot stop. Each case here inserts a
+ * genuine cross-owner reference and asserts the database refuses it -- this must fail (insert
+ * succeeds, error is null) before the composite FK exists, and pass once it does.
+ */
+describe("a cross-owner child row is rejected at the constraint level", () => {
+  it("note_tags cannot be inserted with another user's note_id", async () => {
+    const { error } = await admin.from("note_tags").insert({
+      user_id: alice.id,
+      note_id: seedIds("notes").bob,
+      tag_id: seedIds("tags").alice,
+      source: "user",
+    });
+    expect(error, "cross-owner note_id on note_tags should be rejected").not.toBeNull();
+  });
+
+  it("note_tags cannot be inserted with another user's tag_id", async () => {
+    const { error } = await admin.from("note_tags").insert({
+      user_id: alice.id,
+      note_id: seedIds("notes").alice,
+      tag_id: seedIds("tags").bob,
+      source: "user",
+    });
+    expect(error, "cross-owner tag_id on note_tags should be rejected").not.toBeNull();
+  });
+
+  it("links cannot be inserted with another user's note_id as from_note_id", async () => {
+    const { error } = await admin.from("links").insert({
+      user_id: alice.id,
+      from_note_id: seedIds("notes").bob,
+      to_note_id: seedIds("notes").alice,
+    });
+    expect(error, "cross-owner from_note_id on links should be rejected").not.toBeNull();
+  });
+
+  it("links cannot be inserted with another user's note_id as to_note_id", async () => {
+    const { error } = await admin.from("links").insert({
+      user_id: alice.id,
+      from_note_id: seedIds("notes").alice,
+      to_note_id: seedIds("notes").bob,
+    });
+    expect(error, "cross-owner to_note_id on links should be rejected").not.toBeNull();
+  });
+});
