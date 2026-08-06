@@ -124,12 +124,6 @@ the `AppState` wiring in `AppLockGate` is a manual check on a real device.
 add a second fingerprint and waiting for KeyStore invalidation is too flaky to be worth it.
 `db-key.test.ts` covers the `lost` transition.
 
-**Restoring a trashed note on mobile.** `restoreNote` exists in `apps/mobile/src/lib/note-edits.ts`
-and is unit-tested, but **no screen imports it** — `note-editor.tsx` renders a bare `In trash`
-where a restore control would go. The web app has `Restore` and `Delete forever` buttons in its
-trash view; mobile has neither. There is nothing to drive. Wiring that button is a product
-change, not a test change.
-
 **Live updates on web.** `apps/web/e2e/capture.spec.ts` marks the live-echo case `test.fixme`.
 Measured: the write lands, the row is in Postgres, `notes` is in the `supabase_realtime`
 publication and the container is healthy — and no `postgres_changes` event reaches the open

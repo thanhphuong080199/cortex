@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
 import { recordEditBase } from "../lib/edit-base";
-import { setNoteLifecycle, trashNote, updateNoteContent } from "../lib/note-edits";
+import { restoreNote, setNoteLifecycle, trashNote, updateNoteContent } from "../lib/note-edits";
 
 const SAVE_DEBOUNCE_MS = 800;
 
@@ -165,7 +165,36 @@ export function NoteEditor({ id }: { id: string }) {
           </Pressable>
         ))}
         {note.deleted_at ? (
-          <Text style={{ alignSelf: "center", opacity: 0.6 }}>In trash</Text>
+          /**
+           * Trash is reversible on web (note-list.tsx renders Restore and Delete forever in the
+           * trash view) and was not reversible here at all: `restoreNote` has existed in
+           * lib/note-edits.ts since Task 13, with a passing test, and nothing ever imported it.
+           * A trashed note opened on the phone showed "In trash" and offered no way out, so the
+           * only recovery was to reach for a laptop.
+           *
+           * No navigation afterwards, unlike web's `act()` which pushes back to "/". `useQuery`
+           * is reactive, so clearing `deleted_at` re-renders this row and swaps this control
+           * back to Trash on its own -- which also makes an accidental restore a single tap to
+           * undo, in the same place.
+           */
+          <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+            <Text style={{ opacity: 0.6 }}>In trash</Text>
+            <Pressable
+              onPress={() => {
+                void restoreNote(db, id);
+              }}
+              accessibilityRole="button"
+              testID="restore-button"
+              style={{
+                paddingVertical: 8,
+                paddingHorizontal: 14,
+                borderRadius: 999,
+                backgroundColor: "#efe",
+              }}
+            >
+              <Text style={{ color: "#060" }}>Restore</Text>
+            </Pressable>
+          </View>
         ) : (
           <Pressable
             onPress={() => {

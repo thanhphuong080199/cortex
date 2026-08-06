@@ -106,6 +106,28 @@ appId: ${APP_ID}
 - extendedWaitUntil:
     visible: "TYPEDFAST"
     timeout: 20000
+
+# ---- 3. trash a note and restore it, both offline ----
+# Deliberately a DIFFERENT note from step 2's, which has to stay trashed. Trash and restore are
+# both plain local UPDATEs of deleted_at (lib/note-edits.ts), so the pair queues two ops on one
+# row -- and what must survive the reconnect is the NET result, not the first op or the last one
+# the server happens to apply.
+- extendedWaitUntil:
+    visible: "Trash"
+    timeout: 20000
+- tapOn: "Trash"
+- extendedWaitUntil:
+    visible: "In trash"
+    timeout: 20000
+- tapOn:
+    id: "restore-button"
+# The control swaps back on its own: useQuery is reactive, so clearing deleted_at re-renders
+# this row. Waiting for "Trash" to return is therefore the assertion that the restore landed
+# locally, with no navigation and no refetch involved.
+- extendedWaitUntil:
+    visible: "Trash"
+    timeout: 20000
+- assertNotVisible: "In trash"
 - back
 
 # ---- 7. THE CONFLICT RUN ----
@@ -152,8 +174,6 @@ appId: ${APP_ID}
     notVisible: "Logged ✓"
     timeout: 20000
 
-# NOT COVERED HERE: mục 4 step 3, "restore a note trashed a moment ago". `restoreNote` exists in
-# lib/note-edits.ts and is unit-tested, but no screen imports it -- note-editor.tsx renders a
-# bare "In trash" where a restore control would go. The web app has Restore and Delete forever
-# buttons in its trash view; mobile has neither. There is nothing to drive, so nothing is
-# asserted. Wiring that button is a product change, not a test change.
+# Mục 4 step 3 is covered above, on "Restore target". It was not, until note-editor.tsx gained
+# the Restore control it had been missing since Task 13 -- `restoreNote` existed and was
+# unit-tested, and no screen ever imported it.

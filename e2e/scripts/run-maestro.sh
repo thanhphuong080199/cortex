@@ -35,6 +35,7 @@ COMMON=(
   -e "NOTE_EDIT_TARGET=$(jq -r .noteIds.editTarget "$SEED")"
   -e "NOTE_PURGE_TARGET=$(jq -r .noteIds.purgeTarget "$SEED")"
   -e "NOTE_TRASH_TARGET=$(jq -r .noteIds.trashTarget "$SEED")"
+  -e "NOTE_RESTORE_TARGET=$(jq -r .noteIds.restoreTarget "$SEED")"
   -e "NOTE_CONFLICT_TARGET=$(jq -r .noteIds.conflictTarget "$SEED")"
   -e "CAPTURE_MARKER=offline capture marker"
   -e "DOUBLE_TAP_MARKER=double tap marker"

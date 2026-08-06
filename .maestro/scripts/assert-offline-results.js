@@ -87,6 +87,17 @@ var trashed = eventually(function () {
   return r.length === 1 && r[0].deleted_at !== null ? r : null;
 }, "the offline trash to reach the server and stay");
 
+/* ---- 3. the offline trash-then-restore netted out to "not trashed" ---- */
+// Two ops on one row, queued in order. A server that applied them out of order, or that kept
+// only the first, would leave this note in the trash -- and on the device it would silently
+// vanish from every view except `trash`, which is indistinguishable from it never having been
+// restored at all.
+eventually(function () {
+  var r = get("/notes?select=id,deleted_at&id=eq." + NOTE_RESTORE_TARGET);
+  if (r.length !== 1) throw new Error("the restored note is gone from the server entirely");
+  return r[0].deleted_at === null ? r : null;
+}, "the offline restore to win over the offline trash on the same row");
+
 /* ---- 8. undo left nothing behind ---- */
 // 04a logged mood 2 and undid it. A check-in surviving here means undo produced a local delete
 // that never reached the server, or reached it and was replayed back.
