@@ -25,10 +25,13 @@ adb install -r "$APK"
 adb logcat -c
 adb logcat > /tmp/logcat.txt 2>&1 &
 
-COMMON=(
+ACCESS_TOKEN=$(jq -r .accessToken "$SEED")
+REFRESH_TOKEN=$(jq -r .refreshToken "$SEED")
+
+# Everything that does NOT change when the session is re-minted after 01. The note ids in
+# particular must survive: the flows below assert against the corpus that is already there.
+FIXED=(
   -e "APP_ID=$APP_ID"
-  -e "ACCESS_TOKEN=$(jq -r .accessToken "$SEED")"
-  -e "REFRESH_TOKEN=$(jq -r .refreshToken "$SEED")"
   -e "SUPABASE_URL=http://127.0.0.1:54321"
   -e "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:?}"
   -e "API_URL=http://127.0.0.1:3001"
@@ -40,6 +43,16 @@ COMMON=(
   -e "CAPTURE_MARKER=offline capture marker"
   -e "DOUBLE_TAP_MARKER=double tap marker"
 )
+
+# Rebuilt whenever the tokens change, because Maestro takes them by value on the command line.
+build_common() {
+  COMMON=(
+    "${FIXED[@]}"
+    -e "ACCESS_TOKEN=$ACCESS_TOKEN"
+    -e "REFRESH_TOKEN=$REFRESH_TOKEN"
+  )
+}
+build_common
 
 # `run-as` works because a debug APK is debuggable; it is the only way to see an app's private
 # storage without root. Recorded BEFORE sign-out so the assertion afterwards compares against
@@ -64,6 +77,25 @@ if echo "$AFTER_SIGNOUT" | grep -qiE '\.(sqlite|db)($|[0-9-])'; then
   exit 1
 fi
 echo "sign-out wipe: no database files remain"
+
+# 01 SIGNED OUT, WHICH KILLED THE TOKENS EVERY FLOW BELOW WAS GOING TO USE.
+# `supabase.auth.signOut()` takes the global scope by default (lib/auth.ts passes no options), so
+# it deletes the user's sessions server-side, not just this device's copy. The access token then
+# fails the session_id check GoTrue does on /auth/v1/user, which is the call setSession makes --
+# so app/e2e-session.tsx would report "E2E session failed" for the rest of the run.
+#
+# Minting a fresh pair is the fix rather than narrowing the app's sign-out to `scope: 'local'`:
+# signing out everywhere is the product's behaviour, and 01 asserting it is the point.
+#
+# --no-corpus so this only signs in. Re-seeding would add a second copy of every note and break
+# the counts 02 and 04b assert. The note ids stay as FIXED captured them.
+echo "::group::re-mint the session 01 signed out of"
+node e2e/scripts/seed.mjs --no-corpus > /tmp/seed-reauth.json
+ACCESS_TOKEN=$(jq -r .accessToken /tmp/seed-reauth.json)
+REFRESH_TOKEN=$(jq -r .refreshToken /tmp/seed-reauth.json)
+build_common
+echo "re-minted the E2E session"
+echo "::endgroup::"
 
 echo "::group::02 online basics"
 maestro test .maestro/02-online-basics.yaml "${COMMON[@]}"

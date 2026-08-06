@@ -6,6 +6,21 @@
 # EXPO_PUBLIC_E2E=1.
 appId: ${APP_ID}
 ---
+# WAIT FOR THE APP FIRST. `openLink` fires an intent whether or not anything is listening yet,
+# and expo-router only starts handling links once the JS side is up -- a link that lands before
+# then is dropped silently, leaving the app sitting on the signed-out screen until the assertion
+# below times out. 02 failed exactly this way while 01 passed: 01 happens to run two assertions
+# between dismissing the dev launcher and this line, so the link went out 11.7s after the reload,
+# where 02 sent it 1.2s after -- about 1.5s into the bundle's life.
+#
+# The signed-out home is the marker because every flow that installs a session gets here with
+# `clearState: true`, so its presence means the bundle is running AND the router has drawn a
+# route. 01's own "Sign in with Google" assertion stays: it is paired with a "Cortex is locked"
+# check that means something different.
+- extendedWaitUntil:
+    visible: "Sign in with Google"
+    timeout: 60000
+
 - openLink: "cortex://e2e-session?access_token=${ACCESS_TOKEN}&refresh_token=${REFRESH_TOKEN}"
 
 # The route replaces itself with "/" as soon as setSession resolves, so the signed-in home
