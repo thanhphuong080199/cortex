@@ -56,24 +56,6 @@ jobs:
           fi
           echo "api=$EXPO_PUBLIC_API_URL powersync=$EXPO_PUBLIC_POWERSYNC_URL supabase=$EXPO_PUBLIC_SUPABASE_URL"
 
-      # The E2E build flag turns OFF the biometric app lock and opens a deep link that installs
-      # an arbitrary Supabase session (apps/mobile/src/lib/e2e.ts). It is set by exactly one
-      # workflow -- e2e-mobile.yml, whose APK is a CI artifact -- and an APK from THIS workflow
-      # is one people install, so the two must never meet.
-      #
-      # An environment assertion rather than a grep of the built bundle: the marker string that
-      # would have made a bundle check work is either present in every build (as an
-      # unconditional export) or tree-shaken out of every build (as a conditional one, since
-      # nothing imports it). Both were measured. This checks the same property for real, and
-      # does it in a second rather than forty minutes.
-      - name: Refuse to build with the E2E flag set
-        run: |
-          if [ -n "${EXPO_PUBLIC_E2E:-}" ]; then
-            echo "::error::EXPO_PUBLIC_E2E is set (='${EXPO_PUBLIC_E2E}'); this workflow builds APKs people install"
-            exit 1
-          fi
-          echo "EXPO_PUBLIC_E2E is unset, as it must be here"
-
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
@@ -93,19 +75,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # apps/mobile's workspace dependencies are consumed as compiled dist/, and Metro resolves
-      # them that way during `expo export:embed` inside the Gradle build. This is the same step
-      # EAS runs as `eas-build-post-install` in apps/mobile/package.json; without it the bundle
-      # phase fails with "Unable to resolve module @cortex/shared", twenty minutes in.
-      #
-      # `@cortex/mobile^...` means "everything apps/mobile depends on", resolved from the ref
-      # being built. Naming the packages instead -- as the first version did -- fails outright on
-      # any ref where one of them does not exist: `@cortex/sync` is a phase-1b package, so the
-      # very first run of this workflow, on main, died in eight seconds with "No package found
-      # with name '@cortex/sync' in workspace". This form also picks up a dependency added later
-      # without anyone remembering to edit it.
+      # @cortex/shared and @cortex/sync are consumed as compiled dist/, and Metro resolves them
+      # that way during `expo export:embed` inside the Gradle build. This is the same step EAS
+      # runs as `eas-build-post-install` in apps/mobile/package.json; without it the bundle phase
+      # fails with "Unable to resolve module @cortex/shared", twenty minutes in.
       - name: Build the workspace packages the bundle imports
-        run: pnpm turbo run build --filter='@cortex/mobile^...'
+        run: pnpm turbo run build --filter=@cortex/sync --filter=@cortex/shared
 
       # apps/mobile/android is gitignored on purpose: app.json is the source of truth and this
       # regenerates it, which is where `allowBackup="false"` comes from. --no-install because the

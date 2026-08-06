@@ -18,6 +18,11 @@ e2e/**          text eol=lf
 # Gradle wrappers are executed directly on the runner.
 gradlew         text eol=lf
 
+# Workflow YAML isn't read by anything CRLF-sensitive, but two branches adding the same file
+# with different line endings is an add/add merge conflict over bytes that are otherwise
+# identical -- exactly what happened to android-apk.yml between main and this branch.
+.github/**      text eol=lf
+
 # Binary, so git must never try to translate anything.
 *.png           binary
 *.jpg           binary
