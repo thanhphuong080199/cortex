@@ -16,6 +16,7 @@ appId: ${APP_ID}
 # clearState so this really is a first launch: no local database, no cached session.
 - launchApp:
     clearState: true
+- runFlow: subflows/dismiss-dev-launcher.yaml
 
 # Signed out, and the lock is gone because this APK was built with EXPO_PUBLIC_E2E=1. If the
 # flag failed to reach the build, the app sits on "Cortex is locked" and this line fails --

@@ -1,0 +1,24 @@
+# Run this right after every `launchApp`, regardless of `clearState`.
+#
+# expo-dev-client's launcher screen intercepts a MAIN-intent app start whenever the process has
+# no in-memory record of already showing the real app -- guaranteed after `clearState: true`,
+# and also possible after `clearState: false` if the OS killed the process between flows. Left
+# alone, the phone sits on "Development servers" and every assertion below it fails against the
+# wrong screen.
+#
+# `embeddedBundle: true` (app.json's expo-dev-client plugin config) is what puts "Load embedded
+# bundle" on that screen; without it there is no way past it on a fresh process except Metro or a
+# previously-opened dev server, neither of which exist in CI. `when: visible` guards both steps
+# so this flow is a no-op on the (also possible) case where the process survived and launchApp
+# resumed straight into the real app.
+appId: ${APP_ID}
+---
+- scrollUntilVisible:
+    element: "Load embedded bundle"
+    direction: DOWN
+    timeout: 5000
+  when:
+    visible: "DEVELOPMENT SERVERS"
+- tapOn: "Load embedded bundle"
+  when:
+    visible: "Load embedded bundle"

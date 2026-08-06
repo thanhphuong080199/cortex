@@ -7,6 +7,7 @@ appId: ${APP_ID}
 ---
 - launchApp:
     clearState: false
+- runFlow: subflows/dismiss-dev-launcher.yaml
 
 # Nothing below means anything until the device says it is connected again. Generous, because
 # this is a cold reconnect: PowerSync has to re-establish the stream AND drain the queue 04a

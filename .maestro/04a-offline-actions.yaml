@@ -12,6 +12,7 @@ appId: ${APP_ID}
 ---
 - launchApp:
     clearState: false
+- runFlow: subflows/dismiss-dev-launcher.yaml
 
 # ---- 9. export must refuse, and say why ----
 # ExportButton reads useStatus().connected, so this is the negative half of the connected=true

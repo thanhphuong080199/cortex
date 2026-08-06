@@ -11,6 +11,7 @@ appId: ${APP_ID}
 ---
 - launchApp:
     clearState: true
+- runFlow: subflows/dismiss-dev-launcher.yaml
 - runFlow: subflows/install-session.yaml
 - runFlow: subflows/wait-for-download.yaml
 
