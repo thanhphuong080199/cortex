@@ -20,3 +20,5 @@ expo-env.d.ts
 supabase/.temp/
 .superpowers/
 .claude/worktrees/
+.vercel
+.env*

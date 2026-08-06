@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# The ordered Maestro run, including the radio toggles Maestro cannot do itself.
+#
+# This lives in a script rather than inline in the workflow for two reasons:
+# reactivecircus/android-emulator-runner takes a single `script`, and the ordering IS the test
+# design -- a developer who cannot reproduce the sequence locally cannot debug a CI failure.
+#
+# Expects: an emulator already booted and visible to adb, a built debug APK, and /tmp/seed.json
+# from e2e/scripts/seed.mjs. SUPABASE_ANON_KEY must be exported.
+set -euo pipefail
+
+APK=apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+APP_ID=app.cortex.mobile
+SEED=${SEED_FILE:-/tmp/seed.json}
+
+curl -Ls "https://get.maestro.mobile.dev" | bash
+export PATH="$PATH:$HOME/.maestro/bin"
+maestro --version
+
+adb install -r "$APK"
+
+# Captured for the artifact upload. The `[powersync]` status line (lib/powersync.ts) is the one
+# place `connected=` is ever printed, and it is the first thing to read when a download-side
+# flow times out.
+adb logcat -c
+adb logcat > /tmp/logcat.txt 2>&1 &
+
+COMMON=(
+  -e "APP_ID=$APP_ID"
+  -e "ACCESS_TOKEN=$(jq -r .accessToken "$SEED")"
+  -e "REFRESH_TOKEN=$(jq -r .refreshToken "$SEED")"
+  -e "SUPABASE_URL=http://127.0.0.1:54321"
+  -e "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:?}"
+  -e "API_URL=http://127.0.0.1:3001"
+  -e "NOTE_EDIT_TARGET=$(jq -r .noteIds.editTarget "$SEED")"
+  -e "NOTE_PURGE_TARGET=$(jq -r .noteIds.purgeTarget "$SEED")"
+  -e "NOTE_TRASH_TARGET=$(jq -r .noteIds.trashTarget "$SEED")"
+  -e "NOTE_CONFLICT_TARGET=$(jq -r .noteIds.conflictTarget "$SEED")"
+  -e "CAPTURE_MARKER=offline capture marker"
+  -e "DOUBLE_TAP_MARKER=double tap marker"
+)
+
+# `run-as` works because a debug APK is debuggable; it is the only way to see an app's private
+# storage without root. Recorded BEFORE sign-out so the assertion afterwards compares against
+# something real rather than against a guessed filename -- PowerSync's database name is not
+# something this script should hard-code.
+db_files() {
+  adb shell run-as "$APP_ID" sh -c 'ls -1 databases files 2>/dev/null' 2>/dev/null || true
+}
+
+echo "::group::01 first login and sync"
+maestro test .maestro/01-first-login-and-sync.yaml "${COMMON[@]}"
+echo "::endgroup::"
+
+# 01 ends signed out. Sign-out wipes local data BEFORE clearing the Supabase session
+# (lib/auth.ts), and a wipe that failed must not read as a clean sign-out. Maestro can only see
+# the screen, and an empty-looking list is exactly what a zero-height list produced once while
+# every row was present -- so this is checked on the filesystem instead.
+AFTER_SIGNOUT="$(db_files)"
+if echo "$AFTER_SIGNOUT" | grep -qiE '\.(sqlite|db)($|[0-9-])'; then
+  echo "::error::a local database survived sign-out:"
+  echo "$AFTER_SIGNOUT"
+  exit 1
+fi
+echo "sign-out wipe: no database files remain"
+
+echo "::group::02 online basics"
+maestro test .maestro/02-online-basics.yaml "${COMMON[@]}"
+echo "::endgroup::"
+
+echo "::group::03 server to device"
+maestro test .maestro/03-server-to-device.yaml "${COMMON[@]}"
+echo "::endgroup::"
+
+# ---- offline half ----
+# Which command actually works varies by emulator image, so try the modern one and fall back.
+# `svc` alone leaves the emulator's cellular data up on some images, which is why both are set.
+go_offline() {
+  adb shell cmd connectivity airplane-mode enable 2>/dev/null \
+    || { adb shell svc wifi disable; adb shell svc data disable; }
+}
+go_online() {
+  adb shell cmd connectivity airplane-mode disable 2>/dev/null \
+    || { adb shell svc wifi enable; adb shell svc data enable; }
+}
+
+echo "::group::04a offline actions"
+go_offline
+# The app needs a moment to notice; 04a's first assertion waits for the export button to flip,
+# so a slow radio shows up there rather than as a mid-flow surprise.
+maestro test .maestro/04a-offline-actions.yaml "${COMMON[@]}"
+echo "::endgroup::"
+
+echo "::group::04b reconnect and verify"
+go_online
+maestro test .maestro/04b-reconnect-verify.yaml "${COMMON[@]}"
+echo "::endgroup::"
+
+echo "all flows passed"

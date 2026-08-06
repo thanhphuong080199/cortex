@@ -1,0 +1,56 @@
+# Mục 1 — first sign-in, and the download stream.
+#
+# THE ASSERTION THIS FLOW EXISTS FOR
+#
+# The phase-1b handoff records that `connected=true` was never once observed on a real device,
+# while uploads worked. If that is a live bug, the `wait-for-download` step here is what fails:
+# "Zarquon note" was written by the seed script straight to Postgres and has never existed on
+# this device, so it can only appear by arriving over the sync stream.
+#
+# WHAT IT DOES NOT PROVE. This runs on an emulator with clean host networking -- no Doze, no
+# cell handover, no captive portal. Green here does not mean the real-device symptom is fixed;
+# it means the stream works when the network is not the problem. Closing that issue still needs
+# one manual run on hardware.
+appId: ${APP_ID}
+---
+# clearState so this really is a first launch: no local database, no cached session.
+- launchApp:
+    clearState: true
+
+# Signed out, and the lock is gone because this APK was built with EXPO_PUBLIC_E2E=1. If the
+# flag failed to reach the build, the app sits on "Cortex is locked" and this line fails --
+# which is the failure we want, rather than a confusing timeout twelve steps later.
+- assertVisible: "Sign in with Google"
+- assertNotVisible: "Cortex is locked"
+
+- runFlow: subflows/install-session.yaml
+- runFlow: subflows/wait-for-download.yaml
+
+# The rest of the seeded corpus, to prove the stream delivered the whole bucket and not just the
+# first row. scrollUntilVisible because the list is the screen's only scrolling surface and the
+# capture box, check-in widget and media form sit above it in the header.
+- scrollUntilVisible:
+    element: "Edit target"
+    direction: DOWN
+    timeout: 30000
+- scrollUntilVisible:
+    element: "Apostrophe note"
+    direction: DOWN
+    timeout: 30000
+
+# Sign-out wipes the local corpus BEFORE clearing the Supabase session (lib/auth.ts), so a
+# failed wipe must not read as a clean sign-out. Reaching the button needs a scroll: it is in
+# the list footer.
+- scrollUntilVisible:
+    element: "Sign out"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "Sign out"
+
+- extendedWaitUntil:
+    visible: "Sign in with Google"
+    timeout: 30000
+
+# That the local database file is actually gone is asserted in the workflow with
+# `adb shell run-as`, not here -- Maestro can only see the screen, and "the list is empty"
+# is exactly the symptom a zero-height list produced once before while every row was present.

@@ -1,0 +1,99 @@
+# Mục 3 — the basic features, online.
+#
+# Assumes the network is UP and a session is already installable. Run after 01.
+#
+# The "Export all notes" assertion below is not really about export. ExportButton renders that
+# label from `useStatus().connected` (screens/export-button.tsx), so it is the plainest UI proof
+# that PowerSync reports itself connected -- the exact question the handoff records as never
+# once answered yes on a real device. If the download stream is dead, this line reads
+# "Export needs a connection" and fails here.
+appId: ${APP_ID}
+---
+- launchApp:
+    clearState: true
+- runFlow: subflows/install-session.yaml
+- runFlow: subflows/wait-for-download.yaml
+
+# ---- connected=true, stated in the UI ----
+- scrollUntilVisible:
+    element: "Export all notes"
+    direction: DOWN
+    timeout: 60000
+- assertNotVisible: "Export needs a connection"
+
+- scrollUntilVisible:
+    element: "How are you?"
+    direction: UP
+    timeout: 30000
+
+# ---- capture a note, it appears immediately ----
+# No network involved: capture is one local INSERT and the list is a reactive query over the
+# same local database (screens/quick-capture.tsx), so this must be instant even offline.
+- tapOn:
+    id: "capture-input"
+- inputText: "vorpal blade went snicker snack"
+- tapOn:
+    id: "capture-save"
+- assertVisible: "Saved ✓"
+- extendedWaitUntil:
+    visible: "vorpal blade went snicker snack"
+    timeout: 15000
+
+# ---- search finds the one note that has the word ----
+- tapOn:
+    id: "search-input"
+- inputText: "zarquon"
+- extendedWaitUntil:
+    visible: "Zarquon note"
+    timeout: 15000
+- assertNotVisible: "vorpal blade went snicker snack"
+
+# Clearing the box must restore the full list. `noteFiltersToSql` emits an FTS clause on any
+# truthy q, so a present-but-empty query would match nothing and silently empty the list -- the
+# case note-list.tsx spreads the key away to avoid.
+- eraseText
+- extendedWaitUntil:
+    visible: "vorpal blade went snicker snack"
+    timeout: 15000
+
+# ---- switching views narrows the list ----
+# A freshly captured note is in `inbox`; `archived` must not show it. The view names come from
+# NOTE_VIEWS in @cortex/shared: inbox | active | archived | trash.
+- tapOn: "archived"
+- extendedWaitUntil:
+    notVisible: "vorpal blade went snicker snack"
+    timeout: 15000
+- tapOn: "inbox"
+- extendedWaitUntil:
+    visible: "vorpal blade went snicker snack"
+    timeout: 15000
+
+# ---- mood check-in ----
+- tapOn:
+    text: "Mood 4 of 5 — good"
+- assertVisible: "Logged ✓"
+
+# ---- media log, colliding case, must reuse the seeded item ----
+# The seed logged "Dune"; this logs "dune". The find-or-create key is
+# (user_id, kind, lower(title)), so this must land on the SAME media_items row and leave two
+# notes pointing at it. Asserted server-side below, because the device cannot see the join.
+- scrollUntilVisible:
+    element:
+      id: "media-title"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "media-title"
+- inputText: "dune"
+- tapOn: "5 of 5 stars"
+- tapOn:
+    id: "media-save"
+
+# The write goes to the local database, then uploads. Wait for the note to come back before
+# asking the server what it made of it.
+- extendedWaitUntil:
+    visible: "dune"
+    timeout: 30000
+
+- runScript:
+    file: scripts/assert-media-dedup.js

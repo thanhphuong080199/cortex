@@ -1,0 +1,77 @@
+# Mục 3 ("sửa 1 note trên web, đợi sync, tìm từ CŨ → không ra kết quả") and the one case in
+# mục 2 that is not about the app lock ("xóa vĩnh viễn 1 note trên web → biến mất khỏi điện
+# thoại").
+#
+# Both are pure server->device assertions, which makes this the flow most likely to catch the
+# open sync bug -- and the one that is meaningless if PowerSync is not actually running. If this
+# times out, check the powersync container before the app.
+appId: ${APP_ID}
+---
+- launchApp:
+    clearState: true
+- runFlow: subflows/install-session.yaml
+- runFlow: subflows/wait-for-download.yaml
+
+# ---- the note as seeded ----
+- scrollUntilVisible:
+    element: "Edit target"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "Edit target"
+- extendedWaitUntil:
+    visible: "ORIGINALBODY waiting to be edited from the server side."
+    timeout: 15000
+- back
+
+# ---- edit it on the server ----
+- runScript:
+    file: scripts/server-edit-note.js
+    env:
+      NOTE_ID: ${NOTE_EDIT_TARGET}
+      NEW_CONTENT: "REPLACEDBODY now says something else entirely."
+
+# The edit has to arrive on its own. No pull-to-refresh, no relaunch: `useQuery` is reactive, so
+# a synced change re-renders the open list by itself, and needing a nudge here would itself be
+# the bug.
+- tapOn:
+    id: "search-input"
+- inputText: "REPLACEDBODY"
+- extendedWaitUntil:
+    visible: "Edit target"
+    timeout: 90000
+
+# ---- and the OLD word must now find nothing ----
+# This is the half that catches a stale FTS index: the row can be updated while content_text and
+# the search index still carry the old body, in which case the note is findable by both words.
+- eraseText
+- inputText: "ORIGINALBODY"
+- extendedWaitUntil:
+    visible: "Nothing here yet."
+    timeout: 30000
+- assertNotVisible: "Edit target"
+- eraseText
+
+# ---- purge a different note on the server ----
+- scrollUntilVisible:
+    element: "Purge target"
+    direction: DOWN
+    timeout: 30000
+
+- runScript:
+    file: scripts/server-purge-note.js
+    env:
+      NOTE_ID: ${NOTE_PURGE_TARGET}
+
+# A hard delete must remove it from the device, not merely hide it from the default view.
+- extendedWaitUntil:
+    notVisible: "Purge target"
+    timeout: 90000
+
+# And it must stay gone across a relaunch -- i.e. it left local SQLite, rather than only
+# vanishing from a component's state.
+- launchApp:
+    clearState: false
+- extendedWaitUntil:
+    visible: "How are you?"
+    timeout: 30000
+- assertNotVisible: "Purge target"

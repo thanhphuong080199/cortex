@@ -1,0 +1,50 @@
+# Mục 4, after the radios come back. Verifies on the device what 04a did, then hands the
+# countable parts to a host-side script.
+#
+# `clearState: false` is load-bearing: this flow needs 04a's local database, including its
+# undrained upload queue.
+appId: ${APP_ID}
+---
+- launchApp:
+    clearState: false
+
+# Nothing below means anything until the device says it is connected again. Generous, because
+# this is a cold reconnect: PowerSync has to re-establish the stream AND drain the queue 04a
+# filled.
+- extendedWaitUntil:
+    visible: "Export all notes"
+    timeout: 180000
+- assertNotVisible: "Export needs a connection"
+
+- scrollUntilVisible:
+    element: "How are you?"
+    direction: UP
+    timeout: 30000
+
+# ---- 7. the conflict outcome, as the user sees it ----
+# Spec §6.2: the ORIGINAL note keeps the body the server had, and the device's version survives
+# as a NEW note in the inbox. Both must be on screen at once -- a single note holding either
+# body is the failure, whichever body it is.
+- extendedWaitUntil:
+    visible: "SERVERBODY written on the web while the phone was offline."
+    timeout: 180000
+- extendedWaitUntil:
+    visible: "DEVICEBODY written on the phone while offline."
+    timeout: 180000
+
+# ---- 2. the offline trash was not resurrected ----
+- assertNotVisible: "Trash target"
+- tapOn: "trash"
+- extendedWaitUntil:
+    visible: "Trash target"
+    timeout: 60000
+- tapOn: "inbox"
+
+# ---- 1. the offline capture is still here after the round trip ----
+- extendedWaitUntil:
+    visible: ${CAPTURE_MARKER}
+    timeout: 60000
+
+# ---- everything that can only be counted ----
+- runScript:
+    file: scripts/assert-offline-results.js

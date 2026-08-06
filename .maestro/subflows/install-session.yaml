@@ -1,0 +1,20 @@
+# Puts the app in a signed-in state without touching Google's consent screen.
+#
+# Requires ACCESS_TOKEN and REFRESH_TOKEN in the environment (the workflow passes them with -e,
+# minted seconds earlier by e2e/scripts/seed.mjs). The route on the other end is
+# apps/mobile/app/e2e-session.tsx, which is inert unless the APK was built with
+# EXPO_PUBLIC_E2E=1.
+appId: ${APP_ID}
+---
+- openLink: "cortex://e2e-session?access_token=${ACCESS_TOKEN}&refresh_token=${REFRESH_TOKEN}"
+
+# The route replaces itself with "/" as soon as setSession resolves, so the signed-in home
+# screen -- not the route's own text -- is the signal that the session took. Waiting on the
+# route's "E2E session ready" would race the redirect.
+#
+# "How are you?" (CheckinWidget) rather than "Signed in as": the latter lives in the list's
+# ListFooterComponent, which sits below every seeded note and is off-screen on a populated
+# account. This one is in the header, so it is on screen the moment the list renders.
+- extendedWaitUntil:
+    visible: "How are you?"
+    timeout: 30000

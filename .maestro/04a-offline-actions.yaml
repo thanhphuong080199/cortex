@@ -1,0 +1,159 @@
+# Mục 4 — everything done while the device is offline, in one pass.
+#
+# The radios are turned off BEFORE this flow and back on before 04b, by e2e/scripts/run-maestro.sh.
+# Maestro has no command for that. Splitting the flow is better than the alternative -- a
+# runScript shelling out to adb -- because `runScript` executes on the HOST, and that same
+# property is what lets the server-side edit below happen while the phone is offline.
+#
+# `clearState: false`: this inherits the local database 03 left behind, already populated from
+# the sync stream. Wiping it here would leave nothing pre-existing to trash, which is the whole
+# point of step 2.
+appId: ${APP_ID}
+---
+- launchApp:
+    clearState: false
+
+# ---- 9. export must refuse, and say why ----
+# ExportButton reads useStatus().connected, so this is the negative half of the connected=true
+# assertion 02 makes. If it still says "Export all notes" here, either the radios did not go
+# down or PowerSync has not noticed.
+- extendedWaitUntil:
+    visible: "Export needs a connection"
+    timeout: 60000
+- assertNotVisible: "Export all notes"
+
+- scrollUntilVisible:
+    element: "How are you?"
+    direction: UP
+    timeout: 30000
+
+# ---- 1. capture offline ----
+# One local INSERT and nothing else (screens/quick-capture.tsx), so this must be
+# indistinguishable from the online case -- no spinner, no pending badge.
+- tapOn:
+    id: "capture-input"
+- inputText: ${CAPTURE_MARKER}
+- tapOn:
+    id: "capture-save"
+- assertVisible: "Saved ✓"
+- extendedWaitUntil:
+    visible: ${CAPTURE_MARKER}
+    timeout: 15000
+
+# ---- 5. double-tap Save ----
+# The in-flight guard (lib/in-flight.ts) has to collapse this to ONE note. `disabled={saving}`
+# cannot do it alone: state updates are async, so two taps in the same frame both read
+# saving === false and each one is a separate INSERT -- the second of which is invisible on
+# device until it syncs. The count is asserted server-side in 04b; this only creates the
+# condition.
+- tapOn:
+    id: "capture-input"
+- inputText: ${DOUBLE_TAP_MARKER}
+- doubleTapOn:
+    id: "capture-save"
+
+# ---- 4. FTS5 and the apostrophe ----
+# A bare quote is SYNTAX to FTS5's MATCH, so an unescaped query either errors or silently
+# matches nothing. note-list.tsx renders a query error as "Could not read notes on this
+# device.", which is why that string is asserted absent rather than just checking for a hit.
+#
+# (The web mirror of this asserts the opposite outcome on purpose: Postgres's english config
+# treats both halves of "don't" as stop words, so there an empty result is correct.)
+- tapOn:
+    id: "search-input"
+- inputText: "don't"
+- extendedWaitUntil:
+    visible: "Apostrophe note"
+    timeout: 20000
+- assertNotVisible: "Could not read notes on this device."
+- eraseText
+
+# ---- 2. trash a note that already existed ----
+# The CRITICAL case: a note trashed offline must STAY trashed through the reconnect, rather
+# than being resurrected by the download stream replaying the server's older copy.
+- scrollUntilVisible:
+    element: "Trash target"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "Trash target"
+- extendedWaitUntil:
+    visible: "Trash"
+    timeout: 20000
+- tapOn: "Trash"
+- extendedWaitUntil:
+    visible: "In trash"
+    timeout: 20000
+- back
+
+# ---- 6. type immediately, leave, come back ----
+# Two guards at once. The editor renders "Opening…" until BOTH the body and the conflict base
+# are seeded -- a keystroke landing before that sets `content`, so the base never seeds and
+# every later save silently returns early. And the debounce timer is deliberately NOT cleared
+# on unmount, so leaving within 800ms must still save rather than discard the typing.
+- scrollUntilVisible:
+    element: "Restore target"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "Restore target"
+- extendedWaitUntil:
+    visible: "Edits save automatically"
+    timeout: 20000
+- tapOn:
+    id: "editor-input"
+- inputText: "TYPEDFAST"
+- back
+- tapOn: "Restore target"
+- extendedWaitUntil:
+    visible: "TYPEDFAST"
+    timeout: 20000
+- back
+
+# ---- 7. THE CONFLICT RUN ----
+# Edit the note on the device, offline...
+- scrollUntilVisible:
+    element: "Conflict target"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "Conflict target"
+- extendedWaitUntil:
+    visible: "Edits save automatically"
+    timeout: 20000
+- tapOn:
+    id: "editor-input"
+- eraseText
+- inputText: "DEVICEBODY written on the phone while offline."
+# The debounce has to fire before leaving, or there is no queued edit to conflict with.
+- extendedWaitUntil:
+    visible: "Saved on this device"
+    timeout: 20000
+- back
+
+# ...and edit the SAME note differently on the server. runScript runs on the HOST, whose network
+# is untouched, so this reaches the API even though the emulator's radios are down. That is what
+# makes the conflict run automatable at all -- no browser, no second device.
+- runScript:
+    file: scripts/server-edit-note.js
+    env:
+      NOTE_ID: ${NOTE_CONFLICT_TARGET}
+      NEW_CONTENT: "SERVERBODY written on the web while the phone was offline."
+
+# ---- 8. mood check-in, then undo ----
+# Insert and delete only (lib/checkins.ts) -- neither needs a server decision, so both work
+# offline unchanged. The undo must leave nothing behind once the queue drains.
+- scrollUntilVisible:
+    element: "How are you?"
+    direction: UP
+    timeout: 30000
+- tapOn:
+    text: "Mood 2 of 5 — bad"
+- assertVisible: "Logged ✓"
+- tapOn: "Undo"
+- extendedWaitUntil:
+    notVisible: "Logged ✓"
+    timeout: 20000
+
+# NOT COVERED HERE: mục 4 step 3, "restore a note trashed a moment ago". `restoreNote` exists in
+# lib/note-edits.ts and is unit-tested, but no screen imports it -- note-editor.tsx renders a
+# bare "In trash" where a restore control would go. The web app has Restore and Delete forever
+# buttons in its trash view; mobile has neither. There is nothing to drive, so nothing is
+# asserted. Wiring that button is a product change, not a test change.
