@@ -9,7 +9,10 @@ appId: ${APP_ID}
 ---
 - launchApp:
     clearState: true
-- runFlow: subflows/dismiss-dev-launcher.yaml
+- runFlow:
+    when:
+      visible: "DEVELOPMENT SERVERS"
+    file: subflows/dismiss-dev-launcher.yaml
 - runFlow: subflows/install-session.yaml
 - runFlow: subflows/wait-for-download.yaml
 
@@ -72,7 +75,10 @@ appId: ${APP_ID}
 # vanishing from a component's state.
 - launchApp:
     clearState: false
-- runFlow: subflows/dismiss-dev-launcher.yaml
+- runFlow:
+    when:
+      visible: "DEVELOPMENT SERVERS"
+    file: subflows/dismiss-dev-launcher.yaml
 - extendedWaitUntil:
     visible: "How are you?"
     timeout: 30000
