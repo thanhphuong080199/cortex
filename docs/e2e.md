@@ -97,6 +97,22 @@ Each of these cost a round trip. They are recorded so the next person does not r
   string is in every bundle; as a conditional one Metro tree-shakes it out of every bundle.
   `android-apk.yml` asserts `EXPO_PUBLIC_E2E` is absent from its environment instead.
 
+- **A Realtime subscription with no user token is silently dead**, and the error blames the
+  wrong thing. `realtime.subscription_check_filters()` builds its list of filterable columns
+  from `has_column_privilege(claims->>'role', …)`, so an `anon` socket sees **zero** columns of
+  `public.notes` (00009 revoked the defaults) and every filter is rejected with
+  `invalid column for filter user_id` — a column that plainly exists. The channel still replies
+  `status: ok`; the rejection arrives afterwards as a separate `system` frame. This is what the
+  suite caught, and it was broken for real users, not just for the harness. Fixed by
+  `supabase.realtime.setAuth(token)` in `note-list.tsx` before subscribing.
+- **`next start` binds 3000 regardless**, so `playwright.config.ts` derives the port from
+  `E2E_WEB_URL` and passes `--port`. With `reuseExistingServer`, a `next dev` left running by a
+  developer would otherwise be adopted silently, and the suite fails with redirects to `/login`
+  because that server has none of this env. (`next dev` also replaces `.next`, so
+  `next start` then needs a rebuild.)
+- **`CORS_ORIGINS` on the API must list whatever port the web server is on.** Moving the suite
+  to 3100 without updating it makes every write fail while the page looks fine.
+
 ### Realtime
 
 `e2e-web.yml` keeps the realtime container; `e2e-mobile.yml` and `ci.yml` drop it. That is not
@@ -123,15 +139,6 @@ the `AppState` wiring in `AppLockGate` is a manual check on a real device.
 **Re-enrolling a biometric → the "offline copy was reset" banner.** Driving the Settings UI to
 add a second fingerprint and waiting for KeyStore invalidation is too flaky to be worth it.
 `db-key.test.ts` covers the `lost` transition.
-
-**Live updates on web.** `apps/web/e2e/capture.spec.ts` marks the live-echo case `test.fixme`.
-Measured: the write lands, the row is in Postgres, `notes` is in the `supabase_realtime`
-publication and the container is healthy — and no `postgres_changes` event reaches the open
-page. Two candidates, not yet distinguished: `note-list.tsx` builds a fresh browser client
-inside its effect and subscribes immediately, which may race session hydration and leave
-Realtime evaluating RLS as anon (in which case live updates are broken for real users too); or
-the cookie-injected session hydrates differently from an OAuth one. **This is worth resolving
-before trusting the web suite's coverage of realtime behaviour.**
 
 ### The limit of a green mobile run
 

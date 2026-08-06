@@ -1,6 +1,12 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const BASE_URL = process.env.E2E_WEB_URL ?? "http://127.0.0.1:3000";
+// The port is derived from BASE_URL and passed to `next start`, so pointing E2E_WEB_URL at a
+// different port really moves the server. Bare `pnpm start` always binds 3000: with
+// `reuseExistingServer` that silently adopts whatever is already there -- a `next dev` left
+// running by a developer got picked up once, and the suite failed with redirects to /login
+// because that server had none of this suite's env. With a distinct port, it cannot.
+const PORT = new URL(BASE_URL).port || "3000";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -41,7 +47,7 @@ export default defineConfig({
     // `next start`, not `next dev`: the specs assert on server-rendered output and on the
     // redirect in src/app/page.tsx, and dev-mode recompilation makes the first navigation of
     // each spec slow enough to trip its own timeout.
-    command: "pnpm start",
+    command: `pnpm start --port ${PORT}`,
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

@@ -42,6 +42,25 @@ export function NoteList({ initialNotes, filters, userId, token }: {
 
   useEffect(() => {
     const supabase = createClient();
+    // WITHOUT THIS, NO EVENT EVER ARRIVES -- and nothing looks wrong.
+    //
+    // Realtime evaluates postgres_changes filters against the role in the socket's JWT:
+    // realtime.subscription_check_filters() builds its list of filterable columns from
+    // has_column_privilege(claims->>'role', ...). createClient() returns a NEW browser client
+    // that hydrates its session from cookies asynchronously, so subscribing straight away sends
+    // no token and the role is `anon` -- which has SELECT on zero columns of public.notes
+    // (00009 revoked the defaults, correctly). Zero columns means every filter is rejected:
+    //
+    //   ERROR P0001 (raise_exception) invalid column for filter user_id
+    //
+    // The message points at the column, which exists; the actual subject is the role. The
+    // channel still replies `status: ok` and the rejection arrives afterwards as a separate
+    // `system` frame, so the client reports a healthy subscription that silently receives
+    // nothing -- reloads always showed correct data, which is why this survived so long.
+    //
+    // `token` is the server component's session token, passed down by page.tsx, so it is
+    // already here and needs no await.
+    supabase.realtime.setAuth(token);
     const channel = supabase
       .channel(`notes-list-${view}-${domain ?? "all"}-${tag ?? ""}-${q ?? ""}`)
       .on("postgres_changes",
@@ -66,7 +85,7 @@ export function NoteList({ initialNotes, filters, userId, token }: {
         })
       .subscribe((status) => { if (status === "SUBSCRIBED") void refetch(); });
     return () => { void supabase.removeChannel(channel); };
-  }, [userId, view, domain, q, tag, filters, refetch]);
+  }, [userId, view, domain, q, tag, filters, refetch, token]);
 
   async function act(id: string, fn: () => Promise<unknown>) {
     setBusy(id);

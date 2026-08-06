@@ -26,29 +26,24 @@ test("a captured note reaches the corpus", async ({ page }) => {
 });
 
 /**
- * MEASURED, NOT ASSUMED, AND NOT YET EXPLAINED.
+ * The regression test for the Realtime subscription being unauthenticated.
  *
- * Under the injected session this does not pass: the write lands (the box clears), the row is
- * in Postgres (a reload shows it), `notes` is in the `supabase_realtime` publication and the
- * realtime container is healthy -- but no postgres_changes event reaches the open page within
- * 5 seconds.
+ * It failed for a real reason, reproduced by hand in two browser tabs signed in through Google:
+ * the channel joined, but the postgres_changes subscription was rejected with
  *
- * Two candidate causes, not distinguished yet, and the difference matters:
+ *   ERROR P0001 (raise_exception) invalid column for filter user_id
  *
- *  - A product race. `createClient()` builds a NEW browser client on every call, and
- *    note-list.tsx calls it inside the effect and subscribes immediately. A fresh client
- *    hydrates its session from cookies asynchronously, so the channel can join before the
- *    access token is applied, and Realtime then evaluates RLS as anon and drops every row. If
- *    that is what is happening, live updates are broken for real users too.
- *  - An artifact of this harness. The session here is injected as cookies by global-setup
- *    rather than established through the OAuth callback, so a real browser session may hydrate
- *    differently.
+ * which is misleading -- the column exists. `realtime.subscription_check_filters()` builds its
+ * list of filterable columns from `has_column_privilege(new.claims ->> 'role', ...)`, so it is
+ * asking what the JWT's ROLE can select. The socket had no user token, so the role was `anon`,
+ * and `anon` has SELECT on zero columns of `public.notes` (correctly -- 00009 revoked the
+ * defaults). Zero columns means every filter is "invalid". No events were ever sent.
  *
- * Deliberately `fixme` rather than deleted or quietly reloaded: skipping it silently would
- * remove the only signal that this question is open. Do not "fix" it by adding a reload --
- * that is the test above.
+ * If this starts failing again, capture the websocket frames before theorising: the join reply
+ * says `status: ok` and the rejection arrives afterwards as a separate `system` message, so
+ * nothing in the client's own logs looks wrong.
  */
-test.fixme("the open page learns about the capture without a reload", async ({ page }) => {
+test("the open page learns about the capture without a reload", async ({ page }) => {
   const body = `web live capture ${Date.now()}`;
 
   await page.goto("/");
