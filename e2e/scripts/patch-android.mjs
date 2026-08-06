@@ -33,9 +33,17 @@ for (const f of [GRADLE, MANIFEST]) {
  * `bundleInDebug` was the property for this on older RN Gradle plugin versions; 0.86's
  * `ReactExtension` has no such property (`Could not set unknown property 'bundleInDebug'`) and
  * only exposes `debuggableVariants`.
+ *
+ * The idempotency check below must match an actual assignment, not just the word: expo
+ * prebuild's generated build.gradle already contains the line
+ * `// debuggableVariants = ["liteDebug", "prodDebug"]` as a commented-out example, which a bare
+ * `/debuggableVariants/` test matches too. That false positive skipped patching entirely, so the
+ * debug variant stayed on the default (['debug', 'debugOptimized']) and no JS was ever bundled --
+ * this is what actually shipped, silently, until Maestro finally got far enough to notice the
+ * app had no bundle.
  */
 let gradle = readFileSync(GRADLE, "utf8");
-if (/debuggableVariants/.test(gradle)) {
+if (/^\s*debuggableVariants\s*=/m.test(gradle)) {
   console.log("debuggableVariants: already present, left alone");
 } else if (/react\s*\{/.test(gradle)) {
   gradle = gradle.replace(/react\s*\{/, "react {\n    debuggableVariants = []");
