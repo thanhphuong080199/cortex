@@ -23,7 +23,9 @@
         "expo-dev-client",
         {
           "android": {
-            "embeddedBundle": true
+            "embeddedBundle": true,
+            "skipOnboarding": true,
+            "showMenuAtLaunch": false
           }
         }
       ]
