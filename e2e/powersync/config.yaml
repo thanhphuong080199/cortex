@@ -1,0 +1,47 @@
+# PowerSync Service configuration, for E2E only.
+#
+# WHY THIS EXISTS
+#
+# Uploads from the device go to the Nest API (apps/mobile/src/lib/connector.ts -> POST
+# /sync/upload), so a test that only captures notes locally needs none of this. Every
+# server->device assertion does: PowerSync replicates from Postgres by logical decoding and
+# serves the device over its own protocol. Without it, "edit it on the web and watch the phone",
+# "purge on the web", and the entire second half of the conflict run are untestable. Production
+# points EXPO_PUBLIC_POWERSYNC_URL at a hosted instance; CI and local runs get this container.
+#
+# Every environment-specific value is `!env`, so this file is byte-identical on a laptop and on
+# a runner. See up.sh for what sets them.
+
+replication:
+  connections:
+    - type: postgresql
+      uri: !env PS_REPLICATION_URI
+      # The local Supabase Postgres serves plaintext on 54322. Production is TLS; this flag is
+      # scoped to a file that never runs outside a test stack.
+      sslmode: disable
+
+storage:
+  # Postgres, not Mongo. PowerSync's own docker-compose demo uses Mongo, and the first draft of
+  # this file copied it -- but Postgres bucket storage is supported and the stack already has a
+  # Postgres, so the Mongo container was a whole service (and a replica-set init dance) bought
+  # for nothing.
+  type: postgresql
+  uri: !env PS_STORAGE_URI
+  sslmode: disable
+
+client_auth:
+  # Verifies the SAME Supabase access token apps/api verifies. Its guard
+  # (apps/api/src/auth/supabase-auth.guard.ts) falls through to this JWKS endpoint whenever
+  # SUPABASE_JWT_SECRET is unset, which is how ci.yml deliberately runs it -- so both halves of
+  # the system authenticate the device's token the same way, by the same keys.
+  #
+  # `auth.user_id()` in packages/sync/src/sync-rules.yaml resolves to this token's `sub`, which
+  # is the only thing keeping one user's rows out of another's bucket.
+  supabase: true
+  jwks_uri: !env PS_JWKS_URI
+  audience: ["authenticated"]
+
+sync_rules:
+  # The REAL rules, mounted from packages/sync/src. Copying them would let CI pass against rules
+  # that no longer match what ships, and these are a security boundary, not configuration.
+  path: /config/sync-rules.yaml
