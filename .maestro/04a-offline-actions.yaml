@@ -141,7 +141,17 @@ appId: ${APP_ID}
 # the unmount, is unchanged, and a back that does not navigate tests nothing at all.
 - hideKeyboard
 - back
-# `back` restores the list at the row we came from, so "Restore target" is still on screen.
+# Look for it again rather than tapping where it was. `back` does restore the list at the scroll
+# offset we left, but the row is no longer AT that offset: the edit above bumped updated_at, and
+# the list is `ORDER BY updated_at DESC`, so the note moved to the top while the viewport stayed
+# put. The screenshot from the run that taught us this showed the list sitting on dune / vorpal
+# blade / Dune / Apostrophe / Conflict / Zarquon and the footer, with "Restore target" somewhere
+# above the fold.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element: "Restore target"
+    direction: DOWN
+    timeout: 30000
 - tapOn: "Restore target"
 - extendedWaitUntil:
     visible: "TYPEDFAST"
