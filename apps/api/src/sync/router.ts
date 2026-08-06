@@ -112,6 +112,7 @@ export async function applySyncOps(
               mood: op.data?.mood as number | undefined,
               energy: op.data?.energy as number | undefined,
               label: op.data?.label as string | undefined,
+              createdAt: typeof op.data?.created_at === "string" ? op.data.created_at : undefined,
             });
           } else throw { kind: "validation", message: "checkins are insert-or-delete only" };
           break;
@@ -145,6 +146,7 @@ async function applyNoteOp(
       title: data.title === null || data.title === undefined ? undefined : String(data.title),
       domain: data.domain as never,
       domainMeta,
+      createdAt: typeof data.created_at === "string" ? data.created_at : undefined,
     });
   } else {
     // `deleted_at` is a PATCH field, not just a DELETE op. The device trashes and restores with

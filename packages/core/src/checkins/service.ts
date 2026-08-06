@@ -8,6 +8,11 @@ export interface Checkin {
   created_at: string; deleted_at: string | null;
 }
 
+export interface CreateCheckinOptions {
+  // Only createWithId honours this (the sync path) -- round 2, finding #3.
+  createdAt?: string;
+}
+
 // Check-ins are not notes (life-domains spec §2.3): they never touch the notes table,
 // the inbox, or FTS. This service is deliberately two methods -- log it, or undo the
 // mis-tap. There is no update: a wrong mood is deleted and re-tapped, which is faster
@@ -34,13 +39,14 @@ export class CheckinService {
    * create(), with the id chosen by the device. Idempotent for the same reason
    * NoteService.createWithId is: a replayed batch must not wedge the queue.
    */
-  async createWithId(id: string, input: CreateCheckinInput): Promise<Checkin> {
+  async createWithId(id: string, input: CreateCheckinInput & CreateCheckinOptions): Promise<Checkin> {
     const { data, error } = await this.client.from("checkins")
       .insert({
         id, user_id: this.userId,
         mood: input.mood ?? null,
         energy: input.energy ?? null,
         label: input.label ?? null,
+        ...(input.createdAt !== undefined ? { created_at: input.createdAt } : {}),
       })
       .select().single();
     if (error) {

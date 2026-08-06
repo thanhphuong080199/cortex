@@ -35,6 +35,9 @@ export interface Note {
 export interface CreateNoteOptions {
   domainMeta?: Record<string, unknown>;
   mediaItemId?: string;
+  // Only createWithId honours this (the sync path). create()'s HTTP callers have no
+  // capture time to report; server-issued `now()` is correct for them.
+  createdAt?: string;
 }
 
 // Services take a client + userId and know nothing about HTTP (spec §2.2).
@@ -96,11 +99,23 @@ export class NoteService {
         id, user_id: this.userId, content: input.content, title: input.title ?? null,
         domain: input.domain ?? null, domain_meta: domainMeta,
         media_item_id: input.mediaItemId ?? null,
+        // round 2, finding #3: an offline capture's real timestamp, not the reconnect time.
+        ...(input.createdAt !== undefined ? { created_at: input.createdAt } : {}),
       })
       .select().single();
     if (error) {
-      // 23505 on an id the caller already owns is a replayed op, not a conflict.
-      if (error.code === "23505") return this.getById(id);
+      // 23505 on an id the caller already owns is a replayed op, not a conflict. A replay
+      // wants "does this id exist and is it mine", not "is it currently live" -- getById's
+      // `deleted_at is null` filter is right for an ordinary read and wrong here: if the note
+      // was trashed since the first attempt landed, a resent PUT must still report success
+      // (round 2, finding #9), the opposite asymmetry from CheckinService.createWithId's own
+      // 23505 read, which never filtered deleted_at and stays that way deliberately.
+      if (error.code === "23505") {
+        const { data: existing, error: readError } = await this.client.from("notes")
+          .select().eq("id", id).eq("user_id", this.userId).single();
+        if (readError) throw mapPostgrestError(readError);
+        return existing as Note;
+      }
       throw mapPostgrestError(error);
     }
     return data as Note;
@@ -179,7 +194,7 @@ export class NoteService {
     }
 
     const { data: current, error: readError } = await this.client.from("notes")
-      .select("content")
+      .select("content, title")
       .eq("id", id).eq("user_id", this.userId).is("deleted_at", null).single();
     if (readError) throw mapPostgrestError(readError);
 
@@ -191,17 +206,22 @@ export class NoteService {
       return { note: await this.update(id, input), conflictCopy: null };
     }
 
+    // The copy is created FIRST, deliberately: it is the phone's text, and the only thing
+    // that must never be lost. The metadata update below can throw on its own terms (a
+    // domain change the existing domain_meta cannot satisfy is the realistic trigger), and
+    // when it does, the op still fails -- but by then the offline body already exists as
+    // this row, not just as an argument on a call that never landed (round 2, finding #5).
+    const conflictCopy = await this.createWithId(conflictCopyId(this.userId, id, opId), {
+      content: input.content,
+      title: current.title ?? undefined,
+    });
+
     // Server body wins. Everything except content is still applied to it -- a lifecycle
     // change made offline is not in conflict with a body edit made on web.
     const { content: _losing, ...metadata } = input;
     const note = Object.keys(metadata).length > 0
       ? await this.update(id, metadata as UpdateNoteInput)
       : await this.getById(id);
-
-    const conflictCopy = await this.createWithId(conflictCopyId(this.userId, id, opId), {
-      content: input.content,
-      title: note.title ?? undefined,
-    });
 
     // The copy is the thing that must not be lost, so a failed link does NOT throw --
     // an untraceable-but-present note beats discarding the user's text to report an error.

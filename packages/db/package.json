@@ -9,5 +9,5 @@
     "test": "vitest run"
   },
   "dependencies": { "@supabase/supabase-js": "^2.48.0", "@cortex/shared": "workspace:*" },
-  "devDependencies": { "@cortex/config": "workspace:*", "vitest": "^3.0.0", "dotenv": "^16.4.0", "@types/node": "^22.10.0" }
+  "devDependencies": { "@cortex/config": "workspace:*", "vitest": "^3.0.0", "dotenv": "^16.4.0", "@types/node": "^22.10.0", "yaml": "^2.6.0" }
 }

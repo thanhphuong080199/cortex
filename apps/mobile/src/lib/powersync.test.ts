@@ -40,6 +40,9 @@ const registerListener = vi.fn((listener: { statusChanged?: (status: unknown) =>
   statusListener = listener.statusChanged;
   return () => {};
 });
+const close = vi.fn(async () => {
+  order.push("close");
+});
 vi.mock("@powersync/react-native", () => ({
   PowerSyncDatabase: class {
     constructor(readonly options: unknown) {
@@ -47,6 +50,7 @@ vi.mock("@powersync/react-native", () => ({
     }
     connect = connect;
     registerListener = registerListener;
+    close = close;
   },
 }));
 
@@ -78,6 +82,7 @@ beforeEach(() => {
   getOrCreateDatabaseKey.mockClear();
   connect.mockClear();
   registerListener.mockClear();
+  close.mockClear();
   statusListener = undefined;
 });
 
@@ -291,5 +296,21 @@ describe("initPowerSync", () => {
     expect(db).not.toBeNull();
     expect(mod.getPowerSync()).not.toBeNull();
     expect(connect).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * Round 2, finding #7. `setupNotesFts` (or `connect`, though that one is fire-and-forget by
+   * design) can throw during open. The catch nulled `opening` and rethrew without closing the
+   * handle already constructed -- so the retry this exists to enable opened a SECOND
+   * PowerSyncDatabase over the same encrypted file, the exact state the in-flight guard is
+   * meant to prevent for concurrent callers, now reached sequentially instead.
+   */
+  it("closes the constructed database when opening fails, so a retry cannot leak a second handle", async () => {
+    const mod = await freshModule();
+    setupNotesFts.mockRejectedValueOnce(new Error("fts setup failed"));
+
+    await expect(mod.initPowerSync()).rejects.toThrow("fts setup failed");
+
+    expect(close).toHaveBeenCalledOnce();
   });
 });

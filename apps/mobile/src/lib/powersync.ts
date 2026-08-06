@@ -39,6 +39,10 @@ let db: PowerSyncDatabase | null = null;
 // `initPowerSync` is awaited across several ticks. Without this, two callers racing the first
 // mount both see `db === null` and construct a second PowerSyncDatabase over the same file.
 let opening: Promise<{ db: PowerSyncDatabase; wiped: boolean }> | null = null;
+// Set the instant `new PowerSyncDatabase(...)` succeeds, cleared once open finishes (either
+// way). Lets the catch below close a handle that was constructed but never finished opening --
+// see the comment there for why leaving it open is a data-loss-adjacent bug, not a cosmetic one.
+let constructing: PowerSyncDatabase | null = null;
 
 export function getPowerSync(): PowerSyncDatabase | null {
   return db;
@@ -101,6 +105,7 @@ export async function initPowerSync(): Promise<{ db: PowerSyncDatabase; wiped: b
         sqliteOptions: { encryptionKey },
       },
     });
+    constructing = opened;
 
     // Before connect, so no transition -- including the very first one -- can fire before
     // anything is listening.
@@ -147,6 +152,7 @@ export async function initPowerSync(): Promise<{ db: PowerSyncDatabase; wiped: b
       console.error("PowerSync could not connect; local data is still available", cause);
     });
     db = opened;
+    constructing = null;
     return { db: opened, wiped };
   })();
 
@@ -156,6 +162,18 @@ export async function initPowerSync(): Promise<{ db: PowerSyncDatabase; wiped: b
     // A failed open must not leave a poisoned promise every later caller re-awaits: the user
     // can fix a cancelled biometric prompt by retrying, and there would be nothing to retry.
     opening = null;
+
+    // If `setupNotesFts` (or anything else after construction) threw, `constructing` still
+    // holds the handle that was never closed. Left open, the retry this reset exists to allow
+    // opens a SECOND PowerSyncDatabase over the same encrypted file -- the exact state the
+    // in-flight guard above prevents for concurrent callers, now reachable sequentially instead.
+    if (constructing) {
+      const failed = constructing;
+      constructing = null;
+      await failed.close().catch((closeError: unknown) => {
+        console.error("failed to close a database handle left over from a failed open", closeError);
+      });
+    }
     throw error;
   }
 }

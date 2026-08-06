@@ -447,6 +447,43 @@ describe("POST /sync/upload", () => {
     expect(data!.content).toBe("after");
   });
 
+  /**
+   * Round 2, finding #3. The router never forwarded `created_at`, so both notes and checkins
+   * default it to `now()` -- a mood logged offline on a plane becomes a row timestamped at
+   * reconnect time, silently wrong on the timeline and every chart over it. Mobile's local
+   * schema already carries the real capture time (`NOW_ISO` in capture.ts/checkins.ts), so
+   * PowerSync includes it on every PUT; the fix is to stop dropping it.
+   *
+   * Compared via `new Date(...).toISOString()`, not string equality: PostgREST returns
+   * timestamptz as `...+00:00` while the captured value here is `...Z` -- same instant,
+   * different serialisation, and a `!==` on the raw strings would fail for the wrong reason.
+   */
+  it("honors an offline note's captured created_at instead of the reconnect time", async () => {
+    const id = uuid();
+    const capturedAt = "2020-01-01T00:00:00.000Z";
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id,
+              data: { content: "captured offline", created_at: capturedAt } }],
+    }).expect(201);
+
+    const { data } = await createUserClient(alice.token).from("notes")
+      .select("created_at").eq("id", id).single();
+    expect(new Date(data!.created_at).toISOString()).toBe(capturedAt);
+  });
+
+  it("honors an offline checkin's captured created_at instead of the reconnect time", async () => {
+    const id = uuid();
+    const capturedAt = "2020-01-01T00:00:00.000Z";
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "checkins", id,
+              data: { mood: 3, created_at: capturedAt } }],
+    }).expect(201);
+
+    const { data } = await createUserClient(alice.token).from("checkins")
+      .select("created_at").eq("id", id).single();
+    expect(new Date(data!.created_at).toISOString()).toBe(capturedAt);
+  });
+
   it("accepts the DELETE that mobile's undo actually sends", async () => {
     const id = uuid();
     await post(alice.token, {

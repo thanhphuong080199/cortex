@@ -167,4 +167,40 @@ describe("NoteService.updateWithConflictCopy", () => {
     expect(r.note.content).toBe("web edit");
     expect(r.note.lifecycle).toBe("archived");   // metadata is last-write-wins
   });
+
+  /**
+   * Round 2, finding #5. The metadata `update()` used to run BEFORE the copy was created, so
+   * when that update throws -- a domain change the note's existing domain_meta cannot satisfy
+   * is the realistic trigger -- the op fails after the phone's text already left the device's
+   * queue and before any row holds it. Reordering so the copy is written first makes the same
+   * failure non-destructive: the metadata patch can still fail, but the offline body always
+   * survives as the copy.
+   */
+  it("keeps the offline body as a copy even when the metadata patch afterward throws", async () => {
+    const note = await svc.create({
+      content: "original", domain: "media", domainMeta: { rating: 5 },
+    });
+    const base = note.content;
+    await svc.update(note.id, { content: "web edit" });
+
+    // media's {rating: 5} does not fit health's strict schema, so update()'s domain_meta
+    // re-validation throws -- but only AFTER the conflict is genuine and the copy should
+    // already hold the phone's body.
+    await expect(
+      svc.updateWithConflictCopy(
+        note.id, { content: "phone edit finding5", domain: "health" }, base, "finding5",
+      ),
+    ).rejects.toBeTruthy();
+
+    // The link write happens AFTER the metadata update in the normal path, so it never runs in
+    // this scenario -- the copy note itself is the only thing this guards. At least one, not
+    // exactly one: the copy's id is derived from this test's own (fresh) note id, so repeat
+    // runs against this persistent fixture create distinct rows rather than colliding, and
+    // "at least one exists" is the actual property (a real client-chosen id would collide and
+    // no-op via createWithId's own 23505 fallback; that path is covered elsewhere).
+    const { data } = await createUserClient(alice.token).from("notes")
+      .select("id").eq("content", "phone edit finding5");
+    expect(data!.length, "the phone's body must survive as a conflict copy even though the op failed")
+      .toBeGreaterThan(0);
+  });
 });

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { SYNC_TABLES } from "@cortex/shared";
 import { beforeAll, describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 
 import { admin, makeUser } from "./clients.js";
 
@@ -12,11 +13,12 @@ const rules = readFileSync(rulesPath, "utf8");
 /**
  * The file with its comments stripped.
  *
- * Every assertion below is about the RULES, not the prose explaining them -- and the prose
- * deliberately names both the legacy `bucket_definitions` form and each server-only table, in
- * order to record why they are absent. Asserting over the raw file (as the plan's draft did)
- * fails on exactly those explanations, so staying green would mean deleting the most useful
- * comments in the file. The property worth enforcing is that none of it appears in a rule.
+ * Only used by the static substring checks below (edition 3, bucket_definitions,
+ * request.user_id, parameters:, server-only table names) -- properties about what appears
+ * ANYWHERE in the file, not about individual queries. The prose deliberately names both the
+ * legacy `bucket_definitions` form and each server-only table, in order to record why they are
+ * absent; asserting over the raw file (as the plan's draft did) fails on exactly those
+ * explanations, so staying green would mean deleting the most useful comments in the file.
  *
  * SPLIT ON `\r?\n`, NOT `\n`. With a CRLF checkout -- git's default on Windows, and this repo
  * warns `LF will be replaced by CRLF` on every commit -- splitting on `\n` leaves a `\r` at the
@@ -31,22 +33,35 @@ const directives = rules
   .filter((l) => l.trim().length > 0)
   .join("\n");
 
-const dataQueries = directives
-  .split("\n")
-  .map((l) => l.trim())
-  .filter((l) => l.startsWith("- SELECT"));
-
 /**
- * The scoping each rule actually declares, taken from the file rather than restated here.
+ * Round 2, finding #8. The query list used to be found by filtering raw FILE LINES for the
+ * literal prefix `- SELECT`, which is blind to every other legal YAML form of the same list
+ * item: lowercase SQL (`- select ...`), a quoted scalar (`- "SELECT ..."`), or a block scalar
+ * (`- |` with the query on the following, differently-indented line). A rule written in any of
+ * those forms was invisible to every assertion below, INCLUDING the table-set equality -- an
+ * unscoped duplicate `notes` query in one of those forms would ship every user's notes to every
+ * device with all six static tests green, because the duplicate simply never became a
+ * `dataQueries` entry for anything to check.
  *
- * The dynamic half below executes THIS -- the table and column the rules name -- so that a rule
- * scoped on the wrong column is caught by running it, not by a regex agreeing with itself.
+ * Parsing the YAML for real fixes this at the root: `queries` becomes an array of the actual
+ * string values PowerSync will run, regardless of how each was spelled in the file. Table/column
+ * extraction stays a regex (there is no SQL parser here), now case-insensitive and run over that
+ * real string rather than over a raw file line.
  */
-const scopings = dataQueries.map((q) => ({
-  query: q,
-  table: /FROM\s+(\w+)/.exec(q)?.[1],
-  column: /WHERE\s+(\w+)\s*=\s*auth\.user_id\(\)/.exec(q)?.[1],
-}));
+function extractDataQueries(yamlText: string): { query: string; table?: string; column?: string }[] {
+  const parsed = parseYaml(yamlText) as { streams?: Record<string, { queries?: string[] }> };
+  const allQueries = Object.values(parsed.streams ?? {}).flatMap((s) => s.queries ?? []);
+  return allQueries
+    .filter((q) => /^\s*SELECT\b/i.test(q))
+    .map((q) => ({
+      query: q,
+      table: /FROM\s+(\w+)/i.exec(q)?.[1],
+      column: /WHERE\s+(\w+)\s*=\s*auth\.user_id\(\)/i.exec(q)?.[1],
+    }));
+}
+
+const scopings = extractDataQueries(rules);
+const dataQueries = scopings.map((s) => s.query);
 
 let alice: Awaited<ReturnType<typeof makeUser>>;
 let bob: Awaited<ReturnType<typeof makeUser>>;
@@ -160,7 +175,7 @@ describe("sync rules — static shape", () => {
   it("scopes every data query to the authenticated user", () => {
     for (const q of dataQueries) {
       expect(q, `unscoped sync stream query: ${q}`).toMatch(
-        /WHERE\s+user_id\s*=\s*auth\.user_id\(\)/,
+        /WHERE\s+user_id\s*=\s*auth\.user_id\(\)/i,
       );
     }
   });
@@ -190,6 +205,67 @@ describe("sync rules — static shape", () => {
     ]) {
       expect(directives, `server-only table in a sync rule: ${t}`).not.toContain(t);
     }
+  });
+});
+
+/**
+ * Round 2, finding #8, proven directly against the parser rather than against the real file:
+ * each fixture below writes the same leaky duplicate -- a second, UNSCOPED `notes` query -- in
+ * a YAML form the old line-based `l.startsWith("- SELECT")` filter could not see at all. Every
+ * case must come back with the leak PRESENT in the result; a missing one means the parser
+ * dropped it silently, which is exactly how the leak shipped with all six static tests green.
+ */
+describe("extractDataQueries sees every query form, not just the literal `- SELECT` line", () => {
+  const scopedNotes = "SELECT * FROM notes WHERE user_id = auth.user_id()";
+
+  it("a lowercase query", () => {
+    const yaml = `
+streams:
+  user_data:
+    queries:
+      - ${scopedNotes}
+      - select * from notes
+`;
+    const found = extractDataQueries(yaml);
+    expect(found).toHaveLength(2);
+    expect(found.filter((s) => s.table === "notes")).toHaveLength(2);
+    // The leak: no WHERE user_id = auth.user_id() at all, so no column parses.
+    expect(found.some((s) => s.column === undefined)).toBe(true);
+  });
+
+  it("a double-quoted scalar", () => {
+    const yaml = `
+streams:
+  user_data:
+    queries:
+      - ${scopedNotes}
+      - "SELECT * FROM notes"
+`;
+    const found = extractDataQueries(yaml);
+    expect(found).toHaveLength(2);
+    expect(found.filter((s) => s.table === "notes")).toHaveLength(2);
+    expect(found.some((s) => s.column === undefined)).toBe(true);
+  });
+
+  it("a block-scalar query, on a line the old filter never inspected", () => {
+    const yaml = `
+streams:
+  user_data:
+    queries:
+      - ${scopedNotes}
+      - |
+        SELECT * FROM notes
+`;
+    const found = extractDataQueries(yaml);
+    expect(found).toHaveLength(2);
+    expect(found.filter((s) => s.table === "notes")).toHaveLength(2);
+    expect(found.some((s) => s.column === undefined)).toBe(true);
+  });
+
+  it("still parses the real file's queries as exactly the six scoped rules", () => {
+    // Not a fixture: the actual file must have no leak of its own, in any form.
+    expect(scopings).toHaveLength(SYNC_TABLES.length);
+    expect(scopings.every((s) => s.column === "user_id")).toBe(true);
   });
 });
 
