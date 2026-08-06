@@ -33,12 +33,19 @@ appId: ${APP_ID}
 # The rest of the seeded corpus, to prove the stream delivered the whole bucket and not just the
 # first row. scrollUntilVisible because the list is the screen's only scrolling surface and the
 # capture box, check-in widget and media form sit above it in the header.
+#
+# ORDER MATTERS, and it is the seed order reversed. The list is `ORDER BY updated_at DESC` and
+# seed.mjs writes Zarquon first and Apostrophe last, so Apostrophe is row 1 and Edit target is
+# row 6. Each scroll starts from wherever the previous one stopped, so asking for Edit target
+# first would park the view six rows down and the DOWN scroll for Apostrophe -- now above us --
+# would run to the end of the list and never find it. Ascending row order keeps every scroll on
+# this screen monotonically downward, ending at the footer where "Sign out" lives.
 - scrollUntilVisible:
-    element: "Edit target"
+    element: "Apostrophe note"
     direction: DOWN
     timeout: 30000
 - scrollUntilVisible:
-    element: "Apostrophe note"
+    element: "Edit target"
     direction: DOWN
     timeout: 30000
 

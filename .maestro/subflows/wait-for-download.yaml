@@ -5,10 +5,26 @@
 # fails. A note the device never wrote appearing in the list is proof the stream delivered --
 # it cannot come from anywhere else.
 #
+# scrollUntilVisible, NOT extendedWaitUntil. NoteList's header -- capture box, check-in widget,
+# media form, search box, view chips -- is taller than the viewport, so the list begins below
+# the fold and a FlatList does not render off-screen rows into the hierarchy at all. On top of
+# that, "Zarquon note" is the FIRST note seed.mjs writes and the list is `ORDER BY updated_at
+# DESC`, which puts it LAST of the seven. A non-scrolling matcher can therefore never see it:
+# the run that taught us this had the stream fully delivered (server logged checkpoint_complete
+# with 9 ops, the device logged hasSynced=true) one second before a 90s wait on this line timed
+# out. scrollUntilVisible still waits -- it retries until its timeout -- so it keeps the
+# "has the download arrived yet" meaning while also being able to reach the row.
+#
 # 90s because the first sync of a fresh bucket includes PowerSync compiling the sync rules and
 # doing an initial replication pass; steady-state arrivals are seconds.
 appId: ${APP_ID}
 ---
-- extendedWaitUntil:
-    visible: "Zarquon note"
+- scrollUntilVisible:
+    element: "Zarquon note"
+    direction: DOWN
     timeout: 90000
+
+# Leave the list where every caller expects to find it. Finding Zarquon parks the view at the
+# bottom of the corpus, and every flow that runs this subflow then scrolls DOWN for something --
+# which silently fails for anything that is now ABOVE us.
+- runFlow: scroll-to-top.yaml

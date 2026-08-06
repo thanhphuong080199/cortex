@@ -5,6 +5,9 @@
 # Both are pure server->device assertions, which makes this the flow most likely to catch the
 # open sync bug -- and the one that is meaningless if PowerSync is not actually running. If this
 # times out, check the powersync container before the app.
+#
+# See 02 for why subflows/scroll-to-top.yaml precedes the DOWN scrolls: the list header is
+# taller than the viewport, and `back` from a note leaves the list wherever it was.
 appId: ${APP_ID}
 ---
 - launchApp:
@@ -37,11 +40,21 @@ appId: ${APP_ID}
 # The edit has to arrive on its own. No pull-to-refresh, no relaunch: `useQuery` is reactive, so
 # a synced change re-renders the open list by itself, and needing a nudge here would itself be
 # the bug.
+#
+# `back` restored the list at the row we tapped, which is well below the search box, so this
+# returns to the top before coming down to it.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
 - tapOn:
     id: "search-input"
 - inputText: "REPLACEDBODY"
-- extendedWaitUntil:
-    visible: "Edit target"
+- scrollUntilVisible:
+    element: "Edit target"
+    direction: DOWN
     timeout: 90000
 
 # ---- and the OLD word must now find nothing ----
@@ -49,13 +62,17 @@ appId: ${APP_ID}
 # the search index still carry the old body, in which case the note is findable by both words.
 - eraseText
 - inputText: "ORIGINALBODY"
-- extendedWaitUntil:
-    visible: "Nothing here yet."
+# "Nothing here yet." is ListEmptyComponent -- it renders where the rows would be, i.e. below the
+# header, so it needs the same scroll a row does.
+- scrollUntilVisible:
+    element: "Nothing here yet."
+    direction: DOWN
     timeout: 30000
 - assertNotVisible: "Edit target"
 - eraseText
 
 # ---- purge a different note on the server ----
+- runFlow: subflows/scroll-to-top.yaml
 - scrollUntilVisible:
     element: "Purge target"
     direction: DOWN
@@ -67,6 +84,8 @@ appId: ${APP_ID}
       NOTE_ID: ${NOTE_PURGE_TARGET}
 
 # A hard delete must remove it from the device, not merely hide it from the default view.
+# Deliberately NOT preceded by a scroll: the step above parked the view on the row, so this
+# watches it disappear. Scrolling first would let the assertion pass on an off-screen row.
 - extendedWaitUntil:
     notVisible: "Purge target"
     timeout: 90000
@@ -81,5 +100,20 @@ appId: ${APP_ID}
     file: subflows/dismiss-dev-launcher.yaml
 - extendedWaitUntil:
     visible: "How are you?"
+    timeout: 30000
+# Asked of the search index rather than of the screen. A relaunch opens at the top of the list,
+# where no row is on screen at all, so a bare assertNotVisible here would pass whether the note
+# survived the purge or not.
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
+- inputText: "purge"
+- scrollUntilVisible:
+    element: "Nothing here yet."
+    direction: DOWN
     timeout: 30000
 - assertNotVisible: "Purge target"

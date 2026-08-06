@@ -7,6 +7,12 @@
 # that PowerSync reports itself connected -- the exact question the handoff records as never
 # once answered yes on a real device. If the download stream is dead, this line reads
 # "Export needs a connection" and fails here.
+#
+# ON THE scroll-to-top CALLS. The list header is taller than the viewport, so the search box,
+# the view chips and every row are below the fold, and each `scrollUntilVisible` resumes from
+# where the last one stopped. subflows/scroll-to-top.yaml precedes anything that could now be
+# above the view, which is what makes the DOWN scrolls here deterministic rather than dependent
+# on how far the previous step happened to travel.
 appId: ${APP_ID}
 ---
 - launchApp:
@@ -25,10 +31,7 @@ appId: ${APP_ID}
     timeout: 60000
 - assertNotVisible: "Export needs a connection"
 
-- scrollUntilVisible:
-    element: "How are you?"
-    direction: UP
-    timeout: 30000
+- runFlow: subflows/scroll-to-top.yaml
 
 # ---- capture a note, it appears immediately ----
 # No network involved: capture is one local INSERT and the list is a reactive query over the
@@ -39,16 +42,26 @@ appId: ${APP_ID}
 - tapOn:
     id: "capture-save"
 - assertVisible: "Saved ✓"
-- extendedWaitUntil:
-    visible: "vorpal blade went snicker snack"
+# The new note is the newest, so it is row 1 -- but row 1 still sits below the whole header.
+# scrollUntilVisible retries until its timeout, so this keeps the "appears immediately" meaning.
+- scrollUntilVisible:
+    element: "vorpal blade went snicker snack"
+    direction: DOWN
     timeout: 15000
 
 # ---- search finds the one note that has the word ----
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
 - tapOn:
     id: "search-input"
 - inputText: "zarquon"
-- extendedWaitUntil:
-    visible: "Zarquon note"
+- scrollUntilVisible:
+    element: "Zarquon note"
+    direction: DOWN
     timeout: 15000
 - assertNotVisible: "vorpal blade went snicker snack"
 
@@ -56,23 +69,32 @@ appId: ${APP_ID}
 # truthy q, so a present-but-empty query would match nothing and silently empty the list -- the
 # case note-list.tsx spreads the key away to avoid.
 - eraseText
-- extendedWaitUntil:
-    visible: "vorpal blade went snicker snack"
+- scrollUntilVisible:
+    element: "vorpal blade went snicker snack"
+    direction: DOWN
     timeout: 15000
 
 # ---- switching views narrows the list ----
 # A freshly captured note is in `inbox`; `archived` must not show it. The view names come from
 # NOTE_VIEWS in @cortex/shared: inbox | active | archived | trash.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element: "archived"
+    direction: DOWN
+    timeout: 30000
 - tapOn: "archived"
 - extendedWaitUntil:
     notVisible: "vorpal blade went snicker snack"
     timeout: 15000
 - tapOn: "inbox"
-- extendedWaitUntil:
-    visible: "vorpal blade went snicker snack"
+- scrollUntilVisible:
+    element: "vorpal blade went snicker snack"
+    direction: DOWN
     timeout: 15000
 
 # ---- mood check-in ----
+# The widget is in the header, above the rows the previous step scrolled to.
+- runFlow: subflows/scroll-to-top.yaml
 - tapOn:
     text: "Mood 4 of 5 — good"
 - assertVisible: "Logged ✓"
@@ -95,8 +117,9 @@ appId: ${APP_ID}
 
 # The write goes to the local database, then uploads. Wait for the note to come back before
 # asking the server what it made of it.
-- extendedWaitUntil:
-    visible: "dune"
+- scrollUntilVisible:
+    element: "dune"
+    direction: DOWN
     timeout: 30000
 
 - runScript:

@@ -8,6 +8,12 @@
 # `clearState: false`: this inherits the local database 03 left behind, already populated from
 # the sync stream. Wiping it here would leave nothing pre-existing to trash, which is the whole
 # point of step 2.
+#
+# THE ROW ORDER MATTERS HERE. The list is `ORDER BY updated_at DESC` and seed.mjs writes in the
+# order Zarquon, Edit, Purge, Trash, Restore, Conflict, Apostrophe -- so on screen that is
+# Apostrophe, Conflict, Restore, Trash, ... Restore target is therefore ABOVE Trash target, and
+# Conflict target above both. Each step below returns to the top before scrolling down, because
+# a DOWN scroll for a row the previous step already passed runs to the end of the list instead.
 appId: ${APP_ID}
 ---
 - launchApp:
@@ -20,16 +26,15 @@ appId: ${APP_ID}
 # ---- 9. export must refuse, and say why ----
 # ExportButton reads useStatus().connected, so this is the negative half of the connected=true
 # assertion 02 makes. If it still says "Export all notes" here, either the radios did not go
-# down or PowerSync has not noticed.
-- extendedWaitUntil:
-    visible: "Export needs a connection"
+# down or PowerSync has not noticed. It lives in the list FOOTER, below every row, so reaching
+# it is a scroll rather than a wait.
+- scrollUntilVisible:
+    element: "Export needs a connection"
+    direction: DOWN
     timeout: 60000
 - assertNotVisible: "Export all notes"
 
-- scrollUntilVisible:
-    element: "How are you?"
-    direction: UP
-    timeout: 30000
+- runFlow: subflows/scroll-to-top.yaml
 
 # ---- 1. capture offline ----
 # One local INSERT and nothing else (screens/quick-capture.tsx), so this must be
@@ -40,8 +45,9 @@ appId: ${APP_ID}
 - tapOn:
     id: "capture-save"
 - assertVisible: "Saved ✓"
-- extendedWaitUntil:
-    visible: ${CAPTURE_MARKER}
+- scrollUntilVisible:
+    element: ${CAPTURE_MARKER}
+    direction: DOWN
     timeout: 15000
 
 # ---- 5. double-tap Save ----
@@ -50,6 +56,7 @@ appId: ${APP_ID}
 # saving === false and each one is a separate INSERT -- the second of which is invisible on
 # device until it syncs. The count is asserted server-side in 04b; this only creates the
 # condition.
+- runFlow: subflows/scroll-to-top.yaml
 - tapOn:
     id: "capture-input"
 - inputText: ${DOUBLE_TAP_MARKER}
@@ -63,11 +70,17 @@ appId: ${APP_ID}
 #
 # (The web mirror of this asserts the opposite outcome on purpose: Postgres's english config
 # treats both halves of "don't" as stop words, so there an empty result is correct.)
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
 - tapOn:
     id: "search-input"
 - inputText: "don't"
-- extendedWaitUntil:
-    visible: "Apostrophe note"
+- scrollUntilVisible:
+    element: "Apostrophe note"
+    direction: DOWN
     timeout: 20000
 - assertNotVisible: "Could not read notes on this device."
 - eraseText
@@ -75,6 +88,7 @@ appId: ${APP_ID}
 # ---- 2. trash a note that already existed ----
 # The CRITICAL case: a note trashed offline must STAY trashed through the reconnect, rather
 # than being resurrected by the download stream replaying the server's older copy.
+- runFlow: subflows/scroll-to-top.yaml
 - scrollUntilVisible:
     element: "Trash target"
     direction: DOWN
@@ -94,6 +108,7 @@ appId: ${APP_ID}
 # are seeded -- a keystroke landing before that sets `content`, so the base never seeds and
 # every later save silently returns early. And the debounce timer is deliberately NOT cleared
 # on unmount, so leaving within 800ms must still save rather than discard the typing.
+- runFlow: subflows/scroll-to-top.yaml
 - scrollUntilVisible:
     element: "Restore target"
     direction: DOWN
@@ -106,6 +121,7 @@ appId: ${APP_ID}
     id: "editor-input"
 - inputText: "TYPEDFAST"
 - back
+# `back` restores the list at the row we came from, so "Restore target" is still on screen.
 - tapOn: "Restore target"
 - extendedWaitUntil:
     visible: "TYPEDFAST"
@@ -116,6 +132,8 @@ appId: ${APP_ID}
 # both plain local UPDATEs of deleted_at (lib/note-edits.ts), so the pair queues two ops on one
 # row -- and what must survive the reconnect is the NET result, not the first op or the last one
 # the server happens to apply.
+#
+# Still inside the editor from the step above; these are its controls, not list rows.
 - extendedWaitUntil:
     visible: "Trash"
     timeout: 20000
@@ -136,6 +154,7 @@ appId: ${APP_ID}
 
 # ---- 7. THE CONFLICT RUN ----
 # Edit the note on the device, offline...
+- runFlow: subflows/scroll-to-top.yaml
 - scrollUntilVisible:
     element: "Conflict target"
     direction: DOWN
@@ -166,10 +185,7 @@ appId: ${APP_ID}
 # ---- 8. mood check-in, then undo ----
 # Insert and delete only (lib/checkins.ts) -- neither needs a server decision, so both work
 # offline unchanged. The undo must leave nothing behind once the queue drains.
-- scrollUntilVisible:
-    element: "How are you?"
-    direction: UP
-    timeout: 30000
+- runFlow: subflows/scroll-to-top.yaml
 - tapOn:
     text: "Mood 2 of 5 — bad"
 - assertVisible: "Logged ✓"
