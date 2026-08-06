@@ -21,26 +21,31 @@ for (const f of [GRADLE, MANIFEST]) {
   }
 }
 
-/* ---------------------------------------------------------------- bundleInDebug */
+/* ------------------------------------------------------------ debuggableVariants */
 /**
- * A plain `assembleDebug` APK contains NO JavaScript: React Native's Gradle plugin skips the
- * bundle step in debug and the app expects a Metro dev server at runtime. In CI that means a
- * background Metro process plus `adb reverse tcp:8081`, and a red screen whenever either is a
- * second late. Bundling in debug trades ~30s of build time for removing that whole class of
- * flake.
+ * A plain `assembleDebug` APK contains NO JavaScript: React Native's Gradle plugin treats
+ * `debug` as a "debuggable variant" by default (`debuggableVariants = ['debug', 'debugOptimized']`
+ * in ReactExtension) and skips the bundle step for those, so the app expects a Metro dev server
+ * at runtime. In CI that means a background Metro process plus `adb reverse tcp:8081`, and a red
+ * screen whenever either is a second late. Emptying `debuggableVariants` makes `debug` bundle
+ * like any release variant, trading ~30s of build time for removing that whole class of flake.
+ *
+ * `bundleInDebug` was the property for this on older RN Gradle plugin versions; 0.86's
+ * `ReactExtension` has no such property (`Could not set unknown property 'bundleInDebug'`) and
+ * only exposes `debuggableVariants`.
  */
 let gradle = readFileSync(GRADLE, "utf8");
-if (/bundleInDebug/.test(gradle)) {
-  console.log("bundleInDebug: already present, left alone");
+if (/debuggableVariants/.test(gradle)) {
+  console.log("debuggableVariants: already present, left alone");
 } else if (/react\s*\{/.test(gradle)) {
-  gradle = gradle.replace(/react\s*\{/, "react {\n    bundleInDebug = true");
+  gradle = gradle.replace(/react\s*\{/, "react {\n    debuggableVariants = []");
   writeFileSync(GRADLE, gradle);
-  console.log("bundleInDebug: patched into the react { } block");
+  console.log("debuggableVariants: patched to [] in the react { } block");
 } else {
   // Loud rather than silent: without the bundle the APK installs, launches, and shows a red
   // screen, and the Maestro failure would name a missing element instead of a missing bundle.
   console.error(
-    "::error::no `react { }` block in app/build.gradle — cannot enable bundleInDebug. " +
+    "::error::no `react { }` block in app/build.gradle — cannot empty debuggableVariants. " +
       "If this RN version dropped the property, build assembleRelease instead " +
       "(android-apk.yml already does that and embeds JS via `expo export:embed`).",
   );

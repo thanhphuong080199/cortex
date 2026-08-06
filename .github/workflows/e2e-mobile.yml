@@ -124,7 +124,7 @@ jobs:
         run: bash e2e/powersync/up.sh
 
       # android/ is gitignored on purpose -- app.json is the source of truth. patch-android.mjs
-      # then enables bundleInDebug (a debug APK otherwise carries no JS and expects Metro),
+      # then empties debuggableVariants (a debug APK otherwise carries no JS and expects Metro),
       # allows cleartext to 10.0.2.2, and asserts allowBackup="false" survived prebuild, which
       # is mục 2's `adb backup` row checked at the property.
       - name: Prebuild and patch the Android project
