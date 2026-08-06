@@ -17,6 +17,13 @@ REPO="$(cd "$HERE/../.." && pwd)"
 NAME="${POWERSYNC_CONTAINER:-cortex-powersync}"
 HOST_PORT="${POWERSYNC_PORT:-8080}"
 
+# The port the service listens on INSIDE the container. PowerSync's own README documents
+# `docker run -p 8080:80`, and that is wrong for the current image: v1.23.3 logs
+# "Running on port 8080" at boot. Mapping to 80 produced a container that was Up, with the port
+# apparently published, and every probe answering "Empty reply from server" -- Docker's proxy
+# accepting the connection with nothing behind it. Confirmed by reading /proc/net/tcp inside.
+CONTAINER_PORT=8080
+
 : "${SUPABASE_URL:?set SUPABASE_URL, e.g. http://127.0.0.1:54321}"
 
 # Supabase's own container, so `psql` need not exist on the host. Windows developers do not have
@@ -65,7 +72,7 @@ fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 docker run -d --name "$NAME" \
-  -p "${HOST_PORT}:80" \
+  -p "${HOST_PORT}:${CONTAINER_PORT}" \
   --add-host host.docker.internal:host-gateway \
   -e POWERSYNC_CONFIG_B64="$CONFIG_B64" \
   -e PS_REPLICATION_URI -e PS_STORAGE_URI -e PS_JWKS_URI \
@@ -74,11 +81,13 @@ docker run -d --name "$NAME" \
 
 echo "[powersync] container started, waiting for liveness on :${HOST_PORT}"
 for _ in $(seq 1 60); do
-  if curl -fsS "http://127.0.0.1:${HOST_PORT}/probes/liveness" >/dev/null 2>&1; then
-    echo "[powersync] live"
-    curl -fsS "http://127.0.0.1:${HOST_PORT}/probes/ready" >/dev/null 2>&1 \
-      && echo "[powersync] ready" \
-      || echo "[powersync] live but not ready yet (replication may still be starting)"
+  # /probes/liveness answers as soon as the process is up; /probes/startup is the one that also
+  # means replication has initialised, which is what the tests actually depend on. There is no
+  # /probes/ready on v1.23.3 -- it answers 404, and an earlier version of this script reported
+  # that as "live but not ready yet" forever, which read as a stalled service rather than as a
+  # wrong URL.
+  if curl -fsS "http://127.0.0.1:${HOST_PORT}/probes/startup" >/dev/null 2>&1; then
+    echo "[powersync] up on :${HOST_PORT} (liveness + startup both green)"
     exit 0
   fi
   # A container that exited is never going to become live; say so now rather than in 2 minutes.
