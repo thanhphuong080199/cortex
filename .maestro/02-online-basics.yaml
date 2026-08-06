@@ -59,6 +59,16 @@ appId: ${APP_ID}
 - tapOn:
     id: "search-input"
 - inputText: "zarquon"
+# THE KEYBOARD HAS TO GO before anything looks for a row. It covers the bottom half of the
+# screen, and the rows start immediately below the view chips, so with it up the list's visible
+# viewport is about ten pixels -- and scrollUntilVisible only counts an element as visible when
+# it is FULLY inside the viewport, so no row can ever satisfy it. The search box keeps focus
+# after typing, so unlike capture (which blurs on save) nothing dismisses it on its own.
+#
+# Safe here specifically because the keyboard is definitely up: on Android `hideKeyboard` fires
+# a back event, which the IME swallows when it is showing. Fired without a keyboard it would
+# navigate instead, which is why it is not sprinkled anywhere the state is uncertain.
+- hideKeyboard
 - scrollUntilVisible:
     element: "Zarquon note"
     direction: DOWN
@@ -68,7 +78,19 @@ appId: ${APP_ID}
 # Clearing the box must restore the full list. `noteFiltersToSql` emits an FTS clause on any
 # truthy q, so a present-but-empty query would match nothing and silently empty the list -- the
 # case note-list.tsx spreads the key away to avoid.
+#
+# Re-tapped rather than erased where we stand: eraseText goes to whatever is focused, and the
+# scroll above moved the box off screen.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
 - eraseText
+- hideKeyboard
 - scrollUntilVisible:
     element: "vorpal blade went snicker snack"
     direction: DOWN
@@ -111,6 +133,8 @@ appId: ${APP_ID}
 - tapOn:
     id: "media-title"
 - inputText: "dune"
+# The stars and the save button sit BELOW the title box, which is where the keyboard now is.
+- hideKeyboard
 - tapOn: "5 of 5 stars"
 - tapOn:
     id: "media-save"

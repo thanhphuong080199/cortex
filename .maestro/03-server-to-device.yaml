@@ -52,6 +52,9 @@ appId: ${APP_ID}
 - tapOn:
     id: "search-input"
 - inputText: "REPLACEDBODY"
+# The keyboard covers the rows, and scrollUntilVisible needs the element FULLY in the viewport.
+# See 02 for why this is safe only where the keyboard is known to be up.
+- hideKeyboard
 - scrollUntilVisible:
     element: "Edit target"
     direction: DOWN
@@ -60,8 +63,19 @@ appId: ${APP_ID}
 # ---- and the OLD word must now find nothing ----
 # This is the half that catches a stale FTS index: the row can be updated while content_text and
 # the search index still carry the old body, in which case the note is findable by both words.
+#
+# Back to the box first: eraseText types into whatever is focused, and the scroll above moved it.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
 - eraseText
 - inputText: "ORIGINALBODY"
+- hideKeyboard
 # "Nothing here yet." is ListEmptyComponent -- it renders where the rows would be, i.e. below the
 # header, so it needs the same scroll a row does.
 - scrollUntilVisible:
@@ -69,7 +83,17 @@ appId: ${APP_ID}
     direction: DOWN
     timeout: 30000
 - assertNotVisible: "Edit target"
+
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
 - eraseText
+- hideKeyboard
 
 # ---- purge a different note on the server ----
 - runFlow: subflows/scroll-to-top.yaml
@@ -112,6 +136,7 @@ appId: ${APP_ID}
 - tapOn:
     id: "search-input"
 - inputText: "purge"
+- hideKeyboard
 - scrollUntilVisible:
     element: "Nothing here yet."
     direction: DOWN

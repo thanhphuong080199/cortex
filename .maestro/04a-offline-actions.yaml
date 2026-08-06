@@ -78,12 +78,24 @@ appId: ${APP_ID}
 - tapOn:
     id: "search-input"
 - inputText: "don't"
+# The keyboard hides the rows outright; see 02. Safe because it is definitely up here.
+- hideKeyboard
 - scrollUntilVisible:
     element: "Apostrophe note"
     direction: DOWN
     timeout: 20000
 - assertNotVisible: "Could not read notes on this device."
+
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
 - eraseText
+- hideKeyboard
 
 # ---- 2. trash a note that already existed ----
 # The CRITICAL case: a note trashed offline must STAY trashed through the reconnect, rather
@@ -120,6 +132,14 @@ appId: ${APP_ID}
 - tapOn:
     id: "editor-input"
 - inputText: "TYPEDFAST"
+# The keyboard has to go BEFORE the back, or the back never leaves the editor: Android gives the
+# IME first refusal on it and it is spent dismissing the keyboard. The step below would then be
+# looking for a list row while still on the editor.
+#
+# This does cost the sharpest version of the test -- "leave within the 800ms debounce" is less
+# certain with a command in between -- but the assertion that matters, that TYPEDFAST survived
+# the unmount, is unchanged, and a back that does not navigate tests nothing at all.
+- hideKeyboard
 - back
 # `back` restores the list at the row we came from, so "Restore target" is still on screen.
 - tapOn: "Restore target"
@@ -171,6 +191,8 @@ appId: ${APP_ID}
 - extendedWaitUntil:
     visible: "Saved on this device"
     timeout: 20000
+# Again: the keyboard would eat the back press and leave us on the editor.
+- hideKeyboard
 - back
 
 # ...and edit the SAME note differently on the server. runScript runs on the HOST, whose network
