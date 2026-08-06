@@ -1,5 +1,7 @@
 import * as LocalAuthentication from "expo-local-authentication";
 
+import { IS_E2E_BUILD } from "./e2e";
+
 /**
  * Mandatory app lock (phase 1b spec §7.6, §7.7). The device holds the full note corpus,
  * so "borrowed phone" is a real threat, not a hypothetical.
@@ -15,6 +17,17 @@ export function shouldRelock(backgroundedAt: number | null, now: number): boolea
 }
 
 export async function authenticate(): Promise<boolean> {
+  // A CI emulator has no enrolled Class 3 biometric, so the call below can only ever resolve
+  // `success: false` there and the gate would render "Cortex is locked" for the whole run. See
+  // lib/e2e.ts for why this branch cannot exist in a build anyone installs.
+  //
+  // The COST of this seam, stated plainly: the three lock behaviours in the phase-1b test plan
+  // (prompt on cold start, no prompt inside the 60s grace, prompt after it) are not covered by
+  // any E2E flow, because the build the flows run against has no lock. `shouldRelock` above is
+  // unit-tested; the AppState wiring in AppLockGate that calls it is not, and stays a manual
+  // check on a real device.
+  if (IS_E2E_BUILD) return true;
+
   const r = await LocalAuthentication.authenticateAsync({
     promptMessage: "Unlock Cortex",
     // Default is 'weak', which admits Android Class 2 biometrics -- camera face unlock,

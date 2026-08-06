@@ -121,6 +121,7 @@ export function NoteEditor({ id }: { id: string }) {
         onChangeText={onChange}
         multiline
         accessibilityLabel="Note content"
+        testID="editor-input"
         style={{
           minHeight: 240,
           borderWidth: 1,

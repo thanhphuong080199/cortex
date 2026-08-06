@@ -65,6 +65,11 @@ export function QuickCapture() {
         placeholder="Capture a thought"
         multiline
         accessibilityLabel="Note content"
+        // testID, not the label, is what the Maestro flows match on. It becomes the Android
+        // resource-id, which is unique and stable; `accessibilityLabel` becomes
+        // contentDescription, and this screen has a second TextInput (the note-list search box)
+        // whose hint and description are both close enough to collide with a text matcher.
+        testID="capture-input"
         style={{ minHeight: 96, borderWidth: 1, borderColor: "#ccc", borderRadius: 8, padding: 12 }}
       />
       <ScrollView horizontal contentContainerStyle={{ gap: 8 }}>
@@ -96,6 +101,7 @@ export function QuickCapture() {
         }}
         accessibilityRole="button"
         disabled={saving}
+        testID="capture-save"
         style={{
           padding: 14,
           borderRadius: 8,

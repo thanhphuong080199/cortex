@@ -87,6 +87,7 @@ export function MediaLogForm() {
         onChangeText={setTitle}
         placeholder="Title"
         accessibilityLabel="Media title"
+        testID="media-title"
         style={{ borderWidth: 1, borderColor: "#ccc", borderRadius: 8, padding: 10 }}
       />
       {title.length > 1 && matches.length > 0 ? (
@@ -159,6 +160,7 @@ export function MediaLogForm() {
         }}
         accessibilityRole="button"
         disabled={saving}
+        testID="media-save"
         style={{
           padding: 14,
           borderRadius: 8,

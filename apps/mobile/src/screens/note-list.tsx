@@ -72,6 +72,7 @@ export function NoteList({
       <TextInput
         placeholder="Search"
         accessibilityLabel="Search notes"
+        testID="search-input"
         onChangeText={(q) =>
           // Spread-if rather than assigning undefined: `noteFiltersToSql` emits the FTS clause
           // on any truthy `q`, and a present-but-empty one would match nothing and empty the

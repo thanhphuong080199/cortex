@@ -56,6 +56,24 @@ jobs:
           fi
           echo "api=$EXPO_PUBLIC_API_URL powersync=$EXPO_PUBLIC_POWERSYNC_URL supabase=$EXPO_PUBLIC_SUPABASE_URL"
 
+      # The E2E build flag turns OFF the biometric app lock and opens a deep link that installs
+      # an arbitrary Supabase session (apps/mobile/src/lib/e2e.ts). It is set by exactly one
+      # workflow -- e2e-mobile.yml, whose APK is a CI artifact -- and an APK from THIS workflow
+      # is one people install, so the two must never meet.
+      #
+      # An environment assertion rather than a grep of the built bundle: the marker string that
+      # would have made a bundle check work is either present in every build (as an
+      # unconditional export) or tree-shaken out of every build (as a conditional one, since
+      # nothing imports it). Both were measured. This checks the same property for real, and
+      # does it in a second rather than forty minutes.
+      - name: Refuse to build with the E2E flag set
+        run: |
+          if [ -n "${EXPO_PUBLIC_E2E:-}" ]; then
+            echo "::error::EXPO_PUBLIC_E2E is set (='${EXPO_PUBLIC_E2E}'); this workflow builds APKs people install"
+            exit 1
+          fi
+          echo "EXPO_PUBLIC_E2E is unset, as it must be here"
+
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4

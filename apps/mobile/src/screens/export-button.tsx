@@ -51,6 +51,7 @@ export function ExportButton() {
         disabled={!online || busy}
         accessibilityRole="button"
         accessibilityState={{ disabled: !online || busy }}
+        testID="export-button"
         style={{ opacity: online && !busy ? 1 : 0.5 }}
       >
         <Text>
