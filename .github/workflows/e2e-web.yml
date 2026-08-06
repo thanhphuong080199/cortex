@@ -1,0 +1,121 @@
+name: E2E Web
+
+# Every pull request to main. The whole job is well under ten minutes, so unlike the mobile
+# suite there is nothing to gain from path-filtering it -- and a change to packages/shared or
+# packages/core can break the web app without touching apps/web at all.
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: e2e-web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Playwright (chromium, headless)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      SUPABASE_URL: http://127.0.0.1:54321
+      E2E_API_URL: http://127.0.0.1:3001
+      E2E_WEB_URL: http://127.0.0.1:3000
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Same rule as ci.yml: every vitest config sets setupFiles: ["dotenv/config"], so a stray
+      # .env silently backfills anything missing from the real environment and the suites start
+      # passing for the wrong reason. CI must rely on real env vars.
+      - name: Assert no .env files reached the runner
+        run: |
+          found=$(find . -name .env -not -path '*/node_modules/*')
+          if [ -n "$found" ]; then
+            echo "::error::.env file(s) present on the runner:"
+            echo "$found"
+            exit 1
+          fi
+
+      # DELIBERATELY KEEPS `realtime`, unlike ci.yml's db-tests job, which excludes it to save
+      # start-up time. apps/web's note list is driven by postgres_changes and quick-capture.tsx
+      # does no optimistic insert -- its comment is explicit that "the Realtime echo adds the
+      # row". Without the container, capture.spec.ts's live case can never be un-skipped, and
+      # any future spec that waits for a live update would fail with an empty list while the row
+      # sat happily in Postgres. The other exclusions are services no spec touches.
+      - name: Start Supabase (realtime included, on purpose)
+        run: >
+          pnpm exec supabase start
+          -x storage-api,studio,edge-runtime,logflare,vector,postgres-meta,mailpit,imgproxy
+
+      # `supabase status -o env` wraps every value in double quotes; those must be stripped
+      # before they reach $GITHUB_ENV or the quotes end up baked into the URLs and JWTs.
+      #
+      # SUPABASE_JWT_SECRET is deliberately NOT exported: the CLI still reports a legacy HS256
+      # secret, but `supabase start` issues asymmetric ES256 access tokens (verified -- the
+      # seeded token's header is {"alg":"ES256"}), so that secret verifies nothing. Leaving it
+      # unset makes apps/api's guard take the JWKS path, which is what production uses.
+      - name: Export Supabase keys as app env vars
+        run: |
+          eval "$(pnpm exec supabase status -o env | tr -d '"' | grep -E '^(ANON_KEY|SERVICE_ROLE_KEY)=')"
+          {
+            echo "SUPABASE_ANON_KEY=$ANON_KEY"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY"
+            echo "NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321"
+            echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$ANON_KEY"
+            echo "NEXT_PUBLIC_API_URL=http://127.0.0.1:3001"
+          } >> "$GITHUB_ENV"
+
+      # NEXT_PUBLIC_* is inlined at build time, so this must run AFTER the step above.
+      - name: Build web and api
+        run: pnpm turbo run build --filter=@cortex/web --filter=@cortex/api
+
+      - name: Start the API
+        run: |
+          node apps/api/dist/main.js &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:3001/health && break
+            sleep 2
+          done
+        env:
+          PORT: 3001
+          CORS_ORIGINS: http://127.0.0.1:3000,http://localhost:3000
+
+      # Keyed on the lockfile, which is what pins the Playwright version, which in turn pins the
+      # browser build. Restoring browsers for a different Playwright version fails at launch
+      # with "Executable doesn't exist", so a looser key would be worse than no cache.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      # Runs even on a cache hit: the cache restores browser binaries but not the apt libraries
+      # they link against, and --with-deps is a no-op when both are already present.
+      - name: Install Chromium
+        run: pnpm --filter @cortex/web exec playwright install --with-deps chromium
+
+      - name: Seed the E2E user and corpus
+        run: node e2e/scripts/seed.mjs --reset
+
+      # globalSetup signs in and writes both the cookies and the access token under
+      # apps/web/e2e/.auth/, so nothing else has to be threaded through the environment here.
+      - name: Run Playwright
+        run: pnpm --filter @cortex/web exec playwright test
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            apps/web/playwright-report/
+            apps/web/test-results/
+          if-no-files-found: warn
+          retention-days: 14
