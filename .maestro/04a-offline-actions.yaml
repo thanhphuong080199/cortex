@@ -153,8 +153,12 @@ appId: ${APP_ID}
     direction: DOWN
     timeout: 30000
 - tapOn: "Restore target"
+# `.*` because Maestro treats a selector as a regex that must match the element's WHOLE text, and
+# this one is a multiline box holding the entire body -- the typing landed at the end of it, so
+# the text is "This note gets trashed and then restored while offline.TYPEDFAST". A bare
+# "TYPEDFAST" failed against exactly that, with the word plainly on screen in the screenshot.
 - extendedWaitUntil:
-    visible: "TYPEDFAST"
+    visible: ".*TYPEDFAST.*"
     timeout: 20000
 
 # ---- 3. trash a note and restore it, both offline ----
