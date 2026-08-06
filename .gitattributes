@@ -1,0 +1,25 @@
+# Line endings.
+#
+# This repo is developed on Windows (core.autocrlf=true) and runs on Linux runners. Without
+# these rules, git checks shell scripts out with CRLF locally, and a script whose shebang ends
+# `#!/usr/bin/env bash\r` fails with an unreadable "bad interpreter" error -- or, worse, runs
+# far enough to be confusing. Storage was always LF; this pins the WORKING COPY too, so the file
+# a developer executes is byte-identical to the one CI executes.
+*.sh            text eol=lf
+*.mjs           text eol=lf
+*.bash          text eol=lf
+
+# Maestro flows and the PowerSync config are read by Linux containers and by the Maestro CLI's
+# YAML parser. YAML tolerates CRLF, but the flows are also grepped and diffed in CI logs, and a
+# mixed-ending tree makes those diffs unreadable.
+.maestro/**     text eol=lf
+e2e/**          text eol=lf
+
+# Gradle wrappers are executed directly on the runner.
+gradlew         text eol=lf
+
+# Binary, so git must never try to translate anything.
+*.png           binary
+*.jpg           binary
+*.apk           binary
+*.keystore      binary
