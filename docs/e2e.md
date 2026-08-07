@@ -133,7 +133,35 @@ This is how two assertions were passing vacuously:
   notes render identically. `04b` distinguishes them by searching for each *body* — one note
   cannot hold both, so a hit for each is two notes, which is the actual assertion.
 
-### 4. Which flows own their state
+### 4. Never assert a badge that is on a timer
+
+A single Maestro command on the CI emulator costs **3–6 seconds**, most of it fetching the view
+hierarchy. Any UI affordance that clears itself faster than that cannot be asserted, and an
+assertion that happens to pass is passing by luck.
+
+`"Saved ✓"` is the Save button's label for exactly **1500 ms** — `quick-capture.tsx` sets
+`setTimeout(() => setSaved(false), 1500)`. `02` and `04a` both asserted it, and both were racing
+that timer until run 31139453992 lost. The hierarchy at the failed assertion is unambiguous: the
+button read `"Save"` and `capture-input` was already back to its placeholder, so **the note had
+been written** — only the badge had expired.
+
+Do not lengthen the timeout in the app to suit a test. Assert a **durable value on the same code
+branch** instead. Here that is the cleared input box: `save()` reaches `setContent("")` only when
+`captureNote` returned truthy, which is the identical condition that sets `saved`.
+
+```yaml
+- extendedWaitUntil:
+    visible:
+      id: "capture-input"
+      text: "Capture a thought"
+    timeout: 15000
+```
+
+Before adding an assertion on any badge, grep for a `setTimeout` behind it. `"Logged ✓"` in
+`checkin-widget.tsx` is safe by contrast — it is gated on `lastId`, which only Undo clears, so it
+persists indefinitely and `02`/`04a` assert it directly.
+
+### 5. Which flows own their state
 
 | Flow | `clearState` | Depends on |
 | --- | --- | --- |
@@ -153,7 +181,7 @@ bad hand-off from 03 fail at the top of the flow, instead of surfacing thirty st
 `Conflict target not found`, which is indistinguishable from a sync bug without a 30-minute
 re-run.
 
-### 5. There is no retry, on purpose
+### 6. There is no retry, on purpose
 
 Nothing in `run-maestro.sh` or `e2e-mobile.yml` retries. Every failure on PR #6 was a real defect
 in the suite, so a retry would have hidden all five and converted them into intermittent green.
@@ -164,7 +192,7 @@ The one genuine flake observed was **GitHub infrastructure** — run 31114390388
 lines with `Failed to resolve action download info. Error: Service Unavailable`, before any step
 ran. No script-level retry can help with that; `gh run rerun --failed` is the answer.
 
-### 6. Artifacts on a timeout
+### 7. Artifacts on a timeout
 
 Both artifact steps are `if: failure() || cancelled()`, not `if: failure()`.
 
@@ -178,7 +206,7 @@ this repo is public, so artifacts are downloadable by anyone. The token only rea
 stack and expires in an hour, which makes publishing it harmless rather than sensible. The note
 ids that make it useful for debugging are already in the Maestro output.
 
-### 7. Sign-out kills the tokens every later flow was going to use
+### 8. Sign-out kills the tokens every later flow was going to use
 
 `lib/auth.ts` calls `supabase.auth.signOut()` with no options, and GoTrue defaults to **global**
 scope — it revokes the user's sessions server-side, not just this device's copy. Flow 01 ends

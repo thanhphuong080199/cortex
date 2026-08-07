@@ -60,7 +60,13 @@ appId: ${APP_ID}
 - inputText: ${CAPTURE_MARKER}
 - tapOn:
     id: "capture-save"
-- assertVisible: "Saved ✓"
+# The cleared box rather than "Saved ✓", for the reason spelled out in 02: the badge is a 1500ms
+# timer and the emulator is slower than that. Same branch of save(), no race.
+- extendedWaitUntil:
+    visible:
+      id: "capture-input"
+      text: "Capture a thought"
+    timeout: 15000
 - scrollUntilVisible:
     element: ${CAPTURE_MARKER}
     direction: DOWN

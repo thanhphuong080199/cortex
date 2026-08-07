@@ -41,7 +41,22 @@ appId: ${APP_ID}
 - inputText: "vorpal blade went snicker snack"
 - tapOn:
     id: "capture-save"
-- assertVisible: "Saved ✓"
+# NOT `assertVisible: "Saved ✓"`. That label is on the Save button for exactly 1500ms
+# (quick-capture.tsx: `setTimeout(() => setSaved(false), 1500)`), while a single Maestro command
+# on this emulator costs 3-6s -- so the badge is usually gone before the first hierarchy dump
+# even lands. It passed by luck until run 31139453992, whose hierarchy at the failed assertion
+# showed capture-save reading "Save" and capture-input already back to its placeholder: the note
+# had been written and only the timer had fired. No flow can win that race; asserting a 1.5s
+# animation is the defect, not the emulator being slow.
+#
+# The box clearing is the DURABLE half of the same branch. `save()` reaches setContent("") only
+# when captureNote returned truthy -- the identical condition that sets `saved` -- so this proves
+# the write path without depending on a timer. The row assertion below is the other half.
+- extendedWaitUntil:
+    visible:
+      id: "capture-input"
+      text: "Capture a thought"
+    timeout: 15000
 # The new note is the newest, so it is row 1 -- but row 1 still sits below the whole header.
 # scrollUntilVisible retries until its timeout, so this keeps the "appears immediately" meaning.
 - scrollUntilVisible:
