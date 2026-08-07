@@ -2,7 +2,9 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { noteDomain } from "@cortex/shared";
-import { NOTE_VIEWS, VIEW_LABELS, parseDomain, parseView } from "@/lib/note-views";
+import {
+  NOTE_VIEWS, VIEW_LABELS, applyNoteFilters, noteSelect, parseNoteFilters,
+} from "@/lib/note-views";
 import { CheckinWidget } from "./checkin-widget";
 import { ExportButton } from "./export-button";
 import { MediaLogPanel } from "./media-log-panel";
@@ -13,11 +15,8 @@ export default async function Home(
   { searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> },
 ) {
   const params = await searchParams;
-  const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
-  const view = parseView(one(params.view));
-  const q = one(params.q)?.trim() ?? "";
-  const tag = one(params.tag) ?? "";
-  const domain = parseDomain(one(params.domain));
+  const filters = parseNoteFilters(params);
+  const { view, q, tag, domain } = filters;
 
   const supabase = await createClient();
   // getUser() authenticates against the auth server; getSession() supplies the access
@@ -28,24 +27,12 @@ export default async function Home(
   if (!session) redirect("/login");
 
   // Reads go straight to Supabase under RLS; only writes go through the API (spec §2).
-  let query = supabase.from("notes")
-    .select(tag ? "*, note_tags!inner(tag_id, deleted_at)" : "*")
-    .order("updated_at", { ascending: false });
-  query = view === "trash" ? query.not("deleted_at", "is", null) : query.is("deleted_at", null);
-  if (view === "active") query = query.in("lifecycle", ["active", "evergreen"]);
-  else if (view !== "trash") query = query.eq("lifecycle", view);
-  // The `config` is load-bearing, not cosmetic. With it, PostgREST emits
-  //   to_tsvector('english', content_text) @@ websearch_to_tsquery('english', q)
-  // which matches notes_fts_idx (verified: Bitmap Index Scan, custom AND generic plans).
-  // Drop it and PostgREST emits the bare `content_text @@ ...` form, which resolves to
-  // the default-config operator, matches no index, and silently sequential-scans.
-  if (q) query = query.textSearch("content_text", q, { type: "websearch", config: "english" });
-  if (tag) query = query.eq("note_tags.tag_id", tag).is("note_tags.deleted_at", null);
-  // Backed by notes_user_domain_idx. matchesView applies the same narrowing to Realtime
-  // rows, so a live-patched note can never disagree with what a reload would show.
-  if (domain) query = query.eq("domain", domain);
-
-  const { data, error } = await query;
+  // Every narrowing comes from applyNoteFilters, which note-list.tsx's refetch also uses --
+  // the two disagreeing is issue-log E5, and they can no longer disagree.
+  const { data, error } = await applyNoteFilters(
+    supabase.from("notes").select(noteSelect(filters)),
+    filters,
+  );
   if (error) throw error; // rendered by error.tsx
 
   const notes = (data ?? []) as unknown as NoteRow[];
@@ -108,8 +95,7 @@ export default async function Home(
         {(q || tag || domain) && <Link className="btn" href={`/?view=${view}`}>Clear</Link>}
       </form>
 
-      <NoteList initialNotes={notes} view={view} domain={domain}
-                q={q || undefined} tag={tag || undefined}
+      <NoteList initialNotes={notes} filters={filters}
                 userId={user.id} token={session.access_token} />
     </main>
   );

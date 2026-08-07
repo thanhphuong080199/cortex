@@ -23,7 +23,19 @@ COPY apps/api ./apps/api
 # trailing "..." on the filter is what pulls dependencies into both commands; without it
 # `node dist/main.js` dies at startup on an unresolvable @cortex/core import.
 # (@cortex/config remains build-time only: tsconfig.base.json / eslint.base.mjs.)
-RUN pnpm install --frozen-lockfile --filter @cortex/api...
+# `--ignore-scripts` is load-bearing, and this image is the only place it shows.
+# @cortex/core carries better-sqlite3 as a TEST-only devDependency (the filter-equivalence
+# suite runs the emitted WHERE clause on real SQLite), and pnpm-workspace.yaml's allowBuilds
+# lets its install script run -- which CI needs. Here it is pure cost: node:22-alpine is musl,
+# better-sqlite3 publishes no musl prebuild, so it falls back to node-gyp and the build fails
+# outright on "Could not find any Python installation to use". Nothing in this image ever
+# loads it: `pnpm deploy --prod` prunes devDependencies out of the runtime stage below.
+#
+# The alternative -- apk add python3 make g++ -- would compile a native module we never call.
+# @swc/core (what `nest build` runs on) ships its binary as a prebuilt optional dependency
+# per platform rather than compiling, so it needs no install script; verified by building
+# this image with the flag before committing it.
+RUN pnpm install --frozen-lockfile --filter @cortex/api... --ignore-scripts
 RUN pnpm --filter @cortex/api... build
 
 # pnpm v10+ refuses `deploy` from a shared workspace lockfile unless the

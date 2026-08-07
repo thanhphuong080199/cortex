@@ -1,0 +1,11 @@
+# Maestro workspace config.
+#
+# Flows are NOT run with a bare `maestro test .maestro/`. They are ordered, and the network is
+# toggled between some of them with adb, which Maestro cannot do itself -- see
+# .github/workflows/e2e-mobile.yml for the sequence, and 04a/04b for why that split exists.
+flows:
+  - "*.yaml"
+
+# Excluded from the glob above: these are called with `runFlow`, never run standalone.
+exclude:
+  - "subflows/*"

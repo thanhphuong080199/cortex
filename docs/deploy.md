@@ -819,3 +819,328 @@ Source) and it will deploy on push to `main`. Two caveats before enabling it:
   gated to run *before* the app deploy, or a deploy will land on an older schema.
 - `apps/api/Dockerfile` expects the **repo root** as build context (it copies
   `packages/`), which `railway.json` already encodes via `dockerfilePath`.
+
+---
+
+# Phase 1b — PowerSync Cloud setup
+
+Sections 1–4 are one-time setup, done in the Supabase SQL editor and the PowerSync
+dashboard. None of *that* is a migration: `create role ... password` would commit a secret
+to git. Section 5 is the ship log for Stage 1 and does cover a migration — same shape as
+`### 5. Post-review hardening — 00014` under the Phase 1c checklist.
+
+## 1. Supabase — replication role and a SCOPED publication
+
+Generate a strong password and store it in a password manager first; Supabase will not
+show it again.
+
+```sql
+-- BYPASSRLS is required and is the reason sync rules must be tested as an independent
+-- isolation layer: replication reads around RLS entirely (parent spec §15.5).
+create role powersync_role with replication bypassrls login password '<REDACTED>';
+
+-- SELECT only, and only on the six synced tables. NOT "on all tables": this role has no
+-- business seeing integrations.credentials.
+grant select on public.notes, public.tags, public.note_tags,
+                 public.links, public.media_items, public.checkins
+  to powersync_role;
+
+-- The publication MUST be named "powersync". Its SCOPE is ours to choose, and choosing
+-- matters: PowerSync's setup guide says `FOR ALL TABLES`, which would put
+-- integrations.credentials, note_chunks, usage_ledger and memory_revisions into the
+-- replication stream. The sync rules would filter them out -- but only after they had
+-- left Postgres. Naming the six tables keeps them out of the stream entirely, giving a
+-- third isolation layer beneath the sync rules.
+create publication powersync for table
+  public.notes, public.tags, public.note_tags,
+  public.links, public.media_items, public.checkins;
+```
+
+Verify immediately — this is the whole point of the step:
+
+```sql
+select tablename from pg_publication_tables where pubname = 'powersync' order by tablename;
+```
+
+Exactly six rows. Anything else (especially `integrations`) means
+`drop publication powersync;` and create it again. `packages/db`'s
+`sync-rules-isolation.test.ts` asserts this same property through
+`_test_publication_tables`, so a later widening fails the suite rather than going unnoticed.
+
+### The publication is now also in a migration — `00016_powersync_publication.sql`
+
+Task 12 moved the `create publication` above into version control, along with the
+`_test_publication_tables` helper the test needs. Two consequences:
+
+- **On the hosted project it is a no-op.** The `do $$ ... if not exists` guard sees the
+  publication this section already created by hand and skips it. The migration deliberately
+  does **not** follow up with `alter publication ... add table`, which would error on a
+  relation already in the publication.
+- **The helper function is not a no-op**, so `00016` had to be pushed before the suite could
+  assert the publication against the hosted project.
+
+**Shipped 2026-08-03.** `npx supabase db push` applied `00016`; `npx supabase migration list`
+shows `00001`–`00016` local == remote. (The CLI is a devDependency here — `supabase` alone is
+not on PATH.)
+
+Because of the `if not exists` guard, that push proves the **helper** landed, not that the
+hosted publication has the right scope: had it existed with a wrong scope, the guard would have
+skipped it. Confirm from the dashboard SQL editor, which needs no `service_role` key in a shell
+session:
+
+```sql
+select * from _test_publication_tables('powersync');
+-- checkins, links, media_items, note_tags, notes, tags -- exactly six rows
+```
+
+**Run 2026-08-03: six rows, no `integrations`.** `sync-rules-isolation.test.ts` asserts this
+automatically against the **local** stack and CI, so the hosted publication stays a manual check
+— re-run the query above after any change to replication configuration.
+
+A publication that lives only in a dashboard session is a layer nobody can review, diff or
+restore. The migration is what makes the local stack and CI carry the same six-table scope the
+hosted project was given by hand — which is what lets the test run anywhere instead of
+skipping, as its first draft did everywhere.
+
+## 2. PowerSync instance
+
+Create an Organization → Project → Instance. Pick the region nearest the user.
+
+**Replication connection:**
+
+| Field | Value |
+|---|---|
+| Type | `postgresql` |
+| Hostname | `db.<project-ref>.supabase.co` |
+| Port | `5432` |
+| Database | `postgres` |
+| Username | `powersync_role` |
+| Password | from step 1 |
+| SSL mode | `verify-full` |
+
+Port **5432 direct**, never the connection pooler on 6543 — logical replication cannot run
+through a transaction pooler, and Supabase's UI offers the pooler string by default.
+
+If the connection test fails while resolving the address rather than authenticating, that
+is the Supabase direct-connection networking issue, not a wrong password; see PowerSync's
+Supabase integration page.
+
+**Client auth:** enable **Supabase**, and **leave the JWT secret field empty**.
+
+That empty field is the correct setting, not an omission. This project issues **asymmetric
+(ES256)** tokens — verified directly:
+
+```bash
+curl -s https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json
+# {"keys":[{"alg":"ES256","kty":"EC","use":"sig",...}]}   → asymmetric, leave secret empty
+# {"keys":[]} or 404                                      → legacy HS256, secret required
+```
+
+PowerSync auto-detects the project and configures the JWKS URI and audience itself. The
+`supabase_jwt_secret` option exists only for projects still on legacy HS256 symmetric keys.
+
+Pasting the legacy secret anyway does not fail loudly: PowerSync would try to verify an
+ES256 token with an HS256 key, and every sync would fail authentication with a message that
+reads like a bad token rather than a wrong algorithm. `apps/api/src/auth/supabase-auth.guard.ts`
+records the same trap from the other side — `supabase status` still prints a legacy
+`JWT_SECRET` for backward compatibility, and that secret does not verify real tokens, which
+is why `SUPABASE_JWT_SECRET` is left unset in this repo's `.env` files.
+
+**Sync streams:** paste the contents of `packages/sync/src/sync-rules.yaml`. It uses Sync
+Streams edition 3 — PowerSync classes the older `bucket_definitions` form as legacy.
+
+## 3. Client environment
+
+Take the instance URL from the PowerSync Dashboard — instance → settings/overview →
+**Instance URL**. **Copy it whole; do not assemble it from an instance id.** The host
+differs between instances and regions (PowerSync's own docs show more than one form), so a
+constructed URL is a guess.
+
+```
+EXPO_PUBLIC_POWERSYNC_URL=<pasted verbatim from the dashboard>
+EXPO_PUBLIC_API_URL=https://<api>.up.railway.app
+```
+
+Check it resolves before wiring anything to it:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' "$EXPO_PUBLIC_POWERSYNC_URL"
+```
+
+**Any** HTTP status — `401` and `404` included — means DNS and TLS are fine and the URL is
+live; the endpoint is not meant to answer an unauthenticated bare GET. A connection or
+name-resolution error means the URL is wrong or the instance is still provisioning.
+
+`apps/mobile/.env` is gitignored and CI fails if any `.env` reaches a runner.
+
+## 4. Android dev client
+
+PowerSync and SQLCipher are native modules, so **Expo Go cannot run this app**:
+
+```bash
+pnpm --filter @cortex/mobile exec eas build --profile development --platform android
+```
+
+A dev client built before phase 1b will not work — it is a compiled binary and cannot load
+newly added native modules. Rebuild after the PowerSync dependencies land (plan Task 17).
+
+### Backup and transfer are OFF, and it takes two mechanisms, not one
+
+`android:allowBackup=false` in `app.json` is load-bearing, not a preference: Auto Backup
+would copy the SQLCipher database to Google Drive while its key lives in Android Keystore,
+which is not backed up — producing an undecryptable file on Drive. Pure risk, no benefit.
+
+Verified in the generated manifest (Task 11):
+
+```bash
+pnpm --filter @cortex/mobile exec expo prebuild --platform android --clean
+rg 'allowBackup' apps/mobile/android/app/src/main/AndroidManifest.xml
+# android:allowBackup="false"
+```
+
+**`allowBackup=false` is not sufficient on its own.** On Android 12+ it disables cloud backup
+but **does not** disable device-to-device transfer. What covers D2D is a second, separate
+mechanism that arrived with the `expo-secure-store` config plugin:
+
+```xml
+<!-- expo-secure-store/android/src/main/res/xml/secure_store_data_extraction_rules.xml -->
+<device-transfer>
+  <include domain="sharedpref" path="."/>
+  <exclude domain="sharedpref" path="SecureStore"/>
+</device-transfer>
+```
+
+Only the `sharedpref` domain is included, so the `database` and `file` domains — where the
+SQLCipher database lives — are outside both cloud backup and device transfer, and SecureStore's
+own preferences are excluded on top of that. These resources ship inside the library and reach
+the app through Android resource merging; the app's own `res/xml/` is empty, which is why
+grepping the app module for them finds nothing.
+
+**Consequence for anyone changing mobile dependencies:** dropping the `expo-secure-store`
+plugin, or overriding `dataExtractionRules` in `app.json`, silently removes the D2D protection
+while `allowBackup="false"` still sits in the manifest looking like it covers everything. The
+two are not interchangeable. Re-run the prebuild and re-read the merged manifest after any
+change to `plugins`.
+
+`apps/mobile/android/` and `ios/` are gitignored. This is a Continuous Native Generation
+project: `app.json` is the source of truth and prebuild regenerates the native projects
+wholesale, so a committed manifest could outlive the config that produced it.
+
+## 5. Stage 1 ship — `00015` and the `/sync/upload` write verification
+
+Shipped 2026-08-03, in the order the CI/CD section prescribes (schema, then API).
+
+`00015_conflict_copy_link_kind.sql` widens `links_kind_check` to accept `conflict_copy`.
+It is a constraint swap, not a type change — `00003` created `links.kind` as a bare check
+rather than an enum. `supabase migration list` shows local == remote through `00015`.
+
+Deploy verified with a **write**, not `/health` (see
+[the rule above](#verify-a-deploy-with-a-write-not-with-health)). The three requests are chosen
+so each one fails distinctly if the wrong thing shipped; a 401 probe proves only that the
+route is registered.
+
+```bash
+API='https://<api>.up.railway.app'
+NOTE_ID='<a client-generated v4 UUID>'   # must be real hex: the DTO rejects a bad one at 400
+
+# 1. PUT  -> 201 {"applied":["1"], ...}   the router writes under RLS with the user's JWT
+# 2. PATCH -> "conflict_copies":[]        updateWithConflictCopy: no base_content, no copy
+# 3. replay op 1 verbatim -> "applied":["1"], NOT "failed"
+```
+
+Step 3 is the one worth keeping. `createWithId` is idempotent — a 23505 on an id the
+caller already owns is a replayed op, not a conflict. Before that fix, a resend threw at
+its own primary key and the op wedged the queue permanently, so a deploy missing it
+answers step 3 with `failed` + `kind: "conflict"` while steps 1 and 2 still look fine.
+
+Run each request from a shell that re-declares the token: the harness gives every
+`!` command a fresh shell, so a `TOKEN=` set in a previous block is gone. Clean up
+afterwards (`DELETE /notes/:id` then `DELETE /notes/:id/purge`) — a smoke-test note is
+real user data and will otherwise sync to every device.
+
+## 6. Stage 4 ship — native build flags and the dev-client rebuild
+
+Stage 4 added two **native** build flags and two native modules. None of them can be picked up
+by an existing dev client: it is a compiled binary.
+
+### The `op-sqlite` block, and how to actually verify it
+
+```jsonc
+// apps/mobile/package.json
+"op-sqlite": { "sqlcipher": true, "fts5": true }
+```
+
+- `sqlcipher` encrypts the local replica. Without it the whole corpus sits unencrypted.
+- `fts5` compiles `SQLITE_ENABLE_FTS5`. Without it the `notes_fts` virtual table fails at
+  runtime with "no such module: fts5" and offline search is dead.
+
+Both take effect at **Gradle configure time** and print their own confirmation:
+
+```
+[OP-SQLITE] Detected op-sqlite config from package.json at: <path>
+[OP-SQLITE] using sqlcipher.
+[OP-SQLITE] FTS5 enabled
+```
+
+All three lines must appear. If the first names a `package.json` other than
+`apps/mobile/package.json`, move the `op-sqlite` block to the file it names and rebuild —
+PowerSync's docs warn that monorepo hoisting can do this.
+
+**Do not use the grep the plan suggests.** `rg sqlcipher apps/mobile/android/*.gradle` matches
+nothing whether or not the flag is set, because the flag is consumed in op-sqlite's own
+`build.gradle` under `node_modules`. A green grep there is an unencrypted database that looks
+configured.
+
+**Verifying without an Android SDK.** The flags can be read out of the built APK instead, which
+is the merged artifact rather than the config that should produce it:
+
+```bash
+unzip -o -q <build>.apk "lib/arm64-v8a/libop-sqlite.so" -d ext
+grep -ac sqlite3_key ext/lib/arm64-v8a/libop-sqlite.so   # SQLCipher-only API
+grep -ac bm25        ext/lib/arm64-v8a/libop-sqlite.so   # FTS5-only
+grep -ac rtreecheck  ext/lib/arm64-v8a/libop-sqlite.so   # must be 0 — rtree is NOT enabled
+```
+
+The third line is what makes the first two mean something: a bare `fts5` substring survives in
+the SQLite amalgamation whether or not the feature is compiled, so a flag we deliberately left
+off has to come back zero from the same binary. Check all four ABIs — a per-arch divergence
+would ship an unencrypted database to some devices only.
+
+### PowerSync majors move together
+
+`@powersync/react-native`, `@powersync/common` (in both `apps/mobile` and `packages/sync`) and
+`@powersync/react` are pinned at `^2.0.0`. v2 is the major that switched from
+`@journeyapps/react-native-quick-sqlite` to `@op-engineering/op-sqlite`, which is what the
+`op-sqlite` block above configures.
+
+Dropping any one of them below 2 re-splits the `Schema` class identity: `AppSchema` is built in
+`packages/sync` and handed to a `PowerSyncDatabase` constructed in `apps/mobile`, and two
+physical copies of `@powersync/common` fail far from the cause. Check after any dependency
+change:
+
+```bash
+readlink -f apps/mobile/node_modules/@powersync/common
+readlink -f packages/sync/node_modules/@powersync/common
+# must be the SAME path
+```
+
+### Rebuild required after Stage 4
+
+`expo-dev-client`, `expo-file-system` and `expo-sharing` were all added during Stage 4, on top
+of the two native flags. Rebuild:
+
+```bash
+pnpm --filter @cortex/mobile exec eas build --profile development --platform android
+```
+
+`expo-dev-client` in particular is not optional — EAS refuses a `developmentClient` build
+without it.
+
+### Environment variables and the dev client
+
+A **development** build carries no JS: Metro serves it from your machine at runtime, so
+`EXPO_PUBLIC_*` come from your local `apps/mobile/.env` and EAS needs none set. A `preview` or
+`production` build inlines them at build time, so all four
+(`EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, `EXPO_PUBLIC_POWERSYNC_URL`,
+`EXPO_PUBLIC_API_URL`) **must** be configured on EAS before that build, or the app ships
+pointing at `undefined`.

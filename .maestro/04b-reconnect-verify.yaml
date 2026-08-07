@@ -1,0 +1,121 @@
+# Mục 4, after the radios come back. Verifies on the device what 04a did, then hands the
+# countable parts to a host-side script.
+#
+# `clearState: false` is load-bearing: this flow needs 04a's local database, including its
+# undrained upload queue.
+#
+# See 02 for why subflows/scroll-to-top.yaml precedes the DOWN scrolls. It matters more here
+# than anywhere: the two conflict bodies and the offline capture are all near the TOP of the
+# list, so each one has to be looked for from above rather than from wherever the last one left
+# the view.
+appId: ${APP_ID}
+---
+- launchApp:
+    clearState: false
+- runFlow:
+    when:
+      visible: "DEVELOPMENT SERVERS"
+    file: subflows/dismiss-dev-launcher.yaml
+
+# Nothing below means anything until the device says it is connected again. Generous, because
+# this is a cold reconnect: PowerSync has to re-establish the stream AND drain the queue 04a
+# filled. The button is in the list footer, so this scrolls rather than waits in place --
+# scrollUntilVisible still retries until its timeout, so the 180s remains a real wait.
+- scrollUntilVisible:
+    element: "Export all notes"
+    direction: DOWN
+    timeout: 180000
+- assertNotVisible: "Export needs a connection"
+
+# ---- 7. the conflict outcome, as the user sees it ----
+# Spec §6.2: the ORIGINAL note keeps the body the server had, and the device's version survives
+# as a NEW note in the inbox. Both must be present -- a single note holding either body is the
+# failure, whichever body it is.
+#
+# ASKED THROUGH THE SEARCH BOX, not by looking for the bodies in the list, because neither body
+# is ever on screen there. A row renders `title ?? content` (screens/note-list.tsx) and the
+# conflict copy inherits the original's title (notes/service.ts, `title: current.title`), so both
+# notes draw as "Conflict target". The FTS index is over content, so a search is the only way to
+# ask the device whether a body arrived. One note cannot hold both bodies, so a hit for each is
+# two notes -- which is the assertion. The countable form is in assert-offline-results.js.
+#
+# The 180s stays a real wait: scrollUntilVisible retries until its timeout, and the copy only
+# exists once the upload queue has drained and the resolution has synced back.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
+- inputText: "SERVERBODY"
+- hideKeyboard
+- scrollUntilVisible:
+    element: "Conflict target"
+    direction: DOWN
+    timeout: 180000
+
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
+- eraseText
+- inputText: "DEVICEBODY"
+- hideKeyboard
+- scrollUntilVisible:
+    element: "Conflict target"
+    direction: DOWN
+    timeout: 180000
+
+# Clear the box, or every assertion below runs against a one-row filtered list.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
+- eraseText
+- hideKeyboard
+
+# ---- 2. the offline trash was not resurrected ----
+# The load-bearing half is the POSITIVE one: the note has to be findable in the `trash` view.
+# An assertNotVisible against the inbox cannot carry this on its own -- at any scroll position
+# most rows are off screen, so "not visible" is true of a resurrected note as easily as of a
+# trashed one. That the row is still soft-deleted on the SERVER after the queue drained is
+# asserted by scripts/assert-offline-results.js, which can count rather than look.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element: "trash"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "trash"
+- scrollUntilVisible:
+    element: "Trash target"
+    direction: DOWN
+    timeout: 60000
+
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element: "inbox"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "inbox"
+- assertNotVisible: "Trash target"
+
+# ---- 1. the offline capture is still here after the round trip ----
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element: ${CAPTURE_MARKER}
+    direction: DOWN
+    timeout: 60000
+
+# ---- everything that can only be counted ----
+- runScript:
+    file: scripts/assert-offline-results.js

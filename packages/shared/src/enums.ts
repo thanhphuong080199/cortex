@@ -22,6 +22,10 @@ import { z } from "zod";
 // suggestionStatus -- they mean different things (a link's acceptance state vs. a
 // note's PARA-categorization state) and are allowed to diverge.
 export const noteLifecycle = z.enum(["inbox", "active", "evergreen", "archived"]);
+// Mirrors NoteDomain in dto/domains.ts. Mobile's editor writes this column directly into the
+// local replica, so it needs the union rather than a bare string -- an unchecked value there
+// fails the server's CHECK constraint only after it has synced.
+export type NoteLifecycle = z.infer<typeof noteLifecycle>;
 export const noteSourceType = z.enum(["quick", "web_clip", "voice", "email", "telegram", "import"]);
 export const paraCategory = z.enum(["project", "area", "resource", "archive"]);
 export const suggestionStatus = z.enum(["suggested", "accepted", "rejected"]);
@@ -36,6 +40,17 @@ export const memoryStatus = z.enum(["proposed", "active", "archived", "rejected"
 // these are the values a domained note may carry, not a requirement that it have one.
 export const noteDomain = z.enum(["media", "health", "life", "learning", "finance", "reflection"]);
 export const mediaKind = z.enum(["movie", "tv", "book", "game", "podcast"]);
+// Where a media log sits in its lifecycle. Written out three times before this existed --
+// logMediaInput, domainMetaSchemas.media, and mobile's form -- which is the same parallel-list
+// trap the comment above mediaKind's own usage warns about. A drifted copy is not a type error
+// anywhere: it reaches the server, fails `.strict()` validation, and the op is reported in
+// `failed` inside a 200 response, so the log is silently dropped.
+export const mediaStatus = z.enum(["finished", "in_progress", "abandoned"]);
+// Mobile's media form holds both as component state and writes them into domain_meta, so it
+// needs the unions rather than bare strings -- an unchecked value fails the server's `.strict()`
+// validation only after it has synced.
+export type MediaKind = z.infer<typeof mediaKind>;
+export type MediaStatus = z.infer<typeof mediaStatus>;
 // Deliberately NOT suggestionStatus: a card's lifecycle ends in 'suspended' (stop
 // scheduling it), which is not the same act as rejecting a suggestion.
 export const flashcardStatus = z.enum(["suggested", "active", "suspended"]);

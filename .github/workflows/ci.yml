@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   checks:
-    name: build, typecheck, lint, shared tests
+    name: build, typecheck, lint, stack-free tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -37,6 +37,61 @@ jobs:
       # bypasses the graph and tests whatever stale dist/ is lying around (issue log
       # A7/B5/E8).
       - run: pnpm turbo run test --filter=@cortex/shared
+
+      - name: Test @cortex/sync
+        run: pnpm turbo run test --filter=@cortex/sync
+
+      # apps/mobile's suites mock every native module (expo-secure-store et al) and touch
+      # no Supabase stack, so they belong here rather than in db-tests. Every later
+      # mobile suite lands in this same run, so this step is what keeps them in CI at all.
+      - name: Test @cortex/mobile
+        run: pnpm turbo run test --filter=@cortex/mobile
+
+      # The only step that loads modules the way the DEVICE does. tsc accepts NodeNext's
+      # `./x.js` suffix and vitest resolves it too, but Metro looks for a file of that name and
+      # fails -- so apps/mobile was unbundlable from Task 13 onward while typecheck, lint and
+      # every test stayed green, and the first thing to notice was an EAS build 20 minutes in.
+      - name: Bundle @cortex/mobile
+        run: pnpm turbo run bundle --filter=@cortex/mobile
+
+      # apps/web's suite needs no Supabase stack either, and until this step existed it ran
+      # nowhere but a developer's machine: `build typecheck lint` cover web, but the `test`
+      # task is filtered per package in both jobs, so a broken assertion in note-views.test.ts
+      # was green in CI indefinitely. Same rule that caught @cortex/sync and apps/mobile.
+      - name: Test @cortex/web
+        run: pnpm turbo run test --filter=@cortex/web
+
+  # THE ONLY JOB BRANCH PROTECTION SHOULD EVER REQUIRE.
+  #
+  # Required status checks are matched by the job's `name:` as a LITERAL STRING, and a required
+  # context that never reports leaves the PR "Expected — waiting for status to be reported"
+  # forever. That is not hypothetical: ab0a64c renamed `checks` from "…shared tests" to
+  # "…stack-free tests" as a drive-by in a docs commit, protection still required the old string,
+  # and every PR to main was unmergeable while all four checks showed green. Nothing about the
+  # failure points at a name — the job that runs looks fine, and the one that blocks is invisible
+  # in the checks list.
+  #
+  # Depending on this indirection instead means job names are free to change and new jobs are
+  # free to appear; only THIS name is load-bearing, and it says nothing that could go stale.
+  #
+  # `if: always()` is required. Without it a failing dependency SKIPS this job rather than
+  # failing it, and GitHub treats a skipped required check as satisfied — the gate would wave
+  # through exactly the runs it exists to stop.
+  #
+  # Deliberately does NOT gate on the E2E workflows: both are path-filtered, so a docs-only PR
+  # never reports them, which is the same never-reporting trap in a different disguise.
+  gate:
+    name: CI gate
+    needs: [checks, db-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every required job succeeded
+        run: |
+          echo "checks:   ${{ needs.checks.result }}"
+          echo "db-tests: ${{ needs.db-tests.result }}"
+          [ "${{ needs.checks.result }}" = "success" ] || exit 1
+          [ "${{ needs.db-tests.result }}" = "success" ] || exit 1
 
   db-tests:
     name: db + api tests (against local Supabase stack)

@@ -1,0 +1,36 @@
+# packages/sync/src/sync-rules.yaml
+#
+# PowerSync replicates via logical replication, which BYPASSES RLS (parent spec §4 item 5,
+# §15.5). These rules are therefore the ONLY thing preventing one user's rows entering
+# another user's bucket -- they are a second isolation layer, reviewed and tested with the
+# same seriousness as the RLS policies, not configuration.
+#
+# One bucket per user, keyed on the Supabase JWT's subject.
+#
+# Server-only tables are absent by omission, which is load-bearing: integrations holds
+# credentials that must never reach a device, and note_chunks/usage_ledger/feedback_events/
+# memory_revisions/ingest_inbox are server-side machinery. flashcards is deferred to
+# phase 6, which adds its rule, its client schema entry and its isolation test together.
+#
+# Sync STREAMS (edition 3), not the older bucket_definitions form: PowerSync's docs class
+# Sync Rules as legacy and recommend Streams for new projects. Edition 3 also enables the
+# newer compiler (JOINs, CTEs, multiple queries per stream), which phase 6's flashcards
+# work is likely to want.
+#
+# Beneath these queries sits a third isolation layer, configured outside this repo: the
+# Postgres publication is scoped to these six tables by name rather than FOR ALL TABLES,
+# so integrations.credentials and the other server-only tables never enter the replication
+# stream at all. See docs/deploy.md. Both layers are checked; neither is trusted alone.
+config:
+  edition: 3
+
+streams:
+  user_data:
+    auto_subscribe: true
+    queries:
+      - SELECT * FROM notes       WHERE user_id = auth.user_id()
+      - SELECT * FROM tags        WHERE user_id = auth.user_id()
+      - SELECT * FROM note_tags   WHERE user_id = auth.user_id()
+      - SELECT * FROM links       WHERE user_id = auth.user_id()
+      - SELECT * FROM media_items WHERE user_id = auth.user_id()
+      - SELECT * FROM checkins    WHERE user_id = auth.user_id()

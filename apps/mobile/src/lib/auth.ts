@@ -1,7 +1,9 @@
 import { makeRedirectUri } from "expo-auth-session";
 import * as QueryParams from "expo-auth-session/build/QueryParams";
 import * as WebBrowser from "expo-web-browser";
+import { getPowerSync } from "./powersync";
 import { supabase } from "./supabase";
+import { wipeLocalData } from "./wipe";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -34,5 +36,12 @@ export async function signInWithGoogle(): Promise<void> {
 }
 
 export async function signOut(): Promise<void> {
+  // Wipe BEFORE the Supabase sign-out: disconnectAndClear needs the connector's token to
+  // shut the stream down cleanly, and a wipe that fails must not leave the user
+  // "signed out" with their whole corpus still on the device.
+  //
+  // `getPowerSync()` is null when the user signs out before the database finished opening —
+  // `wipeLocalData` handles that, and the key still has to go either way.
+  await wipeLocalData(getPowerSync());
   await supabase.auth.signOut();
 }

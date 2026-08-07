@@ -1,0 +1,11 @@
+.vercel
+.env*
+
+# Playwright. `e2e/.auth/` holds a real (local-stack) session token written by
+# e2e/global-setup.ts on every run -- short-lived and worthless off this machine, but a
+# credential all the same and never worth committing.
+/e2e/.auth/
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/

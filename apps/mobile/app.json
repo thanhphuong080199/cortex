@@ -11,11 +11,24 @@
       "supportsTablet": false
     },
     "android": {
-      "package": "app.cortex.mobile"
+      "package": "app.cortex.mobile",
+      "allowBackup": false
     },
     "plugins": [
       "expo-router",
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-secure-store",
+      "expo-sharing",
+      [
+        "expo-dev-client",
+        {
+          "android": {
+            "embeddedBundle": true,
+            "skipOnboarding": true,
+            "showMenuAtLaunch": false
+          }
+        }
+      ]
     ],
     "extra": {
       "router": {},

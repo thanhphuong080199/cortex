@@ -10,6 +10,17 @@
     "typecheck": { "dependsOn": ["^build", "build"] },
     "lint": {},
 
+    // Metro-bundles apps/mobile. DELIBERATELY not called "build": typecheck and test depend on
+    // a package's own build, so naming it that would bundle the whole app before every mobile
+    // test run.
+    //
+    // This task exists because nothing else in the gate loads a module the way the device does.
+    // `tsc` accepts `./app-lock.js` (NodeNext's required suffix) and vitest resolves it too, but
+    // Metro looks for a file of that name, does not find it, and fails outright -- so the app
+    // was unbundlable from Task 13 onward while typecheck, lint and 159 tests stayed green. It
+    // needs `^build` because @cortex/shared and @cortex/sync resolve through their dist/.
+    "bundle": { "dependsOn": ["^build"], "outputs": [".expo-export/**"] },
+
     // Turbo runs tasks in strict env mode: a task process only sees the env vars listed
     // here, so anything the CI job exports (see .github/workflows/ci.yml, "Export local
     // Supabase keys as app env vars") is stripped before vitest starts unless it is named

@@ -1,0 +1,219 @@
+name: E2E Mobile
+
+# PATH-FILTERED, unlike the web suite which runs on every PR.
+#
+# A debug APK compiles op-sqlite's SQLCipher and FTS5 from source, and an emulator has to boot
+# on top of that -- ~40-55 minutes cold, ~20-28 warm. Hanging that off a docs-only or web-only
+# change would add most of an hour to every PR for nothing. The paths below are everything that
+# can change what the APK does or what it syncs against.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "apps/mobile/**"
+      - "apps/api/**"
+      - "packages/shared/**"
+      - "packages/sync/**"
+      - "packages/core/**"
+      - "supabase/migrations/**"
+      - "e2e/**"
+      - ".maestro/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/e2e-mobile.yml"
+
+concurrency:
+  group: e2e-mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Maestro (Android API 33, x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    env:
+      # THE ONLY PLACE THIS IS SET. It turns off the biometric app lock and opens the deep-link
+      # session route (apps/mobile/src/lib/e2e.ts). android-apk.yml refuses to build if it is
+      # present in its environment.
+      EXPO_PUBLIC_E2E: "1"
+
+      # The app runs on the EMULATOR, which reaches the host at 10.0.2.2. Everything else in
+      # this job runs on the host and reaches itself at 127.0.0.1. Both sets exist because the
+      # seed script and the Maestro runScripts are host-side while the app is not.
+      EXPO_PUBLIC_SUPABASE_URL: http://10.0.2.2:54321
+      EXPO_PUBLIC_API_URL: http://10.0.2.2:3001
+      EXPO_PUBLIC_POWERSYNC_URL: http://10.0.2.2:8080
+
+      SUPABASE_URL: http://127.0.0.1:54321
+      E2E_API_URL: http://127.0.0.1:3001
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # RN 0.86's Gradle plugin targets JDK 17. The runner defaults to a newer JDK and fails on
+      # Kotlin/AGP version checks rather than on anything that names the JDK.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Assert no .env files reached the runner
+        run: |
+          found=$(find . -name .env -not -path '*/node_modules/*')
+          if [ -n "$found" ]; then
+            echo "::error::.env file(s) present on the runner:"
+            echo "$found"
+            exit 1
+          fi
+
+      # No realtime: the mobile app never uses postgres_changes -- PowerSync is its download
+      # path. (The web job keeps realtime for exactly the opposite reason.)
+      - name: Start Supabase
+        run: >
+          pnpm exec supabase start
+          -x realtime,storage-api,studio,edge-runtime,logflare,vector,postgres-meta,mailpit,imgproxy
+
+      # SUPABASE_JWT_SECRET is deliberately not exported: `supabase start` issues ES256 tokens
+      # (verified -- the seeded token's header is {"alg":"ES256"}), so the legacy HS256 secret
+      # the CLI still reports verifies nothing. Unset, apps/api's guard takes the JWKS path,
+      # which is also what PowerSync's client_auth is pointed at.
+      - name: Export Supabase keys as app env vars
+        run: |
+          eval "$(pnpm exec supabase status -o env | tr -d '"' | grep -E '^(ANON_KEY|SERVICE_ROLE_KEY)=')"
+          {
+            echo "SUPABASE_ANON_KEY=$ANON_KEY"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY"
+            echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=$ANON_KEY"
+          } >> "$GITHUB_ENV"
+
+      # apps/mobile's workspace dependencies are consumed as compiled dist/ and Metro resolves
+      # them that way during the bundle step inside the Gradle build. `@cortex/mobile^...` means
+      # "everything apps/mobile depends on", resolved from the ref being built -- naming the
+      # packages instead breaks on any ref where one of them does not yet exist.
+      - name: Build the workspace packages the bundle imports
+        run: pnpm turbo run build --filter='@cortex/mobile^...' --filter=@cortex/api
+
+      - name: Start the API
+        run: |
+          node apps/api/dist/main.js &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:3001/health && break
+            sleep 2
+          done
+        env:
+          PORT: 3001
+          CORS_ORIGINS: http://127.0.0.1:3000,http://localhost:3000
+
+      # Without this there is no server->device sync at all, and mục 1, the purge case and the
+      # whole second half of the conflict run are untestable.
+      - name: Start PowerSync Service
+        run: bash e2e/powersync/up.sh
+
+      # android/ is gitignored on purpose -- app.json is the source of truth. patch-android.mjs
+      # then empties debuggableVariants (a debug APK otherwise carries no JS and expects Metro),
+      # allows cleartext to 10.0.2.2, and asserts allowBackup="false" survived prebuild, which
+      # is mục 2's `adb backup` row checked at the property.
+      - name: Prebuild and patch the Android project
+        run: |
+          (cd apps/mobile && pnpm exec expo prebuild --platform android --no-install)
+          node e2e/scripts/patch-android.mjs
+
+      # Keyed on the inputs that change the NATIVE build. A PR touching only TypeScript restores
+      # this and skips the SQLCipher/FTS5 NDK compile; Gradle still re-bundles the JS.
+      - name: Cache Gradle build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/mobile/android/.gradle
+            apps/mobile/android/app/build/intermediates
+          key: gradle-e2e-${{ hashFiles('apps/mobile/package.json', 'apps/mobile/app.json', 'pnpm-lock.yaml') }}
+          restore-keys: gradle-e2e-
+
+      # x86_64 only: the emulator cannot run the other three ABIs, and building them is roughly
+      # 4x the NDK work for nothing.
+      - name: Assemble debug APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleDebug --no-daemon -PreactNativeArchitectures=x86_64
+
+      - name: Seed the E2E user and corpus
+        run: node e2e/scripts/seed.mjs --reset > /tmp/seed.json
+
+      - name: Cache AVD snapshot
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-33-x86_64-v1
+
+      # A separate app-free boot. Folded into the test step, the first cold boot's cost would be
+      # charged to a flow timeout instead of to booting, which is a confusing way to learn that
+      # the cache missed.
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "AVD snapshot created"
+
+      - name: Run Maestro flows
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          # Animations make Maestro wait on transitions that never settle.
+          disable-animations: true
+          script: bash e2e/scripts/run-maestro.sh
+
+      # PowerSync's logs matter as much as Maestro's when a download-side flow times out: they
+      # say whether replication ever started and whether the device's token was accepted.
+      # `failure() || cancelled()`, not `failure()`, on both of these.
+      #
+      # A job that exceeds `timeout-minutes` is CANCELLED, not failed, and `failure()` is false
+      # under cancellation — so the one outcome that most needs a logcat, a hung 75-minute run,
+      # was the one outcome that uploaded nothing at all. Same for a run superseded by
+      # `cancel-in-progress`. `always()` would work too but would also upload on every green run.
+      #
+      # Cancelled jobs get a grace period in which these still execute; it is finite, so keep
+      # them cheap and expect a genuinely wedged runner to still lose them.
+      - name: Collect PowerSync logs
+        if: failure() || cancelled()
+        run: docker logs cortex-powersync > /tmp/powersync.log 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure() || cancelled()
+        with:
+          name: maestro-debug-output
+          # Deliberately NOT /tmp/seed.json: it holds a live access token, and this repo is
+          # public, so its artifacts are downloadable by anyone. The token is local-stack-only
+          # and expires in an hour, which makes publishing it harmless rather than sensible.
+          # The note ids that make it useful for debugging are all in the Maestro output.
+          path: |
+            ~/.maestro/tests/**
+            /tmp/logcat.txt
+            /tmp/powersync.log
+          if-no-files-found: warn
+          retention-days: 14

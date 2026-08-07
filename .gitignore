@@ -3,6 +3,13 @@ node_modules/
 dist/
 .next/
 .expo/
+# Output of the `bundle` turbo task (apps/mobile). A build artifact, like dist/ above.
+.expo-export/
+# Continuous Native Generation: app.json is the source of truth and `expo prebuild`
+# regenerates these wholesale. Committing them would let a stale manifest outlive a change
+# to app.json -- and android/ is where `allowBackup="false"` has to land.
+apps/mobile/android/
+apps/mobile/ios/
 .env
 .env.local
 .env.*
@@ -13,3 +20,5 @@ expo-env.d.ts
 supabase/.temp/
 .superpowers/
 .claude/worktrees/
+.vercel
+.env*

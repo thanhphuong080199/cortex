@@ -1,5 +1,6 @@
 import { z, type ZodType } from "zod";
-import { noteDomain } from "../enums.js";
+import { mediaStatus, noteDomain } from "../enums.js";
+import { pendingMediaItem } from "./media.js";
 
 export type NoteDomain = z.infer<typeof noteDomain>;
 
@@ -17,7 +18,11 @@ export const domainMetaSchemas: Record<NoteDomain, ZodType> = {
   media: z.object({
     rating: z.number().int().min(1).max(5).optional(),
     consumed_at: z.iso.date().optional(),
-    status: z.enum(["finished", "in_progress", "abandoned"]).optional(),
+    status: mediaStatus.optional(),
+    // Present only between an offline device's write and this note's next upload
+    // resolution (MediaService.resolveNoteMediaLink), which deletes the key -- see there
+    // for why leaving it behind would fail this same strict schema on the next validate.
+    pending_item: pendingMediaItem.optional(),
   }).strict(),
   health: z.object({
     activity_type: z.string().max(100).optional(),

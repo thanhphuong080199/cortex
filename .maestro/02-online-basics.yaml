@@ -1,0 +1,165 @@
+# Mục 3 — the basic features, online.
+#
+# Assumes the network is UP and a session is already installable. Run after 01.
+#
+# The "Export all notes" assertion below is not really about export. ExportButton renders that
+# label from `useStatus().connected` (screens/export-button.tsx), so it is the plainest UI proof
+# that PowerSync reports itself connected -- the exact question the handoff records as never
+# once answered yes on a real device. If the download stream is dead, this line reads
+# "Export needs a connection" and fails here.
+#
+# ON THE scroll-to-top CALLS. The list header is taller than the viewport, so the search box,
+# the view chips and every row are below the fold, and each `scrollUntilVisible` resumes from
+# where the last one stopped. subflows/scroll-to-top.yaml precedes anything that could now be
+# above the view, which is what makes the DOWN scrolls here deterministic rather than dependent
+# on how far the previous step happened to travel.
+appId: ${APP_ID}
+---
+- launchApp:
+    clearState: true
+- runFlow:
+    when:
+      visible: "DEVELOPMENT SERVERS"
+    file: subflows/dismiss-dev-launcher.yaml
+- runFlow: subflows/install-session.yaml
+- runFlow: subflows/wait-for-download.yaml
+
+# ---- connected=true, stated in the UI ----
+- scrollUntilVisible:
+    element: "Export all notes"
+    direction: DOWN
+    timeout: 60000
+- assertNotVisible: "Export needs a connection"
+
+- runFlow: subflows/scroll-to-top.yaml
+
+# ---- capture a note, it appears immediately ----
+# No network involved: capture is one local INSERT and the list is a reactive query over the
+# same local database (screens/quick-capture.tsx), so this must be instant even offline.
+- tapOn:
+    id: "capture-input"
+- inputText: "vorpal blade went snicker snack"
+- tapOn:
+    id: "capture-save"
+# NOT `assertVisible: "Saved ✓"`. That label is on the Save button for exactly 1500ms
+# (quick-capture.tsx: `setTimeout(() => setSaved(false), 1500)`), while a single Maestro command
+# on this emulator costs 3-6s -- so the badge is usually gone before the first hierarchy dump
+# even lands. It passed by luck until run 31139453992, whose hierarchy at the failed assertion
+# showed capture-save reading "Save" and capture-input already back to its placeholder: the note
+# had been written and only the timer had fired. No flow can win that race; asserting a 1.5s
+# animation is the defect, not the emulator being slow.
+#
+# The box clearing is the DURABLE half of the same branch. `save()` reaches setContent("") only
+# when captureNote returned truthy -- the identical condition that sets `saved` -- so this proves
+# the write path without depending on a timer. The row assertion below is the other half.
+- extendedWaitUntil:
+    visible:
+      id: "capture-input"
+      text: "Capture a thought"
+    timeout: 15000
+# The new note is the newest, so it is row 1 -- but row 1 still sits below the whole header.
+# scrollUntilVisible retries until its timeout, so this keeps the "appears immediately" meaning.
+- scrollUntilVisible:
+    element: "vorpal blade went snicker snack"
+    direction: DOWN
+    timeout: 15000
+
+# ---- search finds the one note that has the word ----
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
+- inputText: "zarquon"
+# THE KEYBOARD HAS TO GO before anything looks for a row. It covers the bottom half of the
+# screen, and the rows start immediately below the view chips, so with it up the list's visible
+# viewport is about ten pixels -- and scrollUntilVisible only counts an element as visible when
+# it is FULLY inside the viewport, so no row can ever satisfy it. The search box keeps focus
+# after typing, so unlike capture (which blurs on save) nothing dismisses it on its own.
+#
+# Safe here specifically because the keyboard is definitely up: on Android `hideKeyboard` fires
+# a back event, which the IME swallows when it is showing. Fired without a keyboard it would
+# navigate instead, which is why it is not sprinkled anywhere the state is uncertain.
+- hideKeyboard
+- scrollUntilVisible:
+    element: "Zarquon note"
+    direction: DOWN
+    timeout: 15000
+- assertNotVisible: "vorpal blade went snicker snack"
+
+# Clearing the box must restore the full list. `noteFiltersToSql` emits an FTS clause on any
+# truthy q, so a present-but-empty query would match nothing and silently empty the list -- the
+# case note-list.tsx spreads the key away to avoid.
+#
+# Re-tapped rather than erased where we stand: eraseText goes to whatever is focused, and the
+# scroll above moved the box off screen.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element:
+      id: "search-input"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "search-input"
+- eraseText
+- hideKeyboard
+- scrollUntilVisible:
+    element: "vorpal blade went snicker snack"
+    direction: DOWN
+    timeout: 15000
+
+# ---- switching views narrows the list ----
+# A freshly captured note is in `inbox`; `archived` must not show it. The view names come from
+# NOTE_VIEWS in @cortex/shared: inbox | active | archived | trash.
+- runFlow: subflows/scroll-to-top.yaml
+- scrollUntilVisible:
+    element: "archived"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "archived"
+- extendedWaitUntil:
+    notVisible: "vorpal blade went snicker snack"
+    timeout: 15000
+- tapOn: "inbox"
+- scrollUntilVisible:
+    element: "vorpal blade went snicker snack"
+    direction: DOWN
+    timeout: 15000
+
+# ---- mood check-in ----
+# The widget is in the header, above the rows the previous step scrolled to.
+- runFlow: subflows/scroll-to-top.yaml
+- tapOn:
+    text: "Mood 4 of 5 — good"
+- assertVisible: "Logged ✓"
+
+# ---- media log, colliding case, must reuse the seeded item ----
+# The seed logged "Dune"; this logs "dune". The find-or-create key is
+# (user_id, kind, lower(title)), so this must land on the SAME media_items row and leave two
+# notes pointing at it. Asserted server-side below, because the device cannot see the join.
+- scrollUntilVisible:
+    element:
+      id: "media-title"
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: "media-title"
+- inputText: "dune"
+# The stars and the save button sit BELOW the title box, which is where the keyboard now is.
+- hideKeyboard
+- tapOn: "5 of 5 stars"
+- tapOn:
+    id: "media-save"
+
+# The write goes to the local database, then uploads. Wait for the note to come back before
+# asking the server what it made of it.
+- scrollUntilVisible:
+    element: "dune"
+    direction: DOWN
+    timeout: 30000
+
+- runScript:
+    file: scripts/assert-media-dedup.js

@@ -46,6 +46,34 @@ describe("NoteService.update", () => {
   });
 });
 
+describe("NoteService.createWithId", () => {
+  it("a resent PUT is idempotent", async () => {
+    const id = crypto.randomUUID();
+    const first = await svc.createWithId(id, { content: "from phone" });
+    const second = await svc.createWithId(id, { content: "from phone" });
+    expect(second.id).toBe(first.id);
+  });
+
+  /**
+   * Round 2, finding #9. The 23505 fallback used to read through getById, which filters
+   * `deleted_at is null` -- correct for an ordinary read, wrong for a replay. PowerSync resends
+   * a batch whenever the response is lost, and nothing stops the user from trashing the note in
+   * between: the resend then wants "does this id exist and is it mine" (true, so report success)
+   * rather than "is it currently live" (false, so it reported not_found for a row that plainly
+   * exists). This is the opposite asymmetry from CheckinService.createWithId's own 23505 read,
+   * which never filtered deleted_at and is deliberately left alone.
+   */
+  it("a resent PUT for a note trashed since the first attempt still reports success, not not_found", async () => {
+    const id = crypto.randomUUID();
+    await svc.createWithId(id, { content: "from phone" });
+    await svc.softDelete(id);
+
+    const replay = await svc.createWithId(id, { content: "from phone" });
+    expect(replay.id).toBe(id);
+    expect(replay.deleted_at).not.toBeNull();
+  });
+});
+
 describe("NoteService trash lifecycle", () => {
   it("softDelete sets deleted_at; restore clears it", async () => {
     const note = await svc.create({ content: "trash me" });
