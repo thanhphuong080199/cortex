@@ -23,6 +23,22 @@ appId: ${APP_ID}
       visible: "DEVELOPMENT SERVERS"
     file: subflows/dismiss-dev-launcher.yaml
 
+# ---- precondition: the database 03 handed over ----
+# This is the ONLY flow that inherits state it did not create (01, 02 and 03 all clearState) and
+# it goes offline immediately, so a corpus that did not survive 03 cannot be recovered once the
+# steps below start. Assert it here, where the failure names the hand-off, rather than letting it
+# surface at step 7 as "Conflict target not found" -- which reads like a sync or a scroll bug and
+# costs a 30-minute CI cycle to tell apart from one.
+#
+# "Conflict target" is the probe because it is the row the most steps depend on and 03 leaves it
+# untouched. Offline already, so this waits on the LOCAL database only; 60s is for the emulator,
+# not for a download that is never coming.
+- scrollUntilVisible:
+    element: "Conflict target"
+    direction: DOWN
+    timeout: 60000
+- runFlow: subflows/scroll-to-top.yaml
+
 # ---- 9. export must refuse, and say why ----
 # ExportButton reads useStatus().connected, so this is the negative half of the connected=true
 # assertion 02 makes. If it still says "Export all notes" here, either the radios did not go

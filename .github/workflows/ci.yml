@@ -61,6 +61,38 @@ jobs:
       - name: Test @cortex/web
         run: pnpm turbo run test --filter=@cortex/web
 
+  # THE ONLY JOB BRANCH PROTECTION SHOULD EVER REQUIRE.
+  #
+  # Required status checks are matched by the job's `name:` as a LITERAL STRING, and a required
+  # context that never reports leaves the PR "Expected — waiting for status to be reported"
+  # forever. That is not hypothetical: ab0a64c renamed `checks` from "…shared tests" to
+  # "…stack-free tests" as a drive-by in a docs commit, protection still required the old string,
+  # and every PR to main was unmergeable while all four checks showed green. Nothing about the
+  # failure points at a name — the job that runs looks fine, and the one that blocks is invisible
+  # in the checks list.
+  #
+  # Depending on this indirection instead means job names are free to change and new jobs are
+  # free to appear; only THIS name is load-bearing, and it says nothing that could go stale.
+  #
+  # `if: always()` is required. Without it a failing dependency SKIPS this job rather than
+  # failing it, and GitHub treats a skipped required check as satisfied — the gate would wave
+  # through exactly the runs it exists to stop.
+  #
+  # Deliberately does NOT gate on the E2E workflows: both are path-filtered, so a docs-only PR
+  # never reports them, which is the same never-reporting trap in a different disguise.
+  gate:
+    name: CI gate
+    needs: [checks, db-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every required job succeeded
+        run: |
+          echo "checks:   ${{ needs.checks.result }}"
+          echo "db-tests: ${{ needs.db-tests.result }}"
+          [ "${{ needs.checks.result }}" = "success" ] || exit 1
+          [ "${{ needs.db-tests.result }}" = "success" ] || exit 1
+
   db-tests:
     name: db + api tests (against local Supabase stack)
     runs-on: ubuntu-latest

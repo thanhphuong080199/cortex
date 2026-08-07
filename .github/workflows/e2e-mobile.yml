@@ -190,12 +190,21 @@ jobs:
 
       # PowerSync's logs matter as much as Maestro's when a download-side flow times out: they
       # say whether replication ever started and whether the device's token was accepted.
+      # `failure() || cancelled()`, not `failure()`, on both of these.
+      #
+      # A job that exceeds `timeout-minutes` is CANCELLED, not failed, and `failure()` is false
+      # under cancellation — so the one outcome that most needs a logcat, a hung 75-minute run,
+      # was the one outcome that uploaded nothing at all. Same for a run superseded by
+      # `cancel-in-progress`. `always()` would work too but would also upload on every green run.
+      #
+      # Cancelled jobs get a grace period in which these still execute; it is finite, so keep
+      # them cheap and expect a genuinely wedged runner to still lose them.
       - name: Collect PowerSync logs
-        if: failure()
+        if: failure() || cancelled()
         run: docker logs cortex-powersync > /tmp/powersync.log 2>&1 || true
 
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: failure() || cancelled()
         with:
           name: maestro-debug-output
           # Deliberately NOT /tmp/seed.json: it holds a live access token, and this repo is
