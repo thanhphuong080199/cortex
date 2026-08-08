@@ -196,4 +196,33 @@ describe("the editor's local mutations", () => {
     expect(other.deleted_at).toBeNull();
     expect(other.updated_at).toBe(T0);
   });
+
+  /**
+   * Every local UPDATE becomes a PowerSync PATCH. Re-trashing an already-trashed note
+   * therefore costs a server round trip for a change that changes nothing -- and it re-stamps
+   * updated_at, reordering the row against genuine edits. `NoteService.softDelete` carries
+   * `.is("deleted_at", null)` for the same reason; the device statement did not.
+   *
+   * The already-trashed state is SEEDED with fixed timestamps rather than produced by calling
+   * trashNote twice. NOW_ISO is `strftime('%Y-%m-%dT%H:%M:%fZ','now')` (sql.ts:24) --
+   * millisecond resolution -- so two calls inside one test can land on the same millisecond and
+   * the assertion would then hold whether or not the guard exists. Seeding T0 makes the two
+   * outcomes impossible to confuse.
+   */
+  it("does not re-stamp a note that is already trashed", async () => {
+    db.prepare("UPDATE notes SET deleted_at = ?, updated_at = ? WHERE id = 'n1'").run(T0, T0);
+
+    await trashNote(target(db), "n1");
+
+    expect(note().deleted_at).toBe(T0);
+    expect(note().updated_at).toBe(T0);
+  });
+
+  it("does not re-stamp a note that is already live", async () => {
+    // The fixture note is live already: beforeEach inserts it with deleted_at NULL and
+    // updated_at = T0.
+    await restoreNote(target(db), "n1");
+
+    expect(note().updated_at).toBe(T0);
+  });
 });
