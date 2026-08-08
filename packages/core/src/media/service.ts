@@ -60,6 +60,23 @@ export class MediaService {
     throw mapPostgrestError(inserted.error);
   }
 
+  /**
+   * Deletes `item` if -- and only if -- this call is the one that created it, and never lets
+   * a delete failure replace the error the caller is already unwinding with.
+   *
+   * `media_items` has no delete surface, so an item this call created and then failed to
+   * link (a note insert, a note update, a validation check) is a permanent orphan otherwise.
+   * An item that existed *before* this call must be left alone -- that is exactly what
+   * `created` distinguishes, and it is what the pre-existing test "leaves a pre-existing item
+   * alone when the note cannot be updated" pins.
+   */
+  private async compensateIfCreated(item: MediaItem, created: boolean): Promise<void> {
+    if (!created) return;
+    await this.client.from("media_items").delete()
+      .eq("id", item.id).eq("user_id", this.userId)
+      .then(() => undefined, () => undefined);
+  }
+
   // Item identity is (kind, lower(title)); year is descriptive metadata. But an
   // accepted-then-discarded input is how "Dune (1984)" silently attaches to the 2021
   // film -- so a missing year gets backfilled, and a contradicting one is a 409 the
@@ -105,10 +122,7 @@ export class MediaService {
       // otherwise strand a just-created item in the library (and the autocomplete)
       // forever -- there is no delete surface for media_items. Best-effort compensation;
       // an item that existed before this call is left alone.
-      if (created) {
-        await this.client.from("media_items").delete()
-          .eq("id", item.id).eq("user_id", this.userId).then(() => undefined, () => undefined);
-      }
+      await this.compensateIfCreated(item, created);
       throw err;
     }
   }
@@ -146,11 +160,7 @@ export class MediaService {
     // alone.
     const check = validateDomainMeta("media", cleaned);
     if (!check.success) {
-      if (created) {
-        await this.client.from("media_items").delete()
-          .eq("id", item.id).eq("user_id", this.userId)
-          .then(() => undefined, () => undefined);
-      }
+      await this.compensateIfCreated(item, created);
       throw {
         kind: "validation",
         message: "domain_meta does not fit domain \"media\"",
@@ -172,11 +182,7 @@ export class MediaService {
     // delete surface for media_items. logMedia already compensates for exactly this shape
     // of failure; so must this.
     if (error || data === null) {
-      if (created) {
-        await this.client.from("media_items").delete()
-          .eq("id", item.id).eq("user_id", this.userId)
-          .then(() => undefined, () => undefined);
-      }
+      await this.compensateIfCreated(item, created);
       throw error ? mapPostgrestError(error) : notFound();
     }
 
