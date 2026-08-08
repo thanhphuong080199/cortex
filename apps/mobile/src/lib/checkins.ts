@@ -7,10 +7,13 @@ import { NOW_ISO } from "./sql";
  * and re-tapped, never edited -- and both work offline unchanged, because neither needs a
  * server-side decision.
  *
- * `updated_at` is deliberately not written. `packages/sync`'s local schema declares it, but
- * `public.checkins` has no such column (migration 00013), so anything written there exists on
- * this device only and is null the moment the server's version syncs back. See the handoff's
- * deferred list -- the local schema is what should lose the column.
+ * `updated_at` is deliberately not written HERE, but the column is real: 00014_phase1c_
+ * hardening.sql:19-21 added it to public.checkins with a moddatetime trigger, explicitly so
+ * PowerSync can order rows. `packages/sync/src/schema.ts` declares it correctly and must keep
+ * it. (An earlier note in this file claimed the column did not exist, cited 00013, and
+ * concluded the local schema should lose it -- following that would have broken sync
+ * ordering.) It stays unwritten by the device because the server owns it, exactly as with
+ * notes.updated_at.
  */
 export interface CheckinTarget {
   execute(sql: string, params?: unknown[]): Promise<unknown>;

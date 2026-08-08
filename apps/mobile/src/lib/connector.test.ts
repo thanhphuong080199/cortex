@@ -374,9 +374,10 @@ describe("ApiConnector.uploadData", () => {
   });
 
   /**
-   * Pairs with the `[powersync]` status log in powersync.ts -- the STILL OPEN question is
-   * whether a completed upload is what nudges a stalled download stream, and that is
-   * unanswerable if an upload never logs anything on success.
+   * The `[powersync] upload complete` line is the only signal an upload leaves, and the status
+   * line in powersync.ts is the only signal the download side leaves. Correlating them is how
+   * a sync problem gets localised to a direction at all, so the log is asserted rather than
+   * left to drift.
    */
   it("logs a line on a successful upload, for correlation with sync status transitions", async () => {
     const db = database([patch]);

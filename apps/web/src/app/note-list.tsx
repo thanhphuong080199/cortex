@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { api } from "@/lib/api";
 import {
@@ -22,6 +22,13 @@ export function NoteList({ initialNotes, filters, userId, token }: {
   const [busy, setBusy] = useState<string | null>(null);
   const { view, q, tag, domain } = filters;
 
+  // `filters` is an object prop, so `useCallback([filters])` rebuilds refetch on every render
+  // where the parent recreated it -- which re-registers the Realtime effect below for a value
+  // that did not change. NoteFilters is exactly these four fields
+  // (packages/shared/src/notes/filters.ts:24-29), so this is the same object by value with a
+  // stable identity.
+  const stableFilters = useMemo(() => ({ view, q, tag, domain }), [view, q, tag, domain]);
+
   useEffect(() => { setNotes(initialNotes); }, [initialNotes]);
 
   const refetch = useCallback(async () => {
@@ -32,13 +39,13 @@ export function NoteList({ initialNotes, filters, userId, token }: {
     // inbox (issue-log E5).
     const supabase = createClient();
     const { data } = await applyNoteFilters(
-      supabase.from("notes").select(noteSelect(filters)),
-      filters,
+      supabase.from("notes").select(noteSelect(stableFilters)),
+      stableFilters,
     );
     // Double cast for the same reason as page.tsx: the conditional select string
     // defeats supabase-js's embedded-resource type parser.
     if (data) setNotes((data as unknown as NoteRow[]).filter((n) => matchesFilters(n, filters)));
-  }, [filters]);
+  }, [stableFilters]);
 
   useEffect(() => {
     const supabase = createClient();

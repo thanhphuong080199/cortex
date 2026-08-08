@@ -145,9 +145,12 @@ export class ApiConnector implements PowerSyncBackendConnector {
     if (result?.failed?.length) {
       console.error("sync upload: ops rejected by the server", result.failed);
     }
-    // Pairs with the `[powersync]` status log in powersync.ts: the STILL OPEN question is
-    // whether a completed upload is what nudges a stalled download stream, so an upload that
-    // never logs makes that impossible to see in the same trace.
+    // Pairs with the `[powersync]` status line in powersync.ts. Kept permanently: this is the
+    // only place an upload announces itself, so without it a device log shows sync status
+    // transitions with nothing to correlate them against. (It was added to investigate a
+    // download stream that appeared stalled; that turned out to be the zero-height list and
+    // the awaited connect(), both fixed, and 03-server-to-device.yaml now covers the
+    // direction in CI. The log stays because correlation is useful regardless.)
     console.log(`[powersync] upload complete: ${batch.crud.length} op(s)`);
 
     await batch.complete();
