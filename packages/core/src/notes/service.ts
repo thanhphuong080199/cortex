@@ -211,17 +211,40 @@ export class NoteService {
     // domain change the existing domain_meta cannot satisfy is the realistic trigger), and
     // when it does, the op still fails -- but by then the offline body already exists as
     // this row, not just as an argument on a call that never landed (round 2, finding #5).
-    const conflictCopy = await this.createWithId(conflictCopyId(this.userId, id, opId), {
-      content: input.content,
-      title: current.title ?? undefined,
-      // Everything except the body. A copy with a null domain does not appear under the
-      // domain filter the user would go looking in, and a media log's copy loses the item it
-      // was about. `current` is the SERVER row, whose meta already satisfies its own domain,
-      // so createWithId's validateDomainMeta cannot reject what it just read back.
-      domain: (current.domain ?? undefined) as CreateNoteInput["domain"],
-      domainMeta: (current.domain_meta ?? {}) as Record<string, unknown>,
-      ...(current.media_item_id ? { mediaItemId: current.media_item_id as string } : {}),
-    });
+    let conflictCopy: Note;
+    try {
+      conflictCopy = await this.createWithId(conflictCopyId(this.userId, id, opId), {
+        content: input.content,
+        title: current.title ?? undefined,
+        // Everything except the body. A copy with a null domain does not appear under the
+        // domain filter the user would go looking in, and a media log's copy loses the item
+        // it was about. `current` is the SERVER row -- but domain_meta is unconstrained
+        // jsonb (only `domain` itself has a DB CHECK), and a row's owner can write arbitrary
+        // domain_meta straight through PostgREST with their own JWT (CreateNoteOptions,
+        // above), same as schema drift in domainMetaSchemas over time. So the server's own
+        // meta is not guaranteed to still fit its own domain -- the catch below is what
+        // happens when it doesn't.
+        domain: (current.domain ?? undefined) as CreateNoteInput["domain"],
+        domainMeta: (current.domain_meta ?? {}) as Record<string, unknown>,
+        ...(current.media_item_id ? { mediaItemId: current.media_item_id as string } : {}),
+      });
+    } catch (err) {
+      // Only a `validation` throw is safe to retry without meta -- that's specifically
+      // createWithId's validateDomainMeta rejecting the server's own domain_meta against its
+      // own domain, which is exactly the "not guaranteed" case above. Anything else (a
+      // network failure, a genuine PostgREST error, a 23505) is a real failure and must
+      // propagate: swallowing it here would hide it, not just make the copy resilient.
+      if ((err as { kind?: string }).kind !== "validation") throw err;
+      // The copy is the phone's text, and the only place it exists. A copy that lands
+      // without its domain beats no copy at all, so drop domain/domain_meta and retry --
+      // media_item_id survives, since it is a plain FK with no schema validation attached
+      // and was never implicated in the meta rejection.
+      conflictCopy = await this.createWithId(conflictCopyId(this.userId, id, opId), {
+        content: input.content,
+        title: current.title ?? undefined,
+        ...(current.media_item_id ? { mediaItemId: current.media_item_id as string } : {}),
+      });
+    }
 
     // Server body wins. Everything except content is still applied to it -- a lifecycle
     // change made offline is not in conflict with a body edit made on web.

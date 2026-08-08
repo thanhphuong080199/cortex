@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { createUserClient } from "../supabase.js";
+import { MediaService } from "../media/service.js";
 import { makeUser } from "../test/harness.js";
 import { NoteService } from "./service.js";
 
@@ -212,10 +213,17 @@ describe("NoteService.updateWithConflictCopy", () => {
    * metadata is.
    */
   it("carries domain, domain_meta and media_item_id onto the conflict copy", async () => {
+    const media = new MediaService(createUserClient(alice.token), alice.id);
+    const item = await media.findOrCreateItem({
+      kind: "movie",
+      title: `Domain Carry Fixture ${Date.now()}`,
+    });
+
     const note = await svc.create({
       content: "server body",
       domain: "media",
       domainMeta: { status: "finished", rating: 4 },
+      mediaItemId: item.id,
     });
 
     const { conflictCopy } = await svc.updateWithConflictCopy(
@@ -230,5 +238,42 @@ describe("NoteService.updateWithConflictCopy", () => {
     expect(stored.content).toBe("phone body");
     expect(stored.domain).toBe("media");
     expect(stored.domain_meta).toMatchObject({ status: "finished", rating: 4 });
+    expect(stored.media_item_id).toBe(item.id);
+  });
+
+  /**
+   * `current` is the server row, but domain_meta is unconstrained jsonb -- only `domain`
+   * itself has a DB CHECK. This file's own comment on `CreateNoteOptions` concedes a row's
+   * owner can write arbitrary domain_meta straight through PostgREST with their own JWT, so
+   * a server row's own meta is not guaranteed to still satisfy its own domain. When that
+   * happens, createWithId's validateDomainMeta would otherwise throw on the ONE write that
+   * must never fail -- the copy is the phone's text and the only place it exists. It must
+   * fall back to a domainless copy rather than lose the text.
+   */
+  it("falls back to a domainless copy when the server's own domain_meta no longer fits its domain", async () => {
+    const note = await svc.create({
+      content: "original", domain: "media", domainMeta: { rating: 3 },
+    });
+    const base = note.content;
+    await svc.update(note.id, { content: "web edit" });
+
+    // The bypass the file's own comment describes: write meta the schema rejects directly
+    // through the user's own client, skipping NoteService's validation entirely. media's
+    // schema is `.strict()`, so an unknown key is enough.
+    const { error: bypassError } = await createUserClient(alice.token).from("notes")
+      .update({ domain_meta: { not_a_real_field: true } })
+      .eq("id", note.id);
+    expect(bypassError).toBeNull();
+
+    const r = await svc.updateWithConflictCopy(
+      note.id, { content: "phone edit" }, base, "fallback-1",
+    );
+
+    // The property that matters: the copy exists and holds the phone's body. Its domain is
+    // whatever the fallback leaves it as -- not asserted, since forcing a particular answer
+    // there is not the point.
+    expect(r.conflictCopy).not.toBeNull();
+    const stored = await svc.getById(r.conflictCopy!.id);
+    expect(stored.content).toBe("phone edit");
   });
 });
