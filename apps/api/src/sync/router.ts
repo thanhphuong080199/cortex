@@ -121,7 +121,18 @@ export async function applySyncOps(
       }
       result.applied.push(op.op_id);
     } catch (err) {
-      result.failed.push({ op_id: op.op_id, ...asCoreError(err) });
+      const error = asCoreError(err);
+      // A DELETE for a row that is already tombstoned asked for a state the row is already
+      // in. Every softDelete path guards on `is deleted_at null` so the second one matches
+      // zero rows and surfaces as not_found -- correct for an HTTP caller, wrong here.
+      // PowerSync resends a batch whenever the response is lost, so a replayed DELETE is
+      // ordinary traffic, and `failed` is the only surface that reveals a genuinely lost op.
+      // Filling it with benign replays is what makes a real loss easy to miss.
+      if (op.op === "DELETE" && error.kind === "not_found") {
+        result.applied.push(op.op_id);
+        continue;
+      }
+      result.failed.push({ op_id: op.op_id, ...error });
     }
   }
   return result;

@@ -501,4 +501,37 @@ describe("POST /sync/upload", () => {
     // needs its tombstone.
     expect(data!.deleted_at).not.toBeNull();
   });
+
+  /**
+   * `failed` is the ONLY surface that reveals a genuinely lost op -- the batch completes
+   * either way, so an op reported there has left the device's queue for good. Filling it with
+   * harmless replays is what makes a real loss easy to miss.
+   *
+   * PowerSync resends a batch whenever the response is lost, so a second DELETE for a row it
+   * already tombstoned is ordinary traffic, not a client bug. The row is in exactly the state
+   * the op asked for.
+   *
+   * checkins because that is the table mobile's undo really deletes; the notes DELETE branch
+   * routes through the same softDelete and the same `is deleted_at null` guard.
+   *
+   * The FIRST delete succeeds with or without this fix; only the second one discriminates.
+   */
+  it("reports an already-tombstoned DELETE as applied, not failed", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "checkins", id, data: { mood: 2 } }],
+    }).expect(201);
+
+    const first = await post(alice.token, {
+      ops: [{ op_id: "2", op: "DELETE", table: "checkins", id }],
+    }).expect(201);
+    expect(first.body.applied).toEqual(["2"]);
+
+    // The replay. Same op, same row, response lost the first time round.
+    const second = await post(alice.token, {
+      ops: [{ op_id: "3", op: "DELETE", table: "checkins", id }],
+    }).expect(201);
+    expect(second.body.failed).toEqual([]);
+    expect(second.body.applied).toEqual(["3"]);
+  });
 });
