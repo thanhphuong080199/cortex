@@ -22,11 +22,12 @@ export function NoteList({ initialNotes, filters, userId, token }: {
   const [busy, setBusy] = useState<string | null>(null);
   const { view, q, tag, domain } = filters;
 
-  // `filters` is an object prop, so `useCallback([filters])` rebuilds refetch on every render
-  // where the parent recreated it -- which re-registers the Realtime effect below for a value
-  // that did not change. NoteFilters is exactly these four fields
-  // (packages/shared/src/notes/filters.ts:24-29), so this is the same object by value with a
-  // stable identity.
+  // `filters` is an object prop, so both `refetch` and the Realtime subscription below were
+  // keyed on an identity the parent recreates on every render. NoteFilters is exactly these
+  // four fields (packages/shared/src/notes/filters.ts:24-29), so a useMemo over them is the
+  // same value with a stable identity, and using it everywhere -- not just in refetch's own
+  // dependency array -- is what keeps the subscription from being torn down and rebuilt for a
+  // value that did not change.
   const stableFilters = useMemo(() => ({ view, q, tag, domain }), [view, q, tag, domain]);
 
   useEffect(() => { setNotes(initialNotes); }, [initialNotes]);
@@ -44,7 +45,7 @@ export function NoteList({ initialNotes, filters, userId, token }: {
     );
     // Double cast for the same reason as page.tsx: the conditional select string
     // defeats supabase-js's embedded-resource type parser.
-    if (data) setNotes((data as unknown as NoteRow[]).filter((n) => matchesFilters(n, filters)));
+    if (data) setNotes((data as unknown as NoteRow[]).filter((n) => matchesFilters(n, stableFilters)));
   }, [stableFilters]);
 
   useEffect(() => {
@@ -77,14 +78,14 @@ export function NoteList({ initialNotes, filters, userId, token }: {
           // narrow the list, patching rows in locally would re-admit non-matching notes.
           // Refetch instead -- correctness over the saved round-trip. requiresRefetch
           // names exactly the fields matchesFilters ignores, so the two cannot drift.
-          if (requiresRefetch(filters)) {
+          if (requiresRefetch(stableFilters)) {
             void refetch();
             return;
           }
           setNotes((prev) => {
             const row = (payload.eventType === "DELETE" ? payload.old : payload.new) as NoteRow;
             const without = prev.filter((n) => n.id !== row.id); // dedupe by id -- own-write echo is a no-op
-            if (payload.eventType !== "DELETE" && matchesFilters(row, filters)) {
+            if (payload.eventType !== "DELETE" && matchesFilters(row, stableFilters)) {
               return [row, ...without].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
             }
             return without; // soft-deletes arrive as UPDATEs failing matchesFilters → drop (spec §5.4)
@@ -92,7 +93,7 @@ export function NoteList({ initialNotes, filters, userId, token }: {
         })
       .subscribe((status) => { if (status === "SUBSCRIBED") void refetch(); });
     return () => { void supabase.removeChannel(channel); };
-  }, [userId, view, domain, q, tag, filters, refetch, token]);
+  }, [userId, view, domain, q, tag, stableFilters, refetch, token]);
 
   async function act(id: string, fn: () => Promise<unknown>) {
     setBusy(id);
