@@ -534,4 +534,30 @@ describe("POST /sync/upload", () => {
     expect(second.body.failed).toEqual([]);
     expect(second.body.applied).toEqual(["3"]);
   });
+
+  /**
+   * The checkins case above exercises applySyncOps' own DELETE branch. tags has no service of
+   * its own -- it goes through applyGenericOp instead, a separate code path that reaches the
+   * same `.eq(...).is("deleted_at", null).select("id").single()` guard and therefore the same
+   * not_found on a replay. Same fix, different branch: this covers the other one, so the
+   * generic writer's DELETE path (tags, note_tags, links, media_items) is not left untested.
+   */
+  it("reports an already-tombstoned tags DELETE (the generic writer path) as applied, not failed", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "tags", id, data: { name: `sync-tag-${id}` } }],
+    }).expect(201);
+
+    const first = await post(alice.token, {
+      ops: [{ op_id: "2", op: "DELETE", table: "tags", id }],
+    }).expect(201);
+    expect(first.body.applied).toEqual(["2"]);
+
+    // The replay. Same op, same row, response lost the first time round.
+    const second = await post(alice.token, {
+      ops: [{ op_id: "3", op: "DELETE", table: "tags", id }],
+    }).expect(201);
+    expect(second.body.failed).toEqual([]);
+    expect(second.body.applied).toEqual(["3"]);
+  });
 });

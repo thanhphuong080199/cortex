@@ -122,12 +122,33 @@ export async function applySyncOps(
       result.applied.push(op.op_id);
     } catch (err) {
       const error = asCoreError(err);
-      // A DELETE for a row that is already tombstoned asked for a state the row is already
-      // in. Every softDelete path guards on `is deleted_at null` so the second one matches
-      // zero rows and surfaces as not_found -- correct for an HTTP caller, wrong here.
-      // PowerSync resends a batch whenever the response is lost, so a replayed DELETE is
-      // ordinary traffic, and `failed` is the only surface that reveals a genuinely lost op.
-      // Filling it with benign replays is what makes a real loss easy to miss.
+      // This catch wraps every table, so this branch reaches all six: checkins.softDelete,
+      // notes.softDelete (via applyNoteOp), and applyGenericOp's DELETE branch below, which
+      // covers tags, note_tags, links and media_items. All six guard the same way -- an
+      // UPDATE ... SET deleted_at ... WHERE id = ? AND user_id = ? AND deleted_at IS NULL,
+      // `.select().single()` -- so a zero-row match surfaces as the same not_found from any
+      // of them.
+      //
+      // not_found on a DELETE therefore does not mean only "I already deleted this row
+      // myself." Zero rows matched is also what a foreign row and a never-created id produce
+      // at this same guard, and the three are indistinguishable here: user_id and deleted_at
+      // are ANDed into one filter, so nothing downstream of PostgREST's empty result can say
+      // which one happened. That conflation is not new to this branch -- see
+      // TagService.assertOwnedAndLive (organize/service.ts): "Missing, foreign and
+      // soft-deleted rows all surface as not_found so they stay indistinguishable" is already
+      // how this codebase treats the ambiguity, deliberately, elsewhere.
+      //
+      // applied is still the right answer for all three, not just the tombstoned-by-me case:
+      // a DELETE asks for a row to be gone, and in every one of the three it already is, or
+      // it is not this user's to make gone. Resending cannot improve on any of them -- there
+      // is no data to reconcile, only an absence to (re)confirm. PowerSync resends a batch
+      // whenever the response is lost, so this is ordinary replay traffic, not a client bug,
+      // and `failed` is the only surface that reveals an op that is genuinely stuck. Reporting
+      // "not found" for a DELETE the way a PATCH or PUT would -- as a problem needing a
+      // resend -- fills that surface with noise across all six tables and buries the losses
+      // it exists to show. A future change narrowing this (e.g. treating a foreign id as an
+      // authorization failure instead) should be able to find this reasoning and weigh it,
+      // not rediscover it from a bug report.
       if (op.op === "DELETE" && error.kind === "not_found") {
         result.applied.push(op.op_id);
         continue;
