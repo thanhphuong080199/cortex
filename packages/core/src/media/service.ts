@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { pendingMediaItem, type LogMediaInput } from "@cortex/shared";
+import { pendingMediaItem, validateDomainMeta, type LogMediaInput } from "@cortex/shared";
 import { mapPostgrestError, notFound } from "../errors.js";
 import { anchoredIRegex } from "../like.js";
 import { NoteService, type Note } from "../notes/service.js";
@@ -137,9 +137,34 @@ export class MediaService {
     // pending_item is scaffolding, not data: leaving it behind would make the note
     // re-resolve on every subsequent upload.
     const { pending_item: _resolved, ...cleaned } = meta;
+
+    // Every other write path validates before storing (NoteService.create/createWithId/
+    // update). This one did not, so the sync router was a route by which a device could
+    // put meta into the column that domainMetaSchemas.media rejects -- and phase 2 is what
+    // has to read it back. Validated against "media" specifically: resolveNoteMediaLink is
+    // only ever reached for a media note, since pending_item is a member of that schema
+    // alone.
+    const check = validateDomainMeta("media", cleaned);
+    if (!check.success) {
+      if (created) {
+        await this.client.from("media_items").delete()
+          .eq("id", item.id).eq("user_id", this.userId)
+          .then(() => undefined, () => undefined);
+      }
+      throw {
+        kind: "validation",
+        message: "domain_meta does not fit domain \"media\"",
+        cause: check.error,
+      } as const;
+    }
+
     const { data, error } = await this.client.from("notes")
       .update({ media_item_id: item.id, domain_meta: cleaned })
-      .eq("id", noteId).eq("user_id", this.userId)
+      // `.is("deleted_at", null)` matches NoteService.update/getById/softDelete. Without it a
+      // trashed note still matched, so a link attached to a note the user had thrown away.
+      // With it the row count is zero and the compensation below fires, which is the already
+      // -tested behaviour for "this note cannot receive the link".
+      .eq("id", noteId).eq("user_id", this.userId).is("deleted_at", null)
       .select("id").maybeSingle();
 
     // A missing or foreign noteId matches zero rows. WITHOUT the select this returns

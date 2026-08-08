@@ -121,4 +121,39 @@ describe("MediaService.resolveNoteMediaLink", () => {
       .select("id").eq("user_id", alice.id).eq("title", title).is("deleted_at", null);
     expect(data).toHaveLength(1);   // compensation must not touch what it did not create
   });
+
+  /**
+   * `NoteService.update`, `getById` and `softDelete` all carry `.is("deleted_at", null)`;
+   * this update did not, so a note the user had already trashed could still be stamped with
+   * a media_item_id -- and the item it just created stayed behind as an orphan, because the
+   * compensation below only runs when the update matches zero rows.
+   */
+  it("refuses to link a media item to a trashed note", async () => {
+    const title = `Stalker ${Date.now()}`;
+    const note = await offlineMediaNote({ kind: "movie", title });
+    await notes.softDelete(note.id);
+
+    await expect(media.resolveNoteMediaLink(note.id, {
+      status: "finished", pending_item: { kind: "movie", title },
+    })).rejects.toMatchObject({ kind: "not_found" });
+
+    // The compensation path must have fired: the item created moments ago is gone.
+    const { data } = await createUserClient(alice.token).from("media_items")
+      .select("id").eq("user_id", alice.id).eq("title", title);
+    expect(data).toEqual([]);
+  });
+
+  /**
+   * `cleaned` went straight into the jsonb column. Every other write path runs
+   * validateDomainMeta first, so this was the one route by which a device could store meta
+   * that domainMetaSchemas.media rejects -- which phase 2 then has to read back.
+   */
+  it("rejects meta the media domain's schema does not accept", async () => {
+    const title = `Stalker meta ${Date.now()}`;
+    const note = await offlineMediaNote({ kind: "movie", title });
+
+    await expect(media.resolveNoteMediaLink(note.id, {
+      status: "not-a-real-status", pending_item: { kind: "movie", title },
+    })).rejects.toMatchObject({ kind: "validation" });
+  });
 });
