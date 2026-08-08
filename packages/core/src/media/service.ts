@@ -140,8 +140,23 @@ export class MediaService {
     noteId: string,
     meta: Record<string, unknown>,
   ): Promise<MediaItem | null> {
+    // Absent is not an error: an ordinary note has no pending_item and this method is called
+    // for every note op that carries domain_meta.
+    if (meta.pending_item === undefined || meta.pending_item === null) return null;
+
+    // Present but malformed IS an error. Returning null for both meant a client that
+    // serialises this field wrongly produced silent no-op linking, with the note written and
+    // nothing anywhere reporting that its media item was never reached. applyNoteOp routes a
+    // throw from here into `media_unresolved`, which exists for exactly this: durable write,
+    // failed resolution, resend cannot help.
     const parsed = pendingMediaItem.safeParse(meta.pending_item);
-    if (!parsed.success) return null;
+    if (!parsed.success) {
+      throw {
+        kind: "validation",
+        message: "pending_item is present but does not parse",
+        cause: parsed.error,
+      } as const;
+    }
 
     // findOrCreate, not findOrCreateItem: the `created` flag is what makes the
     // compensation below correct -- an item that existed before this call must be left

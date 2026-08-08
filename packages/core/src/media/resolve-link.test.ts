@@ -31,6 +31,24 @@ describe("MediaService.resolveNoteMediaLink", () => {
     expect(await media.resolveNoteMediaLink(note.id, {})).toBeNull();
   });
 
+  /**
+   * Absent and malformed both returned null, so a client that serialises this field wrongly
+   * produced silent no-op linking with nothing anywhere to notice it by. `media_unresolved`
+   * exists for precisely this class of outcome -- the note is written, the linking is not,
+   * and a resend cannot help.
+   */
+  it("distinguishes a malformed pending_item from an absent one", async () => {
+    const note = await offlineMediaNote({ kind: "movie", title: `Malformed ${Date.now()}` });
+
+    await expect(media.resolveNoteMediaLink(note.id, {
+      status: "finished",
+      pending_item: { kind: "not-a-kind", title: "" },
+    })).rejects.toMatchObject({ kind: "validation" });
+
+    // Absent stays null -- an ordinary note is not an error.
+    expect(await media.resolveNoteMediaLink(note.id, { status: "finished" })).toBeNull();
+  });
+
   it("creates the item and stamps media_item_id", async () => {
     const note = await offlineMediaNote({ kind: "movie", title: "Arrival" });
     const item = await media.resolveNoteMediaLink(note.id, {
