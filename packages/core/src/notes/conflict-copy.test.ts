@@ -203,4 +203,32 @@ describe("NoteService.updateWithConflictCopy", () => {
     expect(data!.length, "the phone's body must survive as a conflict copy even though the op failed")
       .toBeGreaterThan(0);
   });
+
+  /**
+   * The copy is the phone's text, and it is the only place that text exists. Built from
+   * content and title alone it lands with domain null -- so it does not appear under the
+   * domain filter the user would look in, and a media log's copy loses the item it was
+   * about. Everything except the body is carried over, exactly as the surviving note's
+   * metadata is.
+   */
+  it("carries domain, domain_meta and media_item_id onto the conflict copy", async () => {
+    const note = await svc.create({
+      content: "server body",
+      domain: "media",
+      domainMeta: { status: "finished", rating: 4 },
+    });
+
+    const { conflictCopy } = await svc.updateWithConflictCopy(
+      note.id,
+      { content: "phone body" },
+      "the body the phone started from",
+      "op-domain-carry",
+    );
+
+    expect(conflictCopy).not.toBeNull();
+    const stored = await svc.getById(conflictCopy!.id);
+    expect(stored.content).toBe("phone body");
+    expect(stored.domain).toBe("media");
+    expect(stored.domain_meta).toMatchObject({ status: "finished", rating: 4 });
+  });
 });

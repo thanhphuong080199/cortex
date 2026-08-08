@@ -194,7 +194,7 @@ export class NoteService {
     }
 
     const { data: current, error: readError } = await this.client.from("notes")
-      .select("content, title")
+      .select("content, title, domain, domain_meta, media_item_id")
       .eq("id", id).eq("user_id", this.userId).is("deleted_at", null).single();
     if (readError) throw mapPostgrestError(readError);
 
@@ -214,6 +214,13 @@ export class NoteService {
     const conflictCopy = await this.createWithId(conflictCopyId(this.userId, id, opId), {
       content: input.content,
       title: current.title ?? undefined,
+      // Everything except the body. A copy with a null domain does not appear under the
+      // domain filter the user would go looking in, and a media log's copy loses the item it
+      // was about. `current` is the SERVER row, whose meta already satisfies its own domain,
+      // so createWithId's validateDomainMeta cannot reject what it just read back.
+      domain: (current.domain ?? undefined) as CreateNoteInput["domain"],
+      domainMeta: (current.domain_meta ?? {}) as Record<string, unknown>,
+      ...(current.media_item_id ? { mediaItemId: current.media_item_id as string } : {}),
     });
 
     // Server body wins. Everything except content is still applied to it -- a lifecycle
