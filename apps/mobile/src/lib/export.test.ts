@@ -136,6 +136,10 @@ describe("exportArchive", () => {
     // The archive is real but sitting in a cache directory the user cannot reach, so a silent
     // success would be a lie about where their data went.
     await expect(exportArchive(deps)).rejects.toThrow("sharing is not available");
+    // And nothing was downloaded to get here. isAvailableAsync is a cheap local call while the
+    // transfer is several megabytes; checked afterwards, a device with no share sheet paid for
+    // the whole thing before being told the feature cannot work on it.
+    expect(downloadFileAsync).not.toHaveBeenCalled();
   });
 
   it("propagates a failed download instead of sharing nothing", async () => {
@@ -143,5 +147,23 @@ describe("exportArchive", () => {
 
     await expect(exportArchive(deps)).rejects.toThrow("UnableToDownload");
     expect(shareAsync).not.toHaveBeenCalled();
+  });
+
+  /**
+   * `File.downloadFileAsync` streams into the file, so a mid-flight failure leaves a partial
+   * zip in cache. Line 38's same-day clear means the NEXT export recovers -- but in between,
+   * the share sheet would hand another app a truncated archive indistinguishable from a
+   * complete one.
+   *
+   * `cacheHas` is deliberately NOT seeded. Seeding it would make the pre-download same-day
+   * clear fire, push the path into `deleted`, and the assertion below would then hold with or
+   * without the cleanup -- the mock's `delete()` records the path regardless of who called it.
+   */
+  it("removes the partial file when the download fails", async () => {
+    downloadFileAsync.mockRejectedValueOnce(new Error("connection reset"));
+
+    await expect(exportArchive(deps)).rejects.toThrow("connection reset");
+
+    expect(deleted).toEqual([`/cache/${exportFilename()}`]);
   });
 });
