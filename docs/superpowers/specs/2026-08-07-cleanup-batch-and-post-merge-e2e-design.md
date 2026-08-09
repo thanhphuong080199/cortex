@@ -58,7 +58,12 @@ from the ledger with a note saying why.
 
 ---
 
-## PR 1 — the fourteen
+## PR 1 — the twelve
+
+> **Correction, 2026-08-09 — this said "fourteen".** Twelve clear by commits on PR 1, a
+> thirteenth clears in PR 2, one entry expired on its own, and one was wrong and is marked
+> rather than actioned. See the same note in
+> `docs/superpowers/plans/2026-08-07-phase-1b-closeout.md`.
 
 ### A. Correctness on synced data
 
@@ -291,7 +296,7 @@ whether an Android artifact is sound — and undoing it is deleting the
 
 **`docs/superpowers/plans/2026-08-03-phase-1b-HANDOFF.md`** gets a ~15-line status header at
 the top: phase 1b closed, all nine round-2 findings fixed with their commit SHAs, the
-fourteen minors cleared, and exactly one item still open (the rejected-op policy). Someone
+twelve minors cleared, and exactly one item still open (the rejected-op policy). Someone
 opening a 1200-line file should not have to read it to learn what is still owed. The two
 stale sections are corrected in place, and the ledger entries this batch clears are marked
 with their outcome — including the one marked **WRONG** and the one that expired.
@@ -339,7 +344,8 @@ merge itself is the functional test, and the run is watched rather than assumed.
 
 ## Definition of done
 
-- [ ] Fourteen items fixed, each with a test that was confirmed red first
+- [ ] Twelve items fixed here and a thirteenth in PR 2; Tasks 4, 5 and 7 confirmed red first
+      (the other nine were not red-before-green tasks)
 - [ ] `pnpm turbo run typecheck lint test --force` green, 0 cached
 - [ ] `checkins` sync rule filtered, isolation test red-then-green, deployed to PowerSync
       Cloud and confirmed against the hosted instance

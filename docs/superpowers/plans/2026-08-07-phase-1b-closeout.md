@@ -2,9 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Clear the fourteen ledgered minors left from phase 1b, reconcile the docs that now
-state things that are false, filter the `checkins` sync rule, and move both E2E suites behind
-the merge with the APK build chained after them.
+**Goal:** Clear twelve of the ledgered minors left from phase 1b (a thirteenth clears in PR 2),
+reconcile the docs that now state things that are false, filter the `checkins` sync rule, and
+move both E2E suites behind the merge with the APK build chained after them.
+
+> **Correction, 2026-08-09 — this plan said "fourteen" and was wrong.** The real count is
+> **twelve** cleared by commits on PR 1, a **thirteenth** clearing in PR 2, one entry that
+> **expired** on its own, and one that was **wrong** and is marked rather than actioned.
+> "Fourteen" was reachable only by counting the expired entry as cleared, which conflates
+> "a commit fixed it" with "the concern evaporated". The number was corrected here, in the
+> design doc, in the handoff document's status header, and in PR 1's title and body — a plan
+> whose whole purpose is that documents stop stating things that are false does not get to
+> keep its own miscount. Task 10's implementer refused to write the unverifiable number into
+> the handoff and did the arithmetic instead; its reviewer counted independently and agreed.
 
 **Architecture:** Three independent PRs off `chore/phase-1b-closeout`, split by whether they
 carry a deploy. PR 1 is code and docs only. PR 2 is one line of YAML plus the isolation test
@@ -45,7 +55,7 @@ Maestro, Playwright, GitHub Actions.
 
 ---
 
-# PR 1 — the fourteen
+# PR 1 — the twelve
 
 ## Task 1: A media link must not attach to a trashed note, and its meta must be validated
 
@@ -1242,7 +1252,7 @@ Insert immediately after line 1 (`# Phase 1b — handoff, 2026-08-03 (updated 20
 > - **Server-to-device sync runs.** The "STILL OPEN" section below is history: the causes were
 >   the zero-height note list and the awaited `connect()`, both fixed, and
 >   `.maestro/03-server-to-device.yaml` now exercises the direction on every merge to `main`.
-> - **Fourteen of the ledgered minors are cleared** — see
+> - **Twelve of the ledgered minors are cleared** — see
 >   `docs/superpowers/plans/2026-08-07-phase-1b-closeout.md`. Each entry below that this
 >   cleared is marked `[CLEARED]`.
 > - **One ledger entry was WRONG and is marked so**, not actioned: `packages/sync` declaring
@@ -1383,8 +1393,8 @@ the local Supabase stack is down, `db-tests`-covered packages will replay rather
 
 ```bash
 git push -u origin chore/phase-1b-closeout
-gh pr create --base main --title "Phase 1b closeout: fourteen ledgered minors, and the docs that had gone stale" --body "$(cat <<'EOF'
-Clears fourteen of the minors ledgered during phase 1b, and reconciles two documents that had
+gh pr create --base main --title "Phase 1b closeout: twelve ledgered minors, and the docs that had gone stale" --body "$(cat <<'EOF'
+Clears twelve of the minors ledgered during phase 1b, and reconciles two documents that had
 started stating things that are false.
 
 Plan: `docs/superpowers/plans/2026-08-07-phase-1b-closeout.md`
@@ -1861,8 +1871,8 @@ reported success.
 
 ## Definition of Done
 
-- [ ] Fourteen items fixed; Tasks 4, 5 and 7 each observed red before the fix, and each commit
-      message says so
+- [ ] Twelve items fixed here and a thirteenth in PR 2; Tasks 4, 5 and 7 each observed red
+      before the fix, and each commit message says so
 - [ ] `pnpm turbo run typecheck lint test --force` green with `0 cached`
 - [ ] `checkins` sync rule filtered, isolation test red-then-green, deployed to PowerSync Cloud
       and confirmed against the hosted instance
