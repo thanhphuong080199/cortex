@@ -1,20 +1,22 @@
 name: Android APK
 
-# Manual by default. A release APK compiles op-sqlite's C++ (SQLCipher + FTS5) from source, so
-# this is a ~20-40 minute job -- far too slow to hang off every pull request, and the CI workflow
-# already covers everything about apps/mobile that is checkable in seconds. `workflow_dispatch`
-# lets it run against any branch from the Actions tab; the `push` trigger keeps main's APK current
-# without anyone remembering to ask.
+# Called by post-merge.yml AFTER both E2E suites pass, and runnable by hand from the Actions
+# tab against any branch.
+#
+# `workflow_dispatch` is load-bearing and must stay: building an APK from an arbitrary branch
+# is how a device gets tested before its code is merged. Keeping this job in its own workflow
+# is what makes that possible -- post-merge.yml itself has no dispatch trigger and cannot be
+# run by hand at all. Folding this job's body into post-merge.yml would have meant the only
+# way to get a manual APK build back was adding workflow_dispatch to the orchestrator, which
+# would then drag both E2E suites (the mobile one alone ~40-55 minutes cold, ~20-28 warm) into
+# every by-hand run.
+#
+# The `push` trigger and its path filter are GONE -- post-merge.yml owns both now, so that
+# "build the APK only if the suites passed" can be expressed with `needs:` rather than
+# inferred.
 on:
+  workflow_call:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "apps/mobile/**"
-      - "packages/shared/**"
-      - "packages/sync/**"
-      - "pnpm-lock.yaml"
-      - ".github/workflows/android-apk.yml"
 
 concurrency:
   group: android-apk-${{ github.ref }}
