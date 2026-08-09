@@ -376,12 +376,6 @@ describe("child rows agree with the owner of their parent note", () => {
 });
 
 /**
- * The write-side half of the leak above. Reading back seeded rows only proves the fixture
- * behaved; it never attempts the row the rules file cannot stop. Each case here inserts a
- * genuine cross-owner reference and asserts the database refuses it -- this must fail (insert
- * succeeds, error is null) before the composite FK exists, and pass once it does.
- */
-/**
  * Undo is a local hard DELETE (apps/mobile/src/lib/checkins.ts:40) against a server-side SOFT
  * delete (CheckinService.softDelete). Without a deleted_at filter the tombstoned row still
  * satisfies the stream query, replicates back down, and the check-in the user undid returns to
@@ -399,10 +393,17 @@ it("excludes soft-deleted check-ins from the sync stream", () => {
 });
 
 /**
- * The half that would otherwise make the above a spelling test. An assertion that reads back
- * rows its own setup seeded is correct by construction and cannot fail -- round 2 finding #2
- * was exactly that defect. This one seeds BOTH states and asserts the query's own predicate
- * selects between them.
+ * Reads the predicate the YAML actually carries -- rather than retyping it, which is what this
+ * test used to do -- and pins it to an exact string before ever touching PostgREST. That closes
+ * the gap the test above leaves open on its own: a textually-present-but-inert predicate such as
+ * `AND (deleted_at IS NULL OR TRUE)` still matches that test's `/deleted_at\s+is\s+null/i`
+ * substring regex, but fails the exact-match assertion here. Having pinned the predicate, this
+ * then confirms it actually discriminates, by seeding BOTH states and applying that same
+ * predicate to real rows.
+ *
+ * Residual limit, stated honestly: nothing in this repo can prove PowerSync Cloud itself
+ * evaluates this rule at replication time -- only the post-merge hosted check (see the PR
+ * description) does that.
  */
 it("keeps live check-ins while excluding tombstoned ones", async () => {
   // Its OWN user, not the file's shared `alice`: this seeds and counts rows in one table, and
@@ -417,7 +418,14 @@ it("keeps live check-ins while excluding tombstoned ones", async () => {
   ]).select("id, mood, deleted_at");
   expect(seeded).toHaveLength(2);
 
-  // The predicate the stream query carries, applied to real rows in both states.
+  const checkins = extractDataQueries(rules).find((q) => q.table === "checkins")!;
+
+  // The predicate the YAML actually carries -- read, not retyped. An edit to
+  // `(deleted_at IS NULL OR TRUE)` fails HERE, where the regex in the test above would
+  // still have matched.
+  const predicate = /AND\s+(.+)$/i.exec(checkins.query)?.[1]?.trim();
+  expect(predicate?.toLowerCase()).toBe("deleted_at is null");
+
   const { data: replicated } = await admin.from("checkins")
     .select("id, mood").eq("user_id", user.id).is("deleted_at", null);
 
@@ -425,6 +433,12 @@ it("keeps live check-ins while excluding tombstoned ones", async () => {
   expect(replicated![0]!.mood).toBe(4);
 });
 
+/**
+ * The write-side half of the leak above. Reading back seeded rows only proves the fixture
+ * behaved; it never attempts the row the rules file cannot stop. Each case here inserts a
+ * genuine cross-owner reference and asserts the database refuses it -- this must fail (insert
+ * succeeds, error is null) before the composite FK exists, and pass once it does.
+ */
 describe("a cross-owner child row is rejected at the constraint level", () => {
   it("note_tags cannot be inserted with another user's note_id", async () => {
     const { error } = await admin.from("note_tags").insert({
