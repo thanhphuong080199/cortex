@@ -8,7 +8,7 @@ import { NOW_ISO } from "./sql";
  * server-side decision.
  *
  * `updated_at` is deliberately not written HERE, but the column is real: 00014_phase1c_
- * hardening.sql:19-21 added it to public.checkins with a moddatetime trigger, explicitly so
+ * hardening.sql:19-22 added it to public.checkins with a moddatetime trigger, explicitly so
  * PowerSync can order rows. `packages/sync/src/schema.ts` declares it correctly and must keep
  * it. (An earlier note in this file claimed the column did not exist, cited 00013, and
  * concluded the local schema should lose it -- following that would have broken sync

@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createHash } from "node:crypto";
 import { validateDomainMeta, type CreateNoteInput, type UpdateNoteInput } from "@cortex/shared";
-import { mapPostgrestError } from "../errors.js";
+import { mapPostgrestError, type CoreErrorKind } from "../errors.js";
 
 /**
  * Deterministic (RFC 4122 v5-style) id for a conflict copy, derived from the op that created
@@ -225,6 +225,15 @@ export class NoteService {
         // meta is not guaranteed to still fit its own domain -- the catch below is what
         // happens when it doesn't.
         domain: (current.domain ?? undefined) as CreateNoteInput["domain"],
+        // Taking `current.domain_meta` wholesale means a `pending_item` that the original's
+        // media resolution never cleared (MediaService.resolveNoteMediaLink only strips it on
+        // success) carries over to the copy too. applyNoteOp only ever calls
+        // resolveNoteMediaLink with the ORIGINAL op's id, never the copy's, so nothing
+        // re-resolves it here -- the copy simply inherits the same not-yet-linked state.
+        // Validation still passes (`pending_item` is a legitimate domainMetaSchemas.media
+        // member), so this is not a bug, just a new case: media/service.ts's "pending_item is
+        // scaffolding, not data" stops being quite true for a conflict copy, which is probably
+        // the right outcome anyway -- the copy is recording which item it was about.
         domainMeta: (current.domain_meta ?? {}) as Record<string, unknown>,
         ...(current.media_item_id ? { mediaItemId: current.media_item_id as string } : {}),
       });
@@ -234,7 +243,7 @@ export class NoteService {
       // own domain, which is exactly the "not guaranteed" case above. Anything else (a
       // network failure, a genuine PostgREST error, a 23505) is a real failure and must
       // propagate: swallowing it here would hide it, not just make the copy resilient.
-      if ((err as { kind?: string }).kind !== "validation") throw err;
+      if ((err as { kind?: CoreErrorKind }).kind !== "validation") throw err;
       // The copy is the phone's text, and the only place it exists. A copy that lands
       // without its domain beats no copy at all, so drop domain/domain_meta and retry --
       // media_item_id survives, since it is a plain FK with no schema validation attached

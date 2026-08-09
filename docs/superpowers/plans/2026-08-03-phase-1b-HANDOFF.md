@@ -24,7 +24,7 @@
 >   pass, and `updateWithConflictCopy`'s TOCTOU.
 >
 > **STILL OPEN — exactly one thing.** A sync op the server rejects inside a 200 is logged
-> (`connector.ts:139-141`) but still lost: the batch completes either way, so the op leaves
+> (`connector.ts:145-147`) but still lost: the batch completes either way, so the op leaves
 > the device's queue while its row stays in local SQLite. Retrying cannot help — these are
 > validation failures. The fix is a policy choice (dead-letter table? surface to the user?
 > mark the row?) and needs its own design before phase 2 relies on this path.
@@ -1182,7 +1182,7 @@ Each was judged non-blocking at the time and ledgered rather than fixed:
 - **[WRONG — DO NOT ACTION]** `packages/sync` declares `updated_at` on `checkins`;
   `public.checkins` has no such column (migration 00013). **This is false.**
   `00014_phase1c_hardening.sql:19-22` added the column with a `moddatetime` trigger,
-  explicitly for PowerSync ordering. `schema.ts:57` is correct and removing the column would
+  explicitly for PowerSync ordering. `schema.ts:72` is correct and removing the column would
   be the regression. The claim had also leaked into `apps/mobile/src/lib/checkins.ts`; both
   are corrected.
 - **[CLEARED — `43204a2`]** One pending edit base is attached to every queued notes PATCH for

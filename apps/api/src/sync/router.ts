@@ -122,12 +122,20 @@ export async function applySyncOps(
       result.applied.push(op.op_id);
     } catch (err) {
       const error = asCoreError(err);
-      // This catch wraps every table, so this branch reaches all six: checkins.softDelete,
-      // notes.softDelete (via applyNoteOp), and applyGenericOp's DELETE branch below, which
-      // covers tags, note_tags, links and media_items. All six guard the same way -- an
+      // This catch wraps every table, so this branch reaches five tables' worth of a TRUE
+      // DELETE op: checkins.softDelete, and applyGenericOp's DELETE branch below, which covers
+      // tags, note_tags, links and media_items. All five guard the same way -- an
       // UPDATE ... SET deleted_at ... WHERE id = ? AND user_id = ? AND deleted_at IS NULL,
       // `.select().single()` -- so a zero-row match surfaces as the same not_found from any
       // of them.
+      //
+      // notes is NOT among them, deliberately: mobile never sends a real DELETE for a note. It
+      // trashes and restores with an UPDATE (TRASH_NOTE_SQL / RESTORE_NOTE_SQL), and PowerSync
+      // emits every UPDATE as a PATCH, so those two arrive in applyNoteOp's PATCH branch and
+      // never reach `op.op === "DELETE"` here. notes.softDelete/restore carry the identical
+      // not_found-on-replay guard, but the swallow for it lives inside applyNoteOp, next to the
+      // calls it protects, rather than here -- see the comments there for the reasoning, which
+      // this one shares in full.
       //
       // not_found on a DELETE therefore does not mean only "I already deleted this row
       // myself." Zero rows matched is also what a foreign row and a never-created id produce
@@ -145,8 +153,8 @@ export async function applySyncOps(
       // whenever the response is lost, so this is ordinary replay traffic, not a client bug,
       // and `failed` is the only surface that reveals an op that is genuinely stuck. Reporting
       // "not found" for a DELETE the way a PATCH or PUT would -- as a problem needing a
-      // resend -- fills that surface with noise across all six tables and buries the losses
-      // it exists to show. A future change narrowing this (e.g. treating a foreign id as an
+      // resend -- fills that surface with noise across these tables and buries the losses it
+      // exists to show. A future change narrowing this (e.g. treating a foreign id as an
       // authorization failure instead) should be able to find this reasoning and weigh it,
       // not rediscover it from a bug report.
       if (op.op === "DELETE" && error.kind === "not_found") {

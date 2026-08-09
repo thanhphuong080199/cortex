@@ -144,11 +144,17 @@ export class MediaService {
     // for every note op that carries domain_meta.
     if (meta.pending_item === undefined || meta.pending_item === null) return null;
 
-    // Present but malformed IS an error. Returning null for both meant a client that
-    // serialises this field wrongly produced silent no-op linking, with the note written and
-    // nothing anywhere reporting that its media item was never reached. applyNoteOp routes a
-    // throw from here into `media_unresolved`, which exists for exactly this: durable write,
-    // failed resolution, resend cannot help.
+    // Present but malformed IS an error. Returning null for both would produce a silent
+    // no-op link -- but the note-written-and-nothing-reports-it outcome that motivates this
+    // does not reach through the one real client of this field: mobile's media log always
+    // sets domain: 'media' (media-log.ts), so a malformed pending_item on a PUT is already
+    // caught upstream by createWithId's own validateDomainMeta, and the note is never written
+    // at all. What DOES reach here is a pending_item on a note whose domain is something
+    // other than "media" (nothing else ties the two together), or a PATCH, which never
+    // validates domain_meta. This check is defense-in-depth for that narrower path, not the
+    // originally-claimed one, and it still earns its place: applyNoteOp routes a throw from
+    // here into `media_unresolved`, which exists for exactly this -- durable write, failed
+    // resolution, resend cannot help.
     const parsed = pendingMediaItem.safeParse(meta.pending_item);
     if (!parsed.success) {
       throw {
@@ -157,11 +163,6 @@ export class MediaService {
         cause: parsed.error,
       } as const;
     }
-
-    // findOrCreate, not findOrCreateItem: the `created` flag is what makes the
-    // compensation below correct -- an item that existed before this call must be left
-    // alone even when the note update fails.
-    const { item, created } = await this.findOrCreate(parsed.data);
 
     // pending_item is scaffolding, not data: leaving it behind would make the note
     // re-resolve on every subsequent upload.
@@ -173,15 +174,27 @@ export class MediaService {
     // has to read it back. Validated against "media" specifically: resolveNoteMediaLink is
     // only ever reached for a media note, since pending_item is a member of that schema
     // alone.
+    //
+    // Checked BEFORE findOrCreate, not after: `cleaned` is derived from `meta` alone and
+    // does not depend on anything findOrCreate produces, so there is no work here worth
+    // buying with an insert first. Checked after, an invalid meta cost an insert plus a
+    // compensation that can itself fail (compensateIfCreated swallows its own errors) -- and
+    // media_items has no delete surface, so a failed compensation left a permanent orphan for
+    // a note that was always going to be rejected. Checked first, that failure is free: no
+    // item is created for a payload that could never have been stored.
     const check = validateDomainMeta("media", cleaned);
     if (!check.success) {
-      await this.compensateIfCreated(item, created);
       throw {
         kind: "validation",
         message: "domain_meta does not fit domain \"media\"",
         cause: check.error,
       } as const;
     }
+
+    // findOrCreate, not findOrCreateItem: the `created` flag is what makes the
+    // compensation below correct -- an item that existed before this call must be left
+    // alone even when the note update fails.
+    const { item, created } = await this.findOrCreate(parsed.data);
 
     const { data, error } = await this.client.from("notes")
       .update({ media_item_id: item.id, domain_meta: cleaned })
