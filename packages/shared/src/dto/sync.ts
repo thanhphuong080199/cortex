@@ -23,8 +23,9 @@ export const syncOp = z.object({
   op_id: z.string().min(1).max(64),
   op: syncOpKind,
   table: z.enum(SYNC_TABLES),
-  // Zod v4 top-level form, matching tags.ts and media.ts. The chained z.string().uuid()
-  // still works but is deprecated and would leave two styles in one package.
+  // Zod v4 top-level form, matching tags.ts. (media.ts uses z.iso.date(), a different
+  // top-level constructor for a different type -- not this one.) The chained
+  // z.string().uuid() still works but is deprecated and would leave two styles in one package.
   id: z.uuid(),
   data: z.record(z.string(), z.unknown()).nullish(),
   /**

@@ -86,6 +86,29 @@ describe("crudEntryToSyncOp", () => {
     const op = crudEntryToSyncOp({ clientId: 8, op: "PATCH", table: "tags", id } as never);
     expect(op.data).toEqual({});
   });
+
+  /**
+   * The connector keys bases by note id and hands the same one to every op for that note. A
+   * lifecycle change is a notes PATCH too, so it collected the body's base -- and the server
+   * reads a base as "this edit was based on that revision", manufacturing a conflict copy for
+   * a change that never touched the body.
+   */
+  it("never attaches a base to a PATCH that does not change the body", () => {
+    const op = crudEntryToSyncOp(
+      { clientId: 9, op: "PATCH", table: "notes", id, opData: { lifecycle: "archived" } } as never,
+      base,
+    );
+    expect(op.base_content).toBeUndefined();
+    expect(Object.hasOwn(op, "base_content")).toBe(false);
+  });
+
+  it("still attaches a base when the body changes alongside other columns", () => {
+    const op = crudEntryToSyncOp(
+      { clientId: 10, op: "PATCH", table: "notes", id, opData: { content: "x", lifecycle: "active" } } as never,
+      base,
+    );
+    expect(op.base_content).toBe(base);
+  });
 });
 
 /**
@@ -351,9 +374,10 @@ describe("ApiConnector.uploadData", () => {
   });
 
   /**
-   * Pairs with the `[powersync]` status log in powersync.ts -- the STILL OPEN question is
-   * whether a completed upload is what nudges a stalled download stream, and that is
-   * unanswerable if an upload never logs anything on success.
+   * The `[powersync] upload complete` line is the only signal an upload leaves, and the status
+   * line in powersync.ts is the only signal the download side leaves. Correlating them is how
+   * a sync problem gets localised to a direction at all, so the log is asserted rather than
+   * left to drift.
    */
   it("logs a line on a successful upload, for correlation with sync status transitions", async () => {
     const db = database([patch]);
@@ -374,5 +398,25 @@ describe("ApiConnector.uploadData", () => {
     // An unreadable body is not a reason to strand the queue -- the server accepted the batch.
     await expect(new ApiConnector().uploadData(db)).resolves.toBeUndefined();
     expect(complete).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * The shape the unit tests above cannot reach: a body edit and a lifecycle change both
+   * queued for ONE note before an upload. The base is read once, keyed by note id, and handed
+   * to every op with that id -- so the archive op arrived at the server carrying the body's
+   * base. A test with a single queued op passes whether or not that is fixed.
+   */
+  it("gives the base only to the op that changed the body, when both are queued", async () => {
+    const db = database([
+      { clientId: 1, op: "PATCH", table: "notes", id: noteId, opData: { content: "x" } },
+      { clientId: 2, op: "PATCH", table: "notes", id: noteId, opData: { lifecycle: "archived" } },
+    ]);
+    getOptional.mockResolvedValue({ base_content: "the body this edit started from" });
+
+    await new ApiConnector().uploadData(db);
+
+    const body = JSON.parse((fetchMock.mock.calls[0] as never[])[1]!["body"] as string);
+    expect(body.ops[0].base_content).toBe("the body this edit started from");
+    expect(Object.hasOwn(body.ops[1], "base_content")).toBe(false);
   });
 });
