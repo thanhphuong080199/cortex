@@ -32,10 +32,16 @@ export function crudEntryToSyncOp(entry: CrudEntry, baseContent?: string): SyncO
   // guard matters as much as the `table` half: a base on a PUT would tell the server a
   // full-row overwrite was based on a revision, manufacturing a conflict copy for a create.
   //
+  // The `content` half matters for the same reason at one remove. `uploadData` keys bases by
+  // NOTE ID, so every queued PATCH for that note is offered the same one -- and a lifecycle
+  // change is a notes PATCH. Attached to it, the server compares a base against a body the op
+  // never touched and manufactures a conflict copy for an archive.
+  //
   // `!== undefined`, NOT truthiness: the base is a body now, and "" is a real one -- a note
   // edited down to nothing and then edited again. Dropped, it would reach the server as "no
   // base at all" and apply unconditionally, which is the last-write-wins this exists to stop.
-  if (baseContent !== undefined && entry.table === "notes" && entry.op === "PATCH") {
+  const changesBody = entry.opData !== undefined && "content" in entry.opData;
+  if (baseContent !== undefined && entry.table === "notes" && entry.op === "PATCH" && changesBody) {
     op.base_content = baseContent;
   }
   return op;
@@ -139,9 +145,12 @@ export class ApiConnector implements PowerSyncBackendConnector {
     if (result?.failed?.length) {
       console.error("sync upload: ops rejected by the server", result.failed);
     }
-    // Pairs with the `[powersync]` status log in powersync.ts: the STILL OPEN question is
-    // whether a completed upload is what nudges a stalled download stream, so an upload that
-    // never logs makes that impossible to see in the same trace.
+    // Pairs with the `[powersync]` status line in powersync.ts. Kept permanently: this is the
+    // only place an upload announces itself, so without it a device log shows sync status
+    // transitions with nothing to correlate them against. (It was added to investigate a
+    // download stream that appeared stalled; that turned out to be the zero-height list and
+    // the awaited connect(), both fixed, and 03-server-to-device.yaml now covers the
+    // direction in CI. The log stays because correlation is useful regardless.)
     console.log(`[powersync] upload complete: ${batch.crud.length} op(s)`);
 
     await batch.complete();

@@ -27,10 +27,16 @@ export const SET_LIFECYCLE_SQL = `UPDATE notes SET lifecycle = ?, updated_at = $
  * Soft delete, never a real one: the row has to survive so the deletion replicates and so the
  * trash view has something to show. `deleted_at` and `updated_at` are stamped together — a
  * delete that does not move `updated_at` is a change the server cannot order against others.
+ *
+ * The `IS NULL` / `IS NOT NULL` guards make each statement a no-op against a row already in
+ * the target state, matching `NoteService.softDelete` and `NoteService.restore`. Without them
+ * a repeat tap re-stamps both columns, and since PowerSync emits every local UPDATE as a
+ * PATCH, that is a server round trip for nothing plus an `updated_at` that reorders the row
+ * against edits that really happened.
  */
-export const TRASH_NOTE_SQL = `UPDATE notes SET deleted_at = ${NOW_ISO}, updated_at = ${NOW_ISO} WHERE id = ?`;
+export const TRASH_NOTE_SQL = `UPDATE notes SET deleted_at = ${NOW_ISO}, updated_at = ${NOW_ISO} WHERE id = ? AND deleted_at IS NULL`;
 
-export const RESTORE_NOTE_SQL = `UPDATE notes SET deleted_at = NULL, updated_at = ${NOW_ISO} WHERE id = ?`;
+export const RESTORE_NOTE_SQL = `UPDATE notes SET deleted_at = NULL, updated_at = ${NOW_ISO} WHERE id = ? AND deleted_at IS NOT NULL`;
 
 export async function updateNoteContent(
   db: NoteEditTarget,

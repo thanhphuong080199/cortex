@@ -501,4 +501,158 @@ describe("POST /sync/upload", () => {
     // needs its tombstone.
     expect(data!.deleted_at).not.toBeNull();
   });
+
+  /**
+   * `failed` is the ONLY surface that reveals a genuinely lost op -- the batch completes
+   * either way, so an op reported there has left the device's queue for good. Filling it with
+   * harmless replays is what makes a real loss easy to miss.
+   *
+   * PowerSync resends a batch whenever the response is lost, so a second DELETE for a row it
+   * already tombstoned is ordinary traffic, not a client bug. The row is in exactly the state
+   * the op asked for.
+   *
+   * checkins because that is the table mobile's undo really deletes; the notes DELETE branch
+   * routes through the same softDelete and the same `is deleted_at null` guard.
+   *
+   * The FIRST delete succeeds with or without this fix; only the second one discriminates.
+   */
+  it("reports an already-tombstoned DELETE as applied, not failed", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "checkins", id, data: { mood: 2 } }],
+    }).expect(201);
+
+    const first = await post(alice.token, {
+      ops: [{ op_id: "2", op: "DELETE", table: "checkins", id }],
+    }).expect(201);
+    expect(first.body.applied).toEqual(["2"]);
+
+    // The replay. Same op, same row, response lost the first time round.
+    const second = await post(alice.token, {
+      ops: [{ op_id: "3", op: "DELETE", table: "checkins", id }],
+    }).expect(201);
+    expect(second.body.failed).toEqual([]);
+    expect(second.body.applied).toEqual(["3"]);
+  });
+
+  /**
+   * The checkins case above exercises applySyncOps' own DELETE branch. tags has no service of
+   * its own -- it goes through applyGenericOp instead, a separate code path that reaches the
+   * same `.eq(...).is("deleted_at", null).select("id").single()` guard and therefore the same
+   * not_found on a replay. Same fix, different branch: this covers the other one, so the
+   * generic writer's DELETE path (tags, note_tags, links, media_items) is not left untested.
+   */
+  it("reports an already-tombstoned tags DELETE (the generic writer path) as applied, not failed", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "tags", id, data: { name: `sync-tag-${id}` } }],
+    }).expect(201);
+
+    const first = await post(alice.token, {
+      ops: [{ op_id: "2", op: "DELETE", table: "tags", id }],
+    }).expect(201);
+    expect(first.body.applied).toEqual(["2"]);
+
+    // The replay. Same op, same row, response lost the first time round.
+    const second = await post(alice.token, {
+      ops: [{ op_id: "3", op: "DELETE", table: "tags", id }],
+    }).expect(201);
+    expect(second.body.failed).toEqual([]);
+    expect(second.body.applied).toEqual(["3"]);
+  });
+
+  /**
+   * The case the two DELETE-replay tests above do NOT cover: mobile never sends a true DELETE
+   * for a note. `trashNote` issues `UPDATE notes SET deleted_at = ...` (TRASH_NOTE_SQL), and
+   * PowerSync emits every UPDATE as a PATCH -- so a trashed note reaches applyNoteOp's PATCH
+   * branch and `notes.softDelete`, never the `op.op === "DELETE"` guard in applySyncOps. A
+   * resent trash PATCH replays against a row this call already tombstoned; softDelete's
+   * `.is("deleted_at", null)` guard then matches zero rows and throws not_found, the same
+   * benign-replay shape the DELETE branch's comment already accepts, reached through PATCH
+   * instead. checkins/tags above do NOT exercise this: this is the common case (notes), those
+   * are the rare one (a true device DELETE only exists for checkins).
+   */
+  it("reports an already-tombstoned notes trash PATCH as applied, not failed", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "to be trashed" } }],
+    }).expect(201);
+
+    const trashOp = {
+      op_id: "2", op: "PATCH", table: "notes", id,
+      data: { deleted_at: "2026-08-03T10:00:00.000Z" },
+    };
+    const first = await post(alice.token, { ops: [trashOp] }).expect(201);
+    expect(first.body.applied).toEqual(["2"]);
+
+    // The replay. Same op, same row, response lost the first time round.
+    const second = await post(alice.token, {
+      ops: [{ ...trashOp, op_id: "3" }],
+    }).expect(201);
+    expect(second.body.failed).toEqual([]);
+    expect(second.body.applied).toEqual(["3"]);
+  });
+
+  /**
+   * Restore's mirror of the trash case above. `restoreNote` is also a PATCH
+   * (RESTORE_NOTE_SQL), so a resend replays against a row this call already restored;
+   * `notes.restore`'s `.not("deleted_at", "is", null)` guard then matches zero rows and throws
+   * not_found the same way softDelete's guard does above.
+   */
+  it("reports an already-restored notes PATCH as applied, not failed", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "there and back" } }],
+    }).expect(201);
+    await post(alice.token, {
+      ops: [{ op_id: "2", op: "PATCH", table: "notes", id,
+              data: { deleted_at: "2026-08-03T10:00:00.000Z" } }],
+    }).expect(201);
+
+    const restoreOp = { op_id: "3", op: "PATCH", table: "notes", id, data: { deleted_at: null } };
+    const first = await post(alice.token, { ops: [restoreOp] }).expect(201);
+    expect(first.body.applied).toEqual(["3"]);
+
+    // The replay. Same op, same row, response lost the first time round.
+    const second = await post(alice.token, {
+      ops: [{ ...restoreOp, op_id: "4" }],
+    }).expect(201);
+    expect(second.body.failed).toEqual([]);
+    expect(second.body.applied).toEqual(["4"]);
+  });
+
+  /**
+   * The device-shaped write the schema change exists to make possible. `source` and `status`
+   * are present here because the local schema now declares them; before it did, a real device
+   * could not have produced this row at all.
+   *
+   * This one does NOT discriminate on its own -- it sends `source` explicitly, so it passes
+   * either way. It is the contract half; `declares every column note_tags requires` in
+   * packages/sync/src/schema.test.ts is the half that fails without the fix.
+   */
+  it("accepts a note_tags PUT shaped the way the device schema declares it", async () => {
+    const noteId = uuid();
+    const tagId = uuid();
+    await post(alice.token, {
+      ops: [
+        { op_id: "1", op: "PUT", table: "notes", id: noteId, data: { content: "tagged" } },
+        { op_id: "2", op: "PUT", table: "tags", id: tagId, data: { name: `nt-${tagId}` } },
+      ],
+    }).expect(201);
+
+    const res = await post(alice.token, {
+      ops: [{
+        op_id: "3", op: "PUT", table: "note_tags", id: uuid(),
+        data: {
+          note_id: noteId, tag_id: tagId,
+          // `source` has a check constraint of ('user','ai') and NO default; `status` defaults
+          // to 'accepted' but the device sends it too, because the column is declared.
+          source: "user", status: "accepted", confidence: null,
+        },
+      }],
+    }).expect(201);
+
+    expect(res.body.failed).toEqual([]);
+    expect(res.body.applied).toEqual(["3"]);
+  });
 });

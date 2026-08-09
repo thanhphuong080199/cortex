@@ -35,8 +35,18 @@ const tags = new Table({
   name: column.text, created_at: column.text, deleted_at: column.text,
 });
 
+/**
+ * `source`, `status` and `confidence` are declared even though nothing writes them yet.
+ *
+ * PowerSync's local schema is a VIEW, so an omitted column is invisible on the device rather
+ * than an error -- and `note_tags.source` is `text NOT NULL` with no default
+ * (00003_organization.sql:20). A device-originated row without it is a 23502 from Postgres
+ * that nothing on the device can explain. Phase 2's auto-tag accept/reject is the first
+ * client writer of this table, so the trap is disarmed before the phase that springs it.
+ */
 const note_tags = new Table({
   note_id: column.text, tag_id: column.text,
+  source: column.text, status: column.text, confidence: column.real,
   created_at: column.text, deleted_at: column.text,
 });
 
@@ -48,7 +58,12 @@ const links = new Table({
 
 const media_items = new Table({
   kind: column.text, title: column.text, year: column.integer,
-  creator: column.text, external_meta: column.text,
+  creator: column.text,
+  // jsonb arrives as a JSON string, same as notes.domain_meta above. Postgres declares this
+  // `jsonb not null default '{}'` (00013_life_domains.sql:20), so a device write must send a
+  // serialised object -- there is no readDomainMeta equivalent for this column, and a client
+  // that sends a bare string would land the JSON string rather than the object.
+  external_meta: column.text,
   created_at: column.text, deleted_at: column.text,
 });
 

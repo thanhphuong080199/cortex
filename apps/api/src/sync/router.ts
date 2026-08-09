@@ -121,7 +121,47 @@ export async function applySyncOps(
       }
       result.applied.push(op.op_id);
     } catch (err) {
-      result.failed.push({ op_id: op.op_id, ...asCoreError(err) });
+      const error = asCoreError(err);
+      // This catch wraps every table, so this branch reaches five tables' worth of a TRUE
+      // DELETE op: checkins.softDelete, and applyGenericOp's DELETE branch below, which covers
+      // tags, note_tags, links and media_items. All five guard the same way -- an
+      // UPDATE ... SET deleted_at ... WHERE id = ? AND user_id = ? AND deleted_at IS NULL,
+      // `.select().single()` -- so a zero-row match surfaces as the same not_found from any
+      // of them.
+      //
+      // notes is NOT among them, deliberately: mobile never sends a real DELETE for a note. It
+      // trashes and restores with an UPDATE (TRASH_NOTE_SQL / RESTORE_NOTE_SQL), and PowerSync
+      // emits every UPDATE as a PATCH, so those two arrive in applyNoteOp's PATCH branch and
+      // never reach `op.op === "DELETE"` here. notes.softDelete/restore carry the identical
+      // not_found-on-replay guard, but the swallow for it lives inside applyNoteOp, next to the
+      // calls it protects, rather than here -- see the comments there for the reasoning, which
+      // this one shares in full.
+      //
+      // not_found on a DELETE therefore does not mean only "I already deleted this row
+      // myself." Zero rows matched is also what a foreign row and a never-created id produce
+      // at this same guard, and the three are indistinguishable here: user_id and deleted_at
+      // are ANDed into one filter, so nothing downstream of PostgREST's empty result can say
+      // which one happened. That conflation is not new to this branch -- see
+      // TagService.assertOwnedAndLive (organize/service.ts): "Missing, foreign and
+      // soft-deleted rows all surface as not_found so they stay indistinguishable" is already
+      // how this codebase treats the ambiguity, deliberately, elsewhere.
+      //
+      // applied is still the right answer for all three, not just the tombstoned-by-me case:
+      // a DELETE asks for a row to be gone, and in every one of the three it already is, or
+      // it is not this user's to make gone. Resending cannot improve on any of them -- there
+      // is no data to reconcile, only an absence to (re)confirm. PowerSync resends a batch
+      // whenever the response is lost, so this is ordinary replay traffic, not a client bug,
+      // and `failed` is the only surface that reveals an op that is genuinely stuck. Reporting
+      // "not found" for a DELETE the way a PATCH or PUT would -- as a problem needing a
+      // resend -- fills that surface with noise across these tables and buries the losses it
+      // exists to show. A future change narrowing this (e.g. treating a foreign id as an
+      // authorization failure instead) should be able to find this reasoning and weigh it,
+      // not rediscover it from a bug report.
+      if (op.op === "DELETE" && error.kind === "not_found") {
+        result.applied.push(op.op_id);
+        continue;
+      }
+      result.failed.push({ op_id: op.op_id, ...error });
     }
   }
   return result;
@@ -163,7 +203,21 @@ async function applyNoteOp(
     // live rows: patch-then-restore leaves the edit rejected as not_found, and delete-then-patch
     // does the same. Ordering it this way makes the row live for exactly as long as the patch
     // needs it, in both directions.
-    if (data.deleted_at === null) await notes.restore(op.id);
+    // A restore is a PATCH, not a DELETE, so it never reaches the DELETE branch's not_found
+    // handling in applySyncOps' catch below -- that branch only ever sees `op.op === "DELETE"`,
+    // and mobile issues restore as `UPDATE notes SET deleted_at = NULL ...` (RESTORE_NOTE_SQL),
+    // which PowerSync turns into a PATCH. A resent restore replays against a row this call
+    // already un-tombstoned; `restore`'s own guard (`.not("deleted_at", "is", null)`) then
+    // matches zero rows and throws not_found -- the same already-done/foreign/never-existed
+    // conflation the DELETE branch's comment accepts, reached through this guard instead. Only
+    // not_found is swallowed: anything else is a real failure and must still reach `failed`.
+    if (data.deleted_at === null) {
+      try {
+        await notes.restore(op.id);
+      } catch (err) {
+        if (asCoreError(err).kind !== "not_found") throw err;
+      }
+    }
 
     const patch = {
       ...(data.content !== undefined ? { content: String(data.content) } : {}),
@@ -184,7 +238,23 @@ async function applyNoteOp(
       }
     }
 
-    if (data.deleted_at !== undefined && data.deleted_at !== null) await notes.softDelete(op.id);
+    // Mirror of the restore guard above, and see the DELETE branch's comment below in
+    // applySyncOps for the reasoning this inherits in full: trash arrives HERE, as a PATCH,
+    // because mobile trashes with `UPDATE notes SET deleted_at = ...` (TRASH_NOTE_SQL) and
+    // PowerSync emits every UPDATE as a PATCH -- the DELETE guard never sees it, which is why
+    // this table needed its own not_found handling instead of inheriting the DELETE branch's.
+    // A resent trash PATCH replays against a row this call already tombstoned; softDelete's
+    // `.is("deleted_at", null)` guard then matches zero rows and throws not_found, the same
+    // benign-replay shape as the DELETE branch, just reached through PATCH. Only not_found is
+    // swallowed: a not_found from updateWithConflictCopy earlier in this function is a genuine
+    // loss and must still propagate to `failed`.
+    if (data.deleted_at !== undefined && data.deleted_at !== null) {
+      try {
+        await notes.softDelete(op.id);
+      } catch (err) {
+        if (asCoreError(err).kind !== "not_found") throw err;
+      }
+    }
   }
 
   // Offline media logs arrive as ordinary notes carrying pending_item; identity is
