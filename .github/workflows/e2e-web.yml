@@ -4,8 +4,9 @@ name: E2E Web
 # APK build behind this and the mobile suite.
 #
 # This suite is not the slow one -- it lands in about three minutes, against the mobile
-# suite's thirty. It moved anyway, so there is ONE answer to "where does E2E run" rather than
-# one per suite. `workflow_dispatch` keeps it runnable by hand against any branch.
+# suite's ~40-55 minutes cold (~20-28 warm). It moved anyway, so there is ONE answer to "where
+# does E2E run" rather than one per suite. `workflow_dispatch` keeps it runnable by hand
+# against any branch.
 on:
   workflow_call:
   workflow_dispatch:

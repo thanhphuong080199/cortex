@@ -37,7 +37,18 @@ the result checks, `always()` alone would ship an APK from a commit whose suites
 gate` uses the same idiom for the same reason.
 
 **`workflow_dispatch` on `android-apk.yml` is load-bearing.** It is how an APK gets built from
-a branch before merge; a manual run of `post-merge.yml` would drag 30 minutes of E2E with it.
+a branch before merge. `post-merge.yml` itself has no dispatch trigger and cannot be run by
+hand at all — if the APK job's body had been folded into the orchestrator instead of kept as
+its own workflow, the only way to get a manual APK build back would have been adding
+`workflow_dispatch` to `post-merge.yml`, dragging both E2E suites (the mobile one alone
+~40-55 minutes cold, ~20-28 warm) into every by-hand run.
+
+**`post-merge.yml` queues rather than cancels.** Its concurrency group is keyed only on
+`github.ref`, which for a push to `main` is always `refs/heads/main` — every push shares one
+group. Cancelling would let a trivial follow-up commit kill an in-flight APK build and then,
+touching no APK-relevant paths itself, build nothing either: two commits, zero APKs. Runs
+queue instead, so two merges close together mean the second waits; that is deliberate, not an
+oversight.
 
 ---
 
@@ -81,7 +92,7 @@ Two details in that job are not decoration:
   failing it, and GitHub counts a skipped required check as satisfied. The gate would wave
   through exactly the runs it exists to stop.
 - **The gate deliberately excludes the E2E workflows.** Neither runs on `pull_request` at all
-  (see "Where each check runs" below) — requiring either is the same never-reporting trap in a
+  (see "Where each check runs" above) — requiring either is the same never-reporting trap in a
   different disguise. A workflow that does not trigger on every PR must never be a required
   check, directly or through a gate.
 

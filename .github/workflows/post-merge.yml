@@ -16,7 +16,11 @@ on:
 
 concurrency:
   group: post-merge-${{ github.ref }}
-  cancel-in-progress: true
+  # NOT cancel-in-progress. Every push to main shares this group, so cancelling would let a
+  # docs-only commit kill the in-flight APK build of the commit before it -- and then build
+  # nothing itself, because its own apk filter is false. Neither commit produces an APK.
+  # Queueing is the cost of never silently losing one.
+  cancel-in-progress: false
 
 jobs:
   # The path filters that used to live in each workflow's `on.push.paths`. They had to move:
