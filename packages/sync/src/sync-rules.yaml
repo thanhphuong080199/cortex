@@ -33,4 +33,10 @@ streams:
       - SELECT * FROM note_tags   WHERE user_id = auth.user_id()
       - SELECT * FROM links       WHERE user_id = auth.user_id()
       - SELECT * FROM media_items WHERE user_id = auth.user_id()
-      - SELECT * FROM checkins    WHERE user_id = auth.user_id()
+      # `deleted_at is null` on checkins ONLY, and the asymmetry with notes is deliberate.
+      #
+      # Undo is a local hard DELETE (apps/mobile/src/lib/checkins.ts) against a server-side
+      # SOFT delete. Unfiltered, the tombstone replicates back down and the check-in the user
+      # undid reappears on the device. notes must NOT gain this filter: the device renders a
+      # trash view and needs the tombstones to render it.
+      - SELECT * FROM checkins    WHERE user_id = auth.user_id() AND deleted_at IS NULL
