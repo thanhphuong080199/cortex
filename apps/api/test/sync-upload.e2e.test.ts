@@ -560,4 +560,39 @@ describe("POST /sync/upload", () => {
     expect(second.body.failed).toEqual([]);
     expect(second.body.applied).toEqual(["3"]);
   });
+
+  /**
+   * The device-shaped write the schema change exists to make possible. `source` and `status`
+   * are present here because the local schema now declares them; before it did, a real device
+   * could not have produced this row at all.
+   *
+   * This one does NOT discriminate on its own -- it sends `source` explicitly, so it passes
+   * either way. It is the contract half; `declares every column note_tags requires` in
+   * packages/sync/src/schema.test.ts is the half that fails without the fix.
+   */
+  it("accepts a note_tags PUT shaped the way the device schema declares it", async () => {
+    const noteId = uuid();
+    const tagId = uuid();
+    await post(alice.token, {
+      ops: [
+        { op_id: "1", op: "PUT", table: "notes", id: noteId, data: { content: "tagged" } },
+        { op_id: "2", op: "PUT", table: "tags", id: tagId, data: { name: `nt-${tagId}` } },
+      ],
+    }).expect(201);
+
+    const res = await post(alice.token, {
+      ops: [{
+        op_id: "3", op: "PUT", table: "note_tags", id: uuid(),
+        data: {
+          note_id: noteId, tag_id: tagId,
+          // `source` has a check constraint of ('user','ai') and NO default; `status` defaults
+          // to 'accepted' but the device sends it too, because the column is declared.
+          source: "user", status: "accepted", confidence: null,
+        },
+      }],
+    }).expect(201);
+
+    expect(res.body.failed).toEqual([]);
+    expect(res.body.applied).toEqual(["3"]);
+  });
 });
