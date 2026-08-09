@@ -562,6 +562,66 @@ describe("POST /sync/upload", () => {
   });
 
   /**
+   * The case the two DELETE-replay tests above do NOT cover: mobile never sends a true DELETE
+   * for a note. `trashNote` issues `UPDATE notes SET deleted_at = ...` (TRASH_NOTE_SQL), and
+   * PowerSync emits every UPDATE as a PATCH -- so a trashed note reaches applyNoteOp's PATCH
+   * branch and `notes.softDelete`, never the `op.op === "DELETE"` guard in applySyncOps. A
+   * resent trash PATCH replays against a row this call already tombstoned; softDelete's
+   * `.is("deleted_at", null)` guard then matches zero rows and throws not_found, the same
+   * benign-replay shape the DELETE branch's comment already accepts, reached through PATCH
+   * instead. checkins/tags above do NOT exercise this: this is the common case (notes), those
+   * are the rare one (a true device DELETE only exists for checkins).
+   */
+  it("reports an already-tombstoned notes trash PATCH as applied, not failed", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "to be trashed" } }],
+    }).expect(201);
+
+    const trashOp = {
+      op_id: "2", op: "PATCH", table: "notes", id,
+      data: { deleted_at: "2026-08-03T10:00:00.000Z" },
+    };
+    const first = await post(alice.token, { ops: [trashOp] }).expect(201);
+    expect(first.body.applied).toEqual(["2"]);
+
+    // The replay. Same op, same row, response lost the first time round.
+    const second = await post(alice.token, {
+      ops: [{ ...trashOp, op_id: "3" }],
+    }).expect(201);
+    expect(second.body.failed).toEqual([]);
+    expect(second.body.applied).toEqual(["3"]);
+  });
+
+  /**
+   * Restore's mirror of the trash case above. `restoreNote` is also a PATCH
+   * (RESTORE_NOTE_SQL), so a resend replays against a row this call already restored;
+   * `notes.restore`'s `.not("deleted_at", "is", null)` guard then matches zero rows and throws
+   * not_found the same way softDelete's guard does above.
+   */
+  it("reports an already-restored notes PATCH as applied, not failed", async () => {
+    const id = uuid();
+    await post(alice.token, {
+      ops: [{ op_id: "1", op: "PUT", table: "notes", id, data: { content: "there and back" } }],
+    }).expect(201);
+    await post(alice.token, {
+      ops: [{ op_id: "2", op: "PATCH", table: "notes", id,
+              data: { deleted_at: "2026-08-03T10:00:00.000Z" } }],
+    }).expect(201);
+
+    const restoreOp = { op_id: "3", op: "PATCH", table: "notes", id, data: { deleted_at: null } };
+    const first = await post(alice.token, { ops: [restoreOp] }).expect(201);
+    expect(first.body.applied).toEqual(["3"]);
+
+    // The replay. Same op, same row, response lost the first time round.
+    const second = await post(alice.token, {
+      ops: [{ ...restoreOp, op_id: "4" }],
+    }).expect(201);
+    expect(second.body.failed).toEqual([]);
+    expect(second.body.applied).toEqual(["4"]);
+  });
+
+  /**
    * The device-shaped write the schema change exists to make possible. `source` and `status`
    * are present here because the local schema now declares them; before it did, a real device
    * could not have produced this row at all.

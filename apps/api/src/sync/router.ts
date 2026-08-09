@@ -195,7 +195,21 @@ async function applyNoteOp(
     // live rows: patch-then-restore leaves the edit rejected as not_found, and delete-then-patch
     // does the same. Ordering it this way makes the row live for exactly as long as the patch
     // needs it, in both directions.
-    if (data.deleted_at === null) await notes.restore(op.id);
+    // A restore is a PATCH, not a DELETE, so it never reaches the DELETE branch's not_found
+    // handling in applySyncOps' catch below -- that branch only ever sees `op.op === "DELETE"`,
+    // and mobile issues restore as `UPDATE notes SET deleted_at = NULL ...` (RESTORE_NOTE_SQL),
+    // which PowerSync turns into a PATCH. A resent restore replays against a row this call
+    // already un-tombstoned; `restore`'s own guard (`.not("deleted_at", "is", null)`) then
+    // matches zero rows and throws not_found -- the same already-done/foreign/never-existed
+    // conflation the DELETE branch's comment accepts, reached through this guard instead. Only
+    // not_found is swallowed: anything else is a real failure and must still reach `failed`.
+    if (data.deleted_at === null) {
+      try {
+        await notes.restore(op.id);
+      } catch (err) {
+        if (asCoreError(err).kind !== "not_found") throw err;
+      }
+    }
 
     const patch = {
       ...(data.content !== undefined ? { content: String(data.content) } : {}),
@@ -216,7 +230,23 @@ async function applyNoteOp(
       }
     }
 
-    if (data.deleted_at !== undefined && data.deleted_at !== null) await notes.softDelete(op.id);
+    // Mirror of the restore guard above, and see the DELETE branch's comment below in
+    // applySyncOps for the reasoning this inherits in full: trash arrives HERE, as a PATCH,
+    // because mobile trashes with `UPDATE notes SET deleted_at = ...` (TRASH_NOTE_SQL) and
+    // PowerSync emits every UPDATE as a PATCH -- the DELETE guard never sees it, which is why
+    // this table needed its own not_found handling instead of inheriting the DELETE branch's.
+    // A resent trash PATCH replays against a row this call already tombstoned; softDelete's
+    // `.is("deleted_at", null)` guard then matches zero rows and throws not_found, the same
+    // benign-replay shape as the DELETE branch, just reached through PATCH. Only not_found is
+    // swallowed: a not_found from updateWithConflictCopy earlier in this function is a genuine
+    // loss and must still propagate to `failed`.
+    if (data.deleted_at !== undefined && data.deleted_at !== null) {
+      try {
+        await notes.softDelete(op.id);
+      } catch (err) {
+        if (asCoreError(err).kind !== "not_found") throw err;
+      }
+    }
   }
 
   // Offline media logs arrive as ordinary notes carrying pending_item; identity is
