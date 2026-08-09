@@ -16,7 +16,7 @@
 >   Task 12 of that same plan, which ships as a separate PR off `main` and has not landed yet;
 >   it is marked `[CLEARED — in PR 2]` rather than given a commit that does not exist.
 > - **One ledger entry was WRONG and is marked so**, not actioned: `packages/sync` declaring
->   `updated_at` on `checkins` is correct, because `00014:19-21` added the column.
+>   `updated_at` on `checkins` is correct, because `00014:19-22` added the column.
 > - **One ledger entry has EXPIRED** on its own: the `CheckinService.createWithId` /
 >   `NoteService.createWithId` `deleted_at`-filtering asymmetry it named no longer exists —
 >   round 2 finding #9 changed `NoteService` to the side `CheckinService` was already on.
@@ -349,7 +349,7 @@ identity.
 
 **A ledgered item below is WRONG and must not be actioned.** The deferred list says
 `packages/sync` declares `updated_at` on `checkins` while `public.checkins` has no such
-column. `00014_phase1c_hardening.sql:20-22` added it, with a `moddatetime` trigger,
+column. `00014_phase1c_hardening.sql:19-22` added it, with a `moddatetime` trigger,
 explicitly for PowerSync ordering. `schema.ts` is correct; removing the column would be the
 regression.
 
@@ -1181,7 +1181,7 @@ Each was judged non-blocking at the time and ledgered rather than fixed:
   key; the per-key queue covers it structurally but nothing proves it.
 - **[WRONG — DO NOT ACTION]** `packages/sync` declares `updated_at` on `checkins`;
   `public.checkins` has no such column (migration 00013). **This is false.**
-  `00014_phase1c_hardening.sql:19-21` added the column with a `moddatetime` trigger,
+  `00014_phase1c_hardening.sql:19-22` added the column with a `moddatetime` trigger,
   explicitly for PowerSync ordering. `schema.ts:57` is correct and removing the column would
   be the regression. The claim had also leaked into `apps/mobile/src/lib/checkins.ts`; both
   are corrected.
