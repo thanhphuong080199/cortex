@@ -8,7 +8,7 @@
 
 ## 0. One-paragraph summary
 
-Cortex is an offline-first, multi-user personal knowledge system: frictionless capture from mobile/web/Telegram/email/voice, automatic organization (AI tagging, semantic linking, PARA-ish structure), retrieval by meaning (hybrid semantic + keyword search, RAG chat with citations and temporal awareness), synthesis (weekly digests, contradiction detection, auto-drafting), task extraction with spaced-repetition resurfacing, and — the differentiator — a **curated, user-auditable long-term memory layer** that builds an evolving model of the user and personalizes every other subsystem over time. Stack: Expo + Next.js clients sharing TypeScript packages in a Turborepo monorepo; NestJS backend on Railway/Fly; Supabase (Postgres + pgvector + Auth + Storage) with RLS; PowerSync for offline-first sync; Claude API for reasoning; Voyage AI for embeddings; an MCP server exposing the same core services to Claude Desktop/Code.
+Cortex is an offline-first, multi-user personal knowledge system: frictionless capture from mobile/web/Telegram/email/voice, automatic organization (AI tagging, semantic linking, PARA-ish structure), retrieval by meaning (hybrid semantic + keyword search, RAG chat with citations and temporal awareness), synthesis (weekly digests, contradiction detection, auto-drafting), task extraction with spaced-repetition resurfacing, and — the differentiator — a **curated, user-auditable long-term memory layer** that builds an evolving model of the user and personalizes every other subsystem over time. Stack: Expo + Next.js clients sharing TypeScript packages in a Turborepo monorepo; NestJS backend on Railway/Fly; Supabase (Postgres + pgvector + Auth + Storage) with RLS; PowerSync for offline-first sync; Claude API for reasoning; Gemini for embeddings; an MCP server exposing the same core services to Claude Desktop/Code.
 
 ---
 
@@ -74,7 +74,7 @@ These are the places I think your spec is wrong or needs a decision changed. Eve
 
 | # | Your assumption | Problem | Recommendation |
 |---|---|---|---|
-| 1 | "Anthropic Claude API for **embeddings**" | **Anthropic has no embeddings API** — never has. [Anthropic's own docs](https://platform.claude.com/docs/en/build-with-claude/embeddings) recommend **Voyage AI**. | Voyage `voyage-3.5` (1024-dim default; strong MTEB, cheap, 200M free tokens). Store as `vector(1024)` in pgvector. Keep the embedding client behind an interface so you can swap. |
+| 1 | "Anthropic Claude API for **embeddings**" | **Anthropic has no embeddings API** — never has. [Anthropic's own docs](https://platform.claude.com/docs/en/build-with-claude/embeddings) recommend **Voyage AI**. | Gemini `gemini-embedding-001` (1536-dim). Store as `vector(1536)` in pgvector. Keep the embedding client behind an interface so you can swap. |
 | 2 | Claude for "voice transcription" | Claude does not accept audio input. | Add a transcription provider: **Groq-hosted Whisper** (fast, effectively free at your scale) or Deepgram. Behind the same provider-interface pattern. |
 | 3 | "NestJS **or** Supabase Edge Functions" | Edge Functions have wall-clock limits and awkward local DX for long AI pipelines, and you also need somewhere to run the MCP server and job workers. Splitting logic across both creates the drift you're trying to avoid. | **One NestJS service** (API + MCP endpoint + job workers in one deployable) on Railway/Fly. Edge Functions only if you later want ultra-low-latency inbound webhooks — not in the base plan. |
 | 4 | "Maybe hand-rolled CRDT sync (Yjs/Automerge)" | Full evaluation in §8. Short version: CRDTs solve concurrent *intra-document* editing, which is rare for a single author on two devices, and they make your data opaque binary blobs — hostile to SQL, RLS, FTS, embeddings, and every AI pipeline you're building. | **PowerSync** (managed, or self-host the open edition later). Row-level LWW + conflict-copy fallback for note bodies. |
@@ -110,7 +110,7 @@ Model choices for AI workloads (current lineup, verified against the Claude API 
             │ logical replication          │             │
             ▼                              ▼             ▼
 ┌──────────────────────────────┐   ┌─────────────┐ ┌───────────────┐
-│ Supabase Postgres + pgvector │   │ Claude API  │ │ Voyage AI     │
+│ Supabase Postgres + pgvector │   │ Claude API  │ │ Gemini        │
 │ (RLS on every table)         │   │ (Opus 5,    │ │ (embeddings)  │
 │ + Supabase Auth (Google)     │   │  Batches)   │ │ Groq Whisper  │
 │ + Supabase Storage (audio,   │   └─────────────┘ │ (transcribe)  │
@@ -155,7 +155,7 @@ notes (
 note_chunks (            -- SERVER-ONLY (not synced): embedding store
   id, user_id, note_id fk,
   chunk_index int, content text, token_count int,
-  embedding vector(1024),          -- voyage-3.5
+  embedding vector(1536),          -- gemini-embedding-001
   embedding_model text, embedded_at timestamptz,
   unique(note_id, chunk_index)
 )
@@ -247,7 +247,7 @@ memory_facts (
   salience real not null default 0.5,  -- how often it should be injected
   status text not null default 'proposed', -- proposed|active|archived|rejected
   evidence jsonb not null default '[]',    -- [{note_id|chat_id|feedback_id, quote}]
-  embedding vector(1024),          -- for relevance-ranked injection
+  embedding vector(1536),          -- for relevance-ranked injection
   first_observed_at timestamptz, last_confirmed_at timestamptz,
   superseded_by uuid fk nullable,  -- belief-change chain → "your view changed"
   created_at, updated_at, deleted_at
@@ -371,7 +371,7 @@ All inbound channels write to `ingest_inbox` first (idempotency by `(channel, ex
 
 | Job | Trigger | Debounce | What it does |
 |---|---|---|---|
-| `note.enrich` | note created/updated (content changed) | 90s after last edit | chunk → embed (Voyage) → auto-tag suggest → link suggest (cosine > 0.78 against existing chunks, max 5, with rationale) → task extraction. One job, sequential steps, per-step idempotency. |
+| `note.enrich` | note created/updated (content changed) | 90s after last edit | chunk → embed (Gemini) → auto-tag suggest → link suggest (cosine > 0.78 against existing chunks, max 5, with rationale) → task extraction. One job, sequential steps, per-step idempotency. |
 | `attachment.transcribe` | audio attachment uploaded | — | Whisper → write transcript into note → chain `note.enrich`. |
 | `clip.summarize` | web clip ingested | — | Claude summary + key-points prepended to clip note. |
 | `feedback.apply` | feedback_event written | — | update suppression lists / few-shot exemplar pool (§10.4). |
@@ -511,7 +511,7 @@ cortex/
 │  ├─ db/                # Supabase migrations (SQL), typed query helpers, RLS tests
 │  ├─ sync/              # PowerSync schema (client tables), sync-rule source, RN client init (mobile-only)
 │  ├─ shared/            # zod schemas, DTOs, enums, constants
-│  ├─ ai/                # provider clients (Claude, Voyage, Whisper) behind interfaces; prompt-cache-aware helpers
+│  ├─ ai/                # provider clients (Gemini) behind interfaces; prompt-cache-aware helpers
 │  ├─ ui/                # cross-platform primitives where cheap (Tamagui or plain RN + react-native-web); no forced 100% sharing
 │  └─ config/            # tsconfig, eslint, prettier bases
 ├─ supabase/             # config, seed, storage policies
@@ -533,7 +533,7 @@ Each phase ends demoable (GIF-able) and shippable to your own daily use. Order o
 |---|---|---|---|
 | 0 | **Foundations** (wk 1) | Monorepo, Supabase project, schema v1 + RLS, Google OAuth on web+mobile, invite gate, CI (typecheck/lint/RLS tests), deploy skeleton API | Log in on phone + web with the same Google account; cross-user read test provably empty |
 | 1 | **Notes + offline sync** (wk 2-3) | PowerSync wired on mobile (local SQLite); web CRUD via supabase-js + Realtime (online-only); quick capture, edit/list/archive, tags (manual), local FTS on mobile, conflict handling, export endpoint | Airplane-mode capture on phone → edits on web → reconnect → merge; conflict-copy demo |
-| 2 | **AI enrichment v1** (wk 4-5) | pg-boss + `note.enrich`: chunk/embed (Voyage), auto-tag suggestions UI (accept/reject → feedback_events **from day one**), hybrid semantic search, usage ledger | Type "that idea about pricing psychology" → finds the note that never says "pricing psychology" |
+| 2 | **AI enrichment v1** (wk 4-5) | pg-boss + `note.enrich`: chunk/embed (Gemini), auto-tag suggestions UI (accept/reject → feedback_events **from day one**), hybrid semantic search, usage ledger | Type "that idea about pricing psychology" → finds the note that never says "pricing psychology" |
 | 3 | **RAG chat** (wk 6-7) | Chat sessions, hybrid retrieval + recency weighting, streaming answers with tappable citations, offline fallback messaging | "What do I actually think about X?" answered with quotes from own notes |
 | 4 | **Capture everywhere** (wk 8-9) | Web clipper + auto-summary, voice notes + Whisper, Telegram bot, email-in, share sheet | One thought captured 5 ways, all landing enriched in the same inbox |
 | 5 | **Auto-linking + organize v2** (wk 10) | Semantic link suggestions with rationale, related-notes panel, "you wrote about this before" on create, PARA suggestions + trust dial | Create note → 3 relevant old notes surface unprompted |
@@ -553,6 +553,16 @@ clients" should be read that way until an iOS phase is specced. Phase 1b also na
 §6.7's sync scope to the tables that have services and UI, and adds §15's device-security
 controls.
 
+**Amendment 2026-08-07 — the AI provider is Gemini, everywhere.** The switch from
+Claude + Voyage + Groq to Gemini alone was decided in
+`docs/superpowers/specs/2026-08-01-life-domains-web-search-design.md` §1, which supersedes
+§4's model table. It has been true in code since `00012_embedding_dims_gemini.sql`:
+`packages/shared/src/enums.ts` exports `EMBEDDING_DIM = 1536` and
+`EMBEDDING_MODEL = "gemini-embedding-001"`, and `packages/db/src/test/embedding-dims.test.ts`
+pins the constant to the width the columns actually declare. The body above has been corrected
+in place; the completed phase-0 and phase-1c plan documents keep their original text, because
+they are execution records and `00012`'s own comment is the account of the change.
+
 ---
 
 ## 14. Risks
@@ -563,7 +573,7 @@ controls.
 | LLM cost creep | usage_ledger + per-user budgets from phase 2; Batches for background work; prompt caching for stable prefixes; debounced enrichment |
 | Memory layer proposes garbage | proposed-by-default + evidence-quote verification + caps; worst case it's an ignorable screen, not corrupted behavior |
 | Two data-access paths (mobile local SQLite vs web network) | shared zod types + per-platform thin data hooks behind a common interface in `packages/core`; divergence contained to the hook layer |
-| Whisper/Voyage/provider churn | all providers behind `packages/ai` interfaces; embedding model+dims recorded per chunk to support migration re-embeds |
+| Whisper/Gemini/provider churn | all providers behind `packages/ai` interfaces; embedding model+dims recorded per chunk to support migration re-embeds |
 | Solo-builder scope | phases are independently shippable; the plan survives stopping at any phase ≥3 with a coherent product |
 | Device-local corpus (from phase 1b) | SQLCipher-encrypted local DB, key in Android Keystore, mandatory app lock, sign-out wipe — §15.3 |
 | Sensitive content reaching third parties | `sensitive` tier keeps flagged notes off every enrichment, chat, digest and grounding path — §15.4 |

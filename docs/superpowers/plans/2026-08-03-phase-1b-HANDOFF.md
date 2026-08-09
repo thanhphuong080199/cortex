@@ -1,5 +1,34 @@
 # Phase 1b — handoff, 2026-08-03 (updated 2026-08-04)
 
+> ## STATUS as of 2026-08-07 — phase 1b is closed. One item remains open.
+>
+> Read this block before the 1200 lines below; most of what they describe as open is not.
+>
+> - **All nine round-2 findings are fixed.** #1 and #2 in `ab4c4ea`, #3/#5/#7/#8/#9 in
+>   `03b5676`, #4 in `7b030a4`, #6 in `5e0352e`. The section headed "None of these is fixed"
+>   is a record of what was found, not a to-do list.
+> - **Server-to-device sync runs.** The "STILL OPEN" section below is history: the causes were
+>   the zero-height note list and the awaited `connect()`, both fixed, and
+>   `.maestro/03-server-to-device.yaml` now exercises the direction on every merge to `main`.
+> - **Twelve of the ledgered minors are cleared** — see
+>   `docs/superpowers/plans/2026-08-07-phase-1b-closeout.md`. Each entry below that this
+>   cleared is marked `[CLEARED]`. A thirteenth (the undone-checkin resurrection) is fixed by
+>   Task 12 of that same plan, which ships as a separate PR off `main` and has not landed yet;
+>   it is marked `[CLEARED — in PR 2]` rather than given a commit that does not exist.
+> - **One ledger entry was WRONG and is marked so**, not actioned: `packages/sync` declaring
+>   `updated_at` on `checkins` is correct, because `00014:19-21` added the column.
+> - **One ledger entry has EXPIRED** on its own: the `CheckinService.createWithId` /
+>   `NoteService.createWithId` `deleted_at`-filtering asymmetry it named no longer exists —
+>   round 2 finding #9 changed `NoteService` to the side `CheckinService` was already on.
+> - **Two items are deliberately unchanged**, with reasons recorded: web's `matchesFilters`
+>   pass, and `updateWithConflictCopy`'s TOCTOU.
+>
+> **STILL OPEN — exactly one thing.** A sync op the server rejects inside a 200 is logged
+> (`connector.ts:139-141`) but still lost: the batch completes either way, so the op leaves
+> the device's queue while its row stays in local SQLite. Retrying cannot help — these are
+> validation failures. The fix is a policy choice (dead-letter table? surface to the user?
+> mark the row?) and needs its own design before phase 2 relies on this path.
+
 ## 2026-08-04, session 2 — the first real device run. Four bugs, and none of them was sync.
 
 The branch is now **pushed** (`feat/phase-1b-mobile-offline-sync`) and there is a **GitHub
@@ -82,7 +111,12 @@ not cross it and `#.*$` matches nothing. `directives` silently became the raw fi
 thing it exists to avoid. Red on Windows, green on Linux. This repo warns `LF will be replaced
 by CRLF` on every commit, so CRLF is the normal case here.
 
-### STILL OPEN — server-to-device sync does not run
+### RESOLVED 2026-08-06 — server-to-device sync does not run (as of 2026-08-04)
+
+> Resolved. The client-side fault was the zero-height list (`ec537dc`) and the awaited
+> `connect()` — both fixed, and `.maestro/03-server-to-device.yaml` covers the direction in
+> CI. Kept verbatim below because the reasoning about where to instrument is still the right
+> method for the next stalled stream.
 
 `"connected":true` has never been observed. Uploads work (`completed_upload` seen; notes reach
 the web). The ten local rows came from an earlier session. Consequences for the checklist:
@@ -240,7 +274,7 @@ The 413 fix cannot be checked by hand without a large backlog; it is covered by 
 tests instead. Its device-visible symptom, if it were still broken, is offline writes
 disappearing on the first reconnect after a long offline stretch.
 
-### Round 2 — open findings, ranked. None of these is fixed.
+### Round 2 — findings as first ranked. ALL NINE ARE NOW FIXED; see the status header.
 
 **1. CRITICAL (security) — `note_tags` and `links` have single-column FKs, so a child row can
 carry one user's `user_id` while its parent note belongs to another.** Migration `00014`
@@ -297,16 +331,21 @@ in that form ships every user's notes to every device with all six static tests 
 replay branch wants "does this id exist and is it mine", not "is it live". Note this is the
 *opposite* asymmetry from the ledgered `CheckinService.createWithId` item below.
 
-**Minor, all recorded rather than fixed:** benign duplicate DELETEs pollute the `failed`
-channel that is the only loss-detection surface; the conflict copy loses `domain`,
-`domain_meta` and `media_item_id`; `resolveNoteMediaLink` writes the client's `domain_meta`
-unvalidated on the PATCH path; an undone check-in will resurrect once anything reads
-`checkins` locally (server soft-deletes, the sync rule has no `deleted_at` filter); a partial
-export download leaves a truncated zip in cache; the share-sheet availability check runs after
-the download rather than before; `trashNote` has no `deleted_at IS NULL` guard;
-`note_tags`/`media_items.external_meta` mismatches between the device schema and Postgres are
-latent until something writes those tables; web's refetch re-applies `matchesFilters` over
-rows the query already narrowed; web's `useCallback` keys on object identity.
+**Minor, all recorded rather than fixed:** **[CLEARED — `d8f29a1..86c4d4f`]** benign duplicate
+DELETEs pollute the `failed` channel that is the only loss-detection surface; **[CLEARED —
+`b1cb4f8..d9dce0b`]** the conflict copy loses `domain`, `domain_meta` and `media_item_id`;
+**[CLEARED — `1583d69`]** `resolveNoteMediaLink` writes the client's `domain_meta` unvalidated
+on the PATCH path; **[CLEARED — in PR 2, see Task 12 of
+`docs/superpowers/plans/2026-08-07-phase-1b-closeout.md`]** an undone check-in will resurrect
+once anything reads `checkins` locally (server soft-deletes, the sync rule has no `deleted_at`
+filter); **[CLEARED — `bfafc93`]** a partial export download leaves a truncated zip in cache;
+**[CLEARED — `bfafc93`]** the share-sheet availability check runs after the download rather
+than before; **[CLEARED — `e59c91b`]** `trashNote` has no `deleted_at IS NULL` guard;
+**[CLEARED — `6ed69bc`]** `note_tags`/`media_items.external_meta` mismatches between the
+device schema and Postgres are latent until something writes those tables; web's refetch
+re-applies `matchesFilters` over rows the query already narrowed (deliberately unchanged, see
+the judgement call below); **[CLEARED — `145912a`]** web's `useCallback` keys on object
+identity.
 
 **A ledgered item below is WRONG and must not be actioned.** The deferred list says
 `packages/sync` declares `updated_at` on `checkins` while `public.checkins` has no such
@@ -1122,31 +1161,36 @@ Three facts that cost real time to establish, all now in `docs/deploy.md`:
 
 Each was judged non-blocking at the time and ledgered rather than fixed:
 
-- `packages/shared/src/dto/sync.ts` — a comment says "matching tags.ts and media.ts"; only
-  tags.ts uses `z.uuid()`, media.ts uses `z.iso.date()`. No behaviour.
+- **[CLEARED — `8771263`]** `packages/shared/src/dto/sync.ts` — a comment says "matching
+  tags.ts and media.ts"; only tags.ts uses `z.uuid()`, media.ts uses `z.iso.date()`. No
+  behaviour.
 - `NoteService.updateWithConflictCopy` — TOCTOU between the read and the metadata
   `update()` in the conflict branch. Consistent with the already-accepted race in
-  `update()`'s own domain_meta path.
-- `MediaService.resolveNoteMediaLink` — the notes update lacks `.is("deleted_at", null)`,
-  unlike `NoteService.update`/`getById`/`softDelete`. A soft-deleted note could receive a
-  media link. One-word fix.
-- A malformed-but-present `pending_item` returns `null` identically to a genuinely absent
-  one, so a client bug produces silent no-op linking rather than a signal.
-- `CheckinService.createWithId`'s 23505 fallback read does not filter `deleted_at`, unlike
-  `NoteService.createWithId`'s. A replayed PUT for a soft-deleted checkin returns the
-  deleted row as applied rather than not_found. Two functions built to mirror each other,
-  now slightly out of step.
+  `update()`'s own domain_meta path. Deliberately unchanged; see the status header.
+- **[CLEARED — `1583d69`]** `MediaService.resolveNoteMediaLink` — the notes update lacks
+  `.is("deleted_at", null)`, unlike `NoteService.update`/`getById`/`softDelete`. A soft-deleted
+  note could receive a media link. One-word fix.
+- **[CLEARED — `c4087d8`]** A malformed-but-present `pending_item` returns `null` identically
+  to a genuinely absent one, so a client bug produces silent no-op linking rather than a
+  signal.
+- **[EXPIRED — no longer true]** `CheckinService.createWithId`'s 23505 fallback read does not
+  filter `deleted_at`, unlike `NoteService.createWithId`'s. Round 2 finding #9 changed
+  `NoteService` to stop filtering, for its own reasons; the two now agree and there is nothing
+  to reconcile.
 - `secure-storage.ts` — no test covers `getItem` racing a concurrent `setItem` on the same
   key; the per-key queue covers it structurally but nothing proves it.
-- **`packages/sync` declares `updated_at` on `checkins`; `public.checkins` has no such
-  column** (migration 00013). Nothing reads it and the router ignores it, so it is inert — but
-  it is a column that can never hold a value, which is a trap for the next person writing
-  check-in code. The local schema is what should lose it.
-- **One pending edit base is attached to every queued notes PATCH for that note.** The
-  connector keys bases by note id, so if a body edit and a lifecycle change are both queued for
-  one note, the archive op carries the body's base too and can manufacture a second conflict
-  copy for a change that never touched the body. Narrow (it needs both queued before an upload)
-  but real; the fix is probably to attach the base only to ops whose data contains `content`.
+- **[WRONG — DO NOT ACTION]** `packages/sync` declares `updated_at` on `checkins`;
+  `public.checkins` has no such column (migration 00013). **This is false.**
+  `00014_phase1c_hardening.sql:19-21` added the column with a `moddatetime` trigger,
+  explicitly for PowerSync ordering. `schema.ts:57` is correct and removing the column would
+  be the regression. The claim had also leaked into `apps/mobile/src/lib/checkins.ts`; both
+  are corrected.
+- **[CLEARED — `43204a2`]** One pending edit base is attached to every queued notes PATCH for
+  that note. The connector keys bases by note id, so if a body edit and a lifecycle change are
+  both queued for one note, the archive op carries the body's base too and can manufacture a
+  second conflict copy for a change that never touched the body. Narrow (it needs both queued
+  before an upload) but real; the fix was to attach the base only to ops whose data contains
+  `content`.
 - **A sync op the server rejects inside a 200 is now logged, but still lost.** The router
   applies ops independently and reports casualties in `failed`; the batch completes either way,
   so the op leaves the device's queue while its row stays in local SQLite and never reaches the
