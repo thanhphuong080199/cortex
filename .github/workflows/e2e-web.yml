@@ -1,11 +1,14 @@
 name: E2E Web
 
-# Every pull request to main. The whole job is well under ten minutes, so unlike the mobile
-# suite there is nothing to gain from path-filtering it -- and a change to packages/shared or
-# packages/core can break the web app without touching apps/web at all.
+# Runs AFTER the merge, not on the pull request. Called by post-merge.yml, which chains the
+# APK build behind this and the mobile suite.
+#
+# This suite is not the slow one -- it lands in about three minutes, against the mobile
+# suite's thirty. It moved anyway, so there is ONE answer to "where does E2E run" rather than
+# one per suite. `workflow_dispatch` keeps it runnable by hand against any branch.
 on:
-  pull_request:
-    branches: [main]
+  workflow_call:
+  workflow_dispatch:
 
 concurrency:
   group: e2e-web-${{ github.ref }}

@@ -1,17 +1,43 @@
 # CI
 
-Four workflows run on a PR to `main`. Two of them always run; two are path-filtered.
+`ci.yml` runs on every PR to `main`; its jobs are the only checks a pull request sees. E2E and
+the APK build run later, on push to `main` — see "Where each check runs" below for the full
+shape.
 
 | Workflow | Job (`name:`) | Trigger |
 | --- | --- | --- |
 | `ci.yml` | `build, typecheck, lint, stack-free tests` | every PR |
 | `ci.yml` | `db + api tests (against local Supabase stack)` | every PR |
 | `ci.yml` | **`CI gate`** | every PR |
-| `e2e-web.yml` | `Playwright (chromium, headless)` | every PR |
-| `e2e-mobile.yml` | `Maestro (Android API 33, x86_64)` | PRs touching mobile/api/shared/sync/core/migrations/e2e/.maestro |
 
 `e2e-web.yml` and `e2e-mobile.yml` are documented in [`e2e.md`](./e2e.md). This page is about
 `ci.yml` and about the two rules that have each silently disabled part of CI once already.
+
+---
+
+## Where each check runs (from 2026-08-07)
+
+| Trigger | Workflow | Job name | Required? |
+| --- | --- | --- | --- |
+| pull request | `ci.yml` | `CI gate` | **yes — the only one** |
+| push to `main` | `post-merge.yml` | `E2E Web`, `E2E Mobile`, `Android APK` | no |
+| manual | `e2e-web.yml`, `e2e-mobile.yml`, `android-apk.yml` | — | no |
+
+E2E moved behind the merge because the mobile suite is ~40-55 minutes cold (~20-28 warm) and
+that is most of an hour on every PR round trip. The cost is that `main` is now where E2E
+breakage is found and fixed.
+
+**`post-merge.yml` is the only workflow with a trigger.** The other three are `workflow_call`
+plus `workflow_dispatch`. Do not add a `paths:` filter to them expecting it to apply — path
+filtering is workflow-scoped, so all of it lives in `post-merge.yml`'s `changes` job.
+
+**The APK gate needs `always()` AND per-result assertions.** Without `always()` a skipped
+dependency skips the APK job, so a docs-only push would silently stop producing APKs. Without
+the result checks, `always()` alone would ship an APK from a commit whose suites failed. `CI
+gate` uses the same idiom for the same reason.
+
+**`workflow_dispatch` on `android-apk.yml` is load-bearing.** It is how an APK gets built from
+a branch before merge; a manual run of `post-merge.yml` would drag 30 minutes of E2E with it.
 
 ---
 
@@ -54,9 +80,10 @@ Two details in that job are not decoration:
 - **`if: always()` is mandatory.** Without it a failing dependency *skips* the gate instead of
   failing it, and GitHub counts a skipped required check as satisfied. The gate would wave
   through exactly the runs it exists to stop.
-- **The gate deliberately excludes the E2E workflows.** Both are path-filtered, so a docs-only PR
-  never reports them — requiring them is the same never-reporting trap in a different disguise.
-  A path-filtered workflow must never be a required check, directly or through a gate.
+- **The gate deliberately excludes the E2E workflows.** Neither runs on `pull_request` at all
+  (see "Where each check runs" below) — requiring either is the same never-reporting trap in a
+  different disguise. A workflow that does not trigger on every PR must never be a required
+  check, directly or through a gate.
 
 To repoint protection (needs admin; `enforce_admins` is on, so this cannot be clicked past):
 

@@ -1,0 +1,92 @@
+name: Post-merge
+
+# Everything slow, after the merge rather than on the pull request.
+#
+# A PR is gated by `CI gate` alone (ci.yml) -- build, typecheck, lint, unit and db tests, about
+# three minutes. The E2E suites and the APK build run here instead, because the mobile suite
+# alone is ~40-55 minutes cold (~20-28 warm) and that is most of an hour on every round trip.
+#
+# THE TRADE, recorded so it is a decision rather than an accident: `main` is now where E2E
+# breakage is discovered, and where it gets fixed. The phase-1b branch spent eleven fix(e2e)
+# commits converging the Maestro suite; under this arrangement all eleven would have landed on
+# main.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: post-merge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The path filters that used to live in each workflow's `on.push.paths`. They had to move:
+  # path filtering is workflow-scoped, so it cannot gate one job among several, and gating the
+  # APK on the suites requires them to be jobs in one workflow.
+  changes:
+    name: what changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mobile: ${{ steps.filter.outputs.mobile }}
+      apk: ${{ steps.filter.outputs.apk }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            mobile:
+              - 'apps/mobile/**'
+              - 'apps/api/**'
+              - 'packages/shared/**'
+              - 'packages/sync/**'
+              - 'packages/core/**'
+              - 'supabase/migrations/**'
+              - 'e2e/**'
+              - '.maestro/**'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/e2e-mobile.yml'
+              - '.github/workflows/post-merge.yml'
+            apk:
+              - 'apps/mobile/**'
+              - 'packages/shared/**'
+              - 'packages/sync/**'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/android-apk.yml'
+              - '.github/workflows/post-merge.yml'
+
+  # Unfiltered, as it was before: it finishes in about three minutes, and a change to
+  # packages/shared or packages/core can break the web app without touching apps/web at all.
+  e2e-web:
+    name: E2E Web
+    uses: ./.github/workflows/e2e-web.yml
+
+  e2e-mobile:
+    name: E2E Mobile
+    needs: changes
+    if: needs.changes.outputs.mobile == 'true'
+    uses: ./.github/workflows/e2e-mobile.yml
+
+  # `always()` PLUS an explicit assertion on each result is mandatory, not defensive.
+  #
+  # Without `always()`, a SKIPPED dependency skips this job too -- so a docs-only push, which
+  # correctly skips e2e-mobile, would silently stop building APKs forever. With `always()` and
+  # no result checks, the opposite: a FAILING suite would still ship an APK. Both halves are
+  # required, and `CI gate` in ci.yml already uses this exact idiom.
+  #
+  # `|| result == 'skipped'` on e2e-mobile covers one real case: the APK's path set is a subset
+  # of the mobile suite's EXCEPT for android-apk.yml itself. Editing that file alone must build
+  # an APK while legitimately skipping the suite.
+  #
+  # Gating on e2e-web is a deliberate reading of "if everything passes, build the APK". The
+  # coupling is arguable -- a web regression says nothing about an Android artifact -- and
+  # undoing it is deleting one line.
+  apk:
+    name: Android APK
+    needs: [changes, e2e-web, e2e-mobile]
+    if: >-
+      always()
+      && needs.changes.outputs.apk == 'true'
+      && needs.e2e-web.result == 'success'
+      && (needs.e2e-mobile.result == 'success' || needs.e2e-mobile.result == 'skipped')
+    uses: ./.github/workflows/android-apk.yml

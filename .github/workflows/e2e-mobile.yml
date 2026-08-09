@@ -1,25 +1,17 @@
 name: E2E Mobile
 
-# PATH-FILTERED, unlike the web suite which runs on every PR.
+# Runs AFTER the merge, not on the pull request. Called by post-merge.yml.
 #
 # A debug APK compiles op-sqlite's SQLCipher and FTS5 from source, and an emulator has to boot
-# on top of that -- ~40-55 minutes cold, ~20-28 warm. Hanging that off a docs-only or web-only
-# change would add most of an hour to every PR for nothing. The paths below are everything that
-# can change what the APK does or what it syncs against.
+# on top of that -- ~40-55 minutes cold, ~20-28 warm. Hanging that off every PR was most of an
+# hour added to each round trip on a single-developer project.
+#
+# THE PATH FILTER MOVED to post-merge.yml's `changes` job. `on.push.paths` is workflow-scoped
+# and cannot gate one job among several, and this workflow no longer owns its own trigger.
+# Whatever paths gate it now live there -- do not add a `paths:` here expecting it to apply.
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "apps/mobile/**"
-      - "apps/api/**"
-      - "packages/shared/**"
-      - "packages/sync/**"
-      - "packages/core/**"
-      - "supabase/migrations/**"
-      - "e2e/**"
-      - ".maestro/**"
-      - "pnpm-lock.yaml"
-      - ".github/workflows/e2e-mobile.yml"
+  workflow_call:
+  workflow_dispatch:
 
 concurrency:
   group: e2e-mobile-${{ github.ref }}
