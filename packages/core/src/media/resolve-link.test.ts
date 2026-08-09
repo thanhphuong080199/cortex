@@ -31,6 +31,24 @@ describe("MediaService.resolveNoteMediaLink", () => {
     expect(await media.resolveNoteMediaLink(note.id, {})).toBeNull();
   });
 
+  /**
+   * Absent and malformed both returned null, so a client that serialises this field wrongly
+   * produced silent no-op linking with nothing anywhere to notice it by. `media_unresolved`
+   * exists for precisely this class of outcome -- the note is written, the linking is not,
+   * and a resend cannot help.
+   */
+  it("distinguishes a malformed pending_item from an absent one", async () => {
+    const note = await offlineMediaNote({ kind: "movie", title: `Malformed ${Date.now()}` });
+
+    await expect(media.resolveNoteMediaLink(note.id, {
+      status: "finished",
+      pending_item: { kind: "not-a-kind", title: "" },
+    })).rejects.toMatchObject({ kind: "validation" });
+
+    // Absent stays null -- an ordinary note is not an error.
+    expect(await media.resolveNoteMediaLink(note.id, { status: "finished" })).toBeNull();
+  });
+
   it("creates the item and stamps media_item_id", async () => {
     const note = await offlineMediaNote({ kind: "movie", title: "Arrival" });
     const item = await media.resolveNoteMediaLink(note.id, {
@@ -120,5 +138,40 @@ describe("MediaService.resolveNoteMediaLink", () => {
     const { data } = await createUserClient(alice.token).from("media_items")
       .select("id").eq("user_id", alice.id).eq("title", title).is("deleted_at", null);
     expect(data).toHaveLength(1);   // compensation must not touch what it did not create
+  });
+
+  /**
+   * `NoteService.update`, `getById` and `softDelete` all carry `.is("deleted_at", null)`;
+   * this update did not, so a note the user had already trashed could still be stamped with
+   * a media_item_id -- and the item it just created stayed behind as an orphan, because the
+   * compensation below only runs when the update matches zero rows.
+   */
+  it("refuses to link a media item to a trashed note", async () => {
+    const title = `Stalker ${Date.now()}`;
+    const note = await offlineMediaNote({ kind: "movie", title });
+    await notes.softDelete(note.id);
+
+    await expect(media.resolveNoteMediaLink(note.id, {
+      status: "finished", pending_item: { kind: "movie", title },
+    })).rejects.toMatchObject({ kind: "not_found" });
+
+    // The compensation path must have fired: the item created moments ago is gone.
+    const { data } = await createUserClient(alice.token).from("media_items")
+      .select("id").eq("user_id", alice.id).eq("title", title);
+    expect(data).toEqual([]);
+  });
+
+  /**
+   * `cleaned` went straight into the jsonb column. Every other write path runs
+   * validateDomainMeta first, so this was the one route by which a device could store meta
+   * that domainMetaSchemas.media rejects -- which phase 2 then has to read back.
+   */
+  it("rejects meta the media domain's schema does not accept", async () => {
+    const title = `Stalker meta ${Date.now()}`;
+    const note = await offlineMediaNote({ kind: "movie", title });
+
+    await expect(media.resolveNoteMediaLink(note.id, {
+      status: "not-a-real-status", pending_item: { kind: "movie", title },
+    })).rejects.toMatchObject({ kind: "validation" });
   });
 });

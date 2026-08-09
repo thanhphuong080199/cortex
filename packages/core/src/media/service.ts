@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { pendingMediaItem, type LogMediaInput } from "@cortex/shared";
+import { pendingMediaItem, validateDomainMeta, type LogMediaInput } from "@cortex/shared";
 import { mapPostgrestError, notFound } from "../errors.js";
 import { anchoredIRegex } from "../like.js";
 import { NoteService, type Note } from "../notes/service.js";
@@ -60,6 +60,23 @@ export class MediaService {
     throw mapPostgrestError(inserted.error);
   }
 
+  /**
+   * Deletes `item` if -- and only if -- this call is the one that created it, and never lets
+   * a delete failure replace the error the caller is already unwinding with.
+   *
+   * `media_items` has no delete surface, so an item this call created and then failed to
+   * link (a note insert, a note update, a validation check) is a permanent orphan otherwise.
+   * An item that existed *before* this call must be left alone -- that is exactly what
+   * `created` distinguishes, and it is what the pre-existing test "leaves a pre-existing item
+   * alone when the note cannot be updated" pins.
+   */
+  private async compensateIfCreated(item: MediaItem, created: boolean): Promise<void> {
+    if (!created) return;
+    await this.client.from("media_items").delete()
+      .eq("id", item.id).eq("user_id", this.userId)
+      .then(() => undefined, () => undefined);
+  }
+
   // Item identity is (kind, lower(title)); year is descriptive metadata. But an
   // accepted-then-discarded input is how "Dune (1984)" silently attaches to the 2021
   // film -- so a missing year gets backfilled, and a contradicting one is a 409 the
@@ -105,10 +122,7 @@ export class MediaService {
       // otherwise strand a just-created item in the library (and the autocomplete)
       // forever -- there is no delete surface for media_items. Best-effort compensation;
       // an item that existed before this call is left alone.
-      if (created) {
-        await this.client.from("media_items").delete()
-          .eq("id", item.id).eq("user_id", this.userId).then(() => undefined, () => undefined);
-      }
+      await this.compensateIfCreated(item, created);
       throw err;
     }
   }
@@ -126,20 +140,69 @@ export class MediaService {
     noteId: string,
     meta: Record<string, unknown>,
   ): Promise<MediaItem | null> {
+    // Absent is not an error: an ordinary note has no pending_item and this method is called
+    // for every note op that carries domain_meta.
+    if (meta.pending_item === undefined || meta.pending_item === null) return null;
+
+    // Present but malformed IS an error. Returning null for both would produce a silent
+    // no-op link -- but the note-written-and-nothing-reports-it outcome that motivates this
+    // does not reach through the one real client of this field: mobile's media log always
+    // sets domain: 'media' (media-log.ts), so a malformed pending_item on a PUT is already
+    // caught upstream by createWithId's own validateDomainMeta, and the note is never written
+    // at all. What DOES reach here is a pending_item on a note whose domain is something
+    // other than "media" (nothing else ties the two together), or a PATCH, which never
+    // validates domain_meta. This check is defense-in-depth for that narrower path, not the
+    // originally-claimed one, and it still earns its place: applyNoteOp routes a throw from
+    // here into `media_unresolved`, which exists for exactly this -- durable write, failed
+    // resolution, resend cannot help.
     const parsed = pendingMediaItem.safeParse(meta.pending_item);
-    if (!parsed.success) return null;
+    if (!parsed.success) {
+      throw {
+        kind: "validation",
+        message: "pending_item is present but does not parse",
+        cause: parsed.error,
+      } as const;
+    }
+
+    // pending_item is scaffolding, not data: leaving it behind would make the note
+    // re-resolve on every subsequent upload.
+    const { pending_item: _resolved, ...cleaned } = meta;
+
+    // Every other write path validates before storing (NoteService.create/createWithId/
+    // update). This one did not, so the sync router was a route by which a device could
+    // put meta into the column that domainMetaSchemas.media rejects -- and phase 2 is what
+    // has to read it back. Validated against "media" specifically: resolveNoteMediaLink is
+    // only ever reached for a media note, since pending_item is a member of that schema
+    // alone.
+    //
+    // Checked BEFORE findOrCreate, not after: `cleaned` is derived from `meta` alone and
+    // does not depend on anything findOrCreate produces, so there is no work here worth
+    // buying with an insert first. Checked after, an invalid meta cost an insert plus a
+    // compensation that can itself fail (compensateIfCreated swallows its own errors) -- and
+    // media_items has no delete surface, so a failed compensation left a permanent orphan for
+    // a note that was always going to be rejected. Checked first, that failure is free: no
+    // item is created for a payload that could never have been stored.
+    const check = validateDomainMeta("media", cleaned);
+    if (!check.success) {
+      throw {
+        kind: "validation",
+        message: "domain_meta does not fit domain \"media\"",
+        cause: check.error,
+      } as const;
+    }
 
     // findOrCreate, not findOrCreateItem: the `created` flag is what makes the
     // compensation below correct -- an item that existed before this call must be left
     // alone even when the note update fails.
     const { item, created } = await this.findOrCreate(parsed.data);
 
-    // pending_item is scaffolding, not data: leaving it behind would make the note
-    // re-resolve on every subsequent upload.
-    const { pending_item: _resolved, ...cleaned } = meta;
     const { data, error } = await this.client.from("notes")
       .update({ media_item_id: item.id, domain_meta: cleaned })
-      .eq("id", noteId).eq("user_id", this.userId)
+      // `.is("deleted_at", null)` matches NoteService.update/getById/softDelete. Without it a
+      // trashed note still matched, so a link attached to a note the user had thrown away.
+      // With it the row count is zero and the compensation below fires, which is the already
+      // -tested behaviour for "this note cannot receive the link".
+      .eq("id", noteId).eq("user_id", this.userId).is("deleted_at", null)
       .select("id").maybeSingle();
 
     // A missing or foreign noteId matches zero rows. WITHOUT the select this returns
@@ -147,11 +210,7 @@ export class MediaService {
     // delete surface for media_items. logMedia already compensates for exactly this shape
     // of failure; so must this.
     if (error || data === null) {
-      if (created) {
-        await this.client.from("media_items").delete()
-          .eq("id", item.id).eq("user_id", this.userId)
-          .then(() => undefined, () => undefined);
-      }
+      await this.compensateIfCreated(item, created);
       throw error ? mapPostgrestError(error) : notFound();
     }
 

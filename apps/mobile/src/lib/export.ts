@@ -33,21 +33,38 @@ export async function exportArchive(deps: ExportDeps): Promise<void> {
   if (!deps.token) throw new ExportError("not signed in");
   if (!deps.apiUrl) throw new ExportError("no API URL configured");
 
+  // BEFORE the download, not after. This is a cheap local call and the transfer is several
+  // megabytes; checked afterwards, a device with no share sheet pays for the whole thing
+  // before being told the feature cannot work on it.
+  if (!(await isAvailableAsync())) {
+    throw new ExportError("sharing is not available on this device");
+  }
+
   const destination = new File(Paths.cache, exportFilename());
   // A previous export of the same day would otherwise make the download fail outright.
   if (destination.exists) destination.delete();
 
-  const file = await File.downloadFileAsync(
-    `${deps.apiUrl}/export`,
-    new Directory(Paths.cache),
-    { headers: { Authorization: `Bearer ${deps.token}` }, idempotent: true },
-  );
-
-  // If the share sheet is unavailable the file is still sitting in a cache the user cannot
-  // reach, so say so rather than reporting a success they cannot act on.
-  if (!(await isAvailableAsync())) {
-    throw new ExportError("sharing is not available on this device");
+  let file: { uri: string };
+  try {
+    file = await File.downloadFileAsync(
+      `${deps.apiUrl}/export`,
+      new Directory(Paths.cache),
+      { headers: { Authorization: `Bearer ${deps.token}` }, idempotent: true },
+    );
+  } catch (err) {
+    // downloadFileAsync STREAMS into the file, so a mid-flight failure leaves a partial zip
+    // behind. The same-day clear above means the next attempt recovers -- but until then the
+    // share sheet would hand another app a truncated archive indistinguishable from a
+    // complete export.
+    //
+    // Unconditional, not `if (destination.exists)`: delete() on a file that is not there throws
+    // and this catch already absorbs that, so the existence check would buy nothing but a stat
+    // call. Best-effort either way -- a cleanup failure must never replace the download error,
+    // which is the one the caller has to see.
+    try { destination.delete(); } catch { /* keep the original error */ }
+    throw err;
   }
+
   await shareAsync(file.uri, {
     mimeType: "application/zip",
     dialogTitle: "Export all notes",
