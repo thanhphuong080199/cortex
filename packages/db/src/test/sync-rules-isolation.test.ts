@@ -381,6 +381,50 @@ describe("child rows agree with the owner of their parent note", () => {
  * genuine cross-owner reference and asserts the database refuses it -- this must fail (insert
  * succeeds, error is null) before the composite FK exists, and pass once it does.
  */
+/**
+ * Undo is a local hard DELETE (apps/mobile/src/lib/checkins.ts:40) against a server-side SOFT
+ * delete (CheckinService.softDelete). Without a deleted_at filter the tombstoned row still
+ * satisfies the stream query, replicates back down, and the check-in the user undid returns to
+ * the device. Latent only because nothing reads checkins locally yet -- phase 2's mood charts
+ * are the first reader.
+ *
+ * `notes` deliberately has NO such filter: the device renders a trash view and needs the
+ * tombstones. The asymmetry is intentional, which is why this asserts on checkins by name
+ * rather than over every query.
+ */
+it("excludes soft-deleted check-ins from the sync stream", () => {
+  const checkins = extractDataQueries(rules).find((q) => q.table === "checkins");
+  expect(checkins).toBeDefined();
+  expect(checkins!.query).toMatch(/deleted_at\s+is\s+null/i);
+});
+
+/**
+ * The half that would otherwise make the above a spelling test. An assertion that reads back
+ * rows its own setup seeded is correct by construction and cannot fail -- round 2 finding #2
+ * was exactly that defect. This one seeds BOTH states and asserts the query's own predicate
+ * selects between them.
+ */
+it("keeps live check-ins while excluding tombstoned ones", async () => {
+  // Its OWN user, not the file's shared `alice`: this seeds and counts rows in one table, and
+  // `alice` is the fixture every scoping test in this file leans on. makeUser returns
+  // `{ client, id }` (clients.ts:12).
+  const user = await makeUser("db-syncrules-checkins@test.local");
+  await admin.from("checkins").delete().eq("user_id", user.id);
+
+  const { data: seeded } = await admin.from("checkins").insert([
+    { user_id: user.id, mood: 4 },
+    { user_id: user.id, mood: 1, deleted_at: new Date().toISOString() },
+  ]).select("id, mood, deleted_at");
+  expect(seeded).toHaveLength(2);
+
+  // The predicate the stream query carries, applied to real rows in both states.
+  const { data: replicated } = await admin.from("checkins")
+    .select("id, mood").eq("user_id", user.id).is("deleted_at", null);
+
+  expect(replicated).toHaveLength(1);
+  expect(replicated![0]!.mood).toBe(4);
+});
+
 describe("a cross-owner child row is rejected at the constraint level", () => {
   it("note_tags cannot be inserted with another user's note_id", async () => {
     const { error } = await admin.from("note_tags").insert({
