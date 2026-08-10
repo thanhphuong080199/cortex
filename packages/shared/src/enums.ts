@@ -26,7 +26,16 @@ export const noteLifecycle = z.enum(["inbox", "active", "evergreen", "archived"]
 // local replica, so it needs the union rather than a bare string -- an unchecked value there
 // fails the server's CHECK constraint only after it has synced.
 export type NoteLifecycle = z.infer<typeof noteLifecycle>;
-export const noteSourceType = z.enum(["quick", "web_clip", "voice", "email", "telegram", "import"]);
+// 'chat'      -- a question you typed into the box. Stored as a note so "what was I
+//                researching last month" works through search_notes with no second store.
+// 'assistant' -- an answer you chose to save. Down-weighted in retrieval (see search_notes)
+//                and cited as something you saved, never as your own thinking.
+// 'web_search'-- the same, for an answer carrying web citations. Required by the
+//                life-domains spec §6.3 since 2026-08-01 and never added until now.
+export const noteSourceType = z.enum([
+  "quick", "web_clip", "voice", "email", "telegram", "import",
+  "chat", "assistant", "web_search",
+]);
 export const paraCategory = z.enum(["project", "area", "resource", "archive"]);
 export const suggestionStatus = z.enum(["suggested", "accepted", "rejected"]);
 export const taskStatus = z.enum(["suggested", "todo", "doing", "done", "dropped"]);
