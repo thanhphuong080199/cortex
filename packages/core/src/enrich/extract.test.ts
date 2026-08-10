@@ -143,4 +143,23 @@ describe("extractNote", () => {
     const { data } = await db.from("note_enrichment").select("extracted_hash").eq("note_id", note.noteId).single();
     expect(data!.extracted_hash).toBe(note.contentHash);
   });
+
+  // A real, non-mocked mid-run failure, with no malformed AI output needed: the note is
+  // deleted out from under the job before extractNote runs. That fails the read that checks
+  // for a hand-set domain (`.select("domain")...single()` errors when zero rows match), and
+  // even if that read's error were ignored, the final note_enrichment upsert would still fail
+  // on its own FK to notes(id) -- two independent reasons the hash cannot get stamped here,
+  // which is the property this test pins: if extracted_hash got stamped anyway, the sweep
+  // would never retry this note and the failure would be permanent and silent.
+  it("does not stamp extracted_hash when a write fails partway through", async () => {
+    const note = await seedNote("body");
+    const { error: delErr } = await db.from("notes").delete().eq("id", note.noteId);
+    if (delErr) throw delErr;
+
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [] });
+    await expect(extractNote({ db, ai }, note)).rejects.toBeTruthy();
+
+    const { data } = await db.from("note_enrichment").select("extracted_hash").eq("note_id", note.noteId).maybeSingle();
+    expect(data).toBeNull();
+  });
 });

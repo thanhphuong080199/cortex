@@ -74,7 +74,11 @@ export async function extractNote(
   await recordUsage(db, { userId: note.userId, kind: "extract", model, inputTokens, outputTokens });
 
   // ---- tags ----
-  const { data: linkedRows } = await db.from("note_tags").select("tag_id").eq("note_id", note.noteId);
+  const { data: linkedRows, error: linkedErr } = await db.from("note_tags").select("tag_id").eq("note_id", note.noteId);
+  // A failed read here must not silently become an empty set: that would make a previously
+  // REJECTED tag look unlinked and get re-suggested, exactly the failure Rule 3 exists to
+  // prevent, just reached through a failed read instead of a missing filter.
+  if (linkedErr) throw linkedErr;
   // Any status counts, including 'rejected'. That is what makes a rejection stick: reject sets
   // status rather than deleting the row precisely so this lookup can see it.
   const alreadyLinked = new Set((linkedRows ?? []).map((r) => r.tag_id as string));
@@ -108,7 +112,11 @@ export async function extractNote(
   }
 
   // ---- domain + meta ----
-  const { data: current } = await db.from("notes").select("domain").eq("id", note.noteId).single();
+  const { data: current, error: currentErr } = await db.from("notes").select("domain").eq("id", note.noteId).single();
+  // A failed read here must not silently become `undefined`: `current?.domain` would then fall
+  // through to the model's suggestion, overwriting a domain the user set by hand -- the exact
+  // opposite of the invariant the comment below asserts.
+  if (currentErr) throw currentErr;
   const parsedDomain = noteDomain.safeParse(value.domain);
   // A domain the user set by hand outranks a suggestion; and a value outside the enum must
   // never be written, or the CHECK constraint fails the whole update.
