@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { admin, makeUser } from "./clients";
+import { admin, makeUser } from "./clients.js";
 
 describe("note_tags -> feedback_events", () => {
   let userId: string;

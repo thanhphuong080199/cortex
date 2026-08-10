@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { admin, makeUser } from "./clients";
+import { admin, makeUser } from "./clients.js";
 
 /**
  * claim_notes_for_enrichment has no user filter -- it sweeps every user's notes globally
