@@ -1,5 +1,6 @@
 export * from "./supabase.js";
 export * from "./errors.js";
+export * from "./ai/index.js";
 export * from "./notes/index.js";
 export * from "./checkins/index.js";
 export * from "./media/index.js";

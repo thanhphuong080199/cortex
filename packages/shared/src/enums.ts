@@ -68,3 +68,17 @@ export const flashcardStatus = z.enum(["suggested", "active", "suspended"]);
 // by packages/db's embedding-dims test. Changing either side alone breaks that test.
 export const EMBEDDING_DIM = 1536;
 export const EMBEDDING_MODEL = "gemini-embedding-001";
+
+// The life-domains spec §1 assigns workloads by model FAMILY ("Gemini 3 Flash"), which is not
+// an API id. These are the ids, verified against ai.google.dev/gemini-api/docs/models on
+// 2026-08-10. Prices are USD per million tokens; usage_ledger records the model with every
+// row, so changing a price here never rewrites history.
+export const CLASSIFY_MODEL = "gemini-3.5-flash-lite";
+// Prices reverified directly against ai.google.dev/gemini-api/docs/pricing on 2026-08-10.
+// The flash-lite figures the brief drafted ($0.10/$0.40) are stale -- they match the
+// deprecated gemini-2.5-flash-lite tier. Current standard (non-batch) pricing: embedding is
+// input-only (no output charge); flash-lite is $0.30 input / $2.50 output per 1M tokens.
+export const MODEL_PRICES_USD_PER_MTOK: Record<string, { input: number; output: number }> = {
+  "gemini-embedding-001": { input: 0.15, output: 0 },
+  "gemini-3.5-flash-lite": { input: 0.3, output: 2.5 },
+};
