@@ -18,7 +18,7 @@ function seedOf(text: string): number {
 // generateJson is typed non-generically here and cast to AiClient["generateJson"] exactly once,
 // at the point where it is wired into the returned client, rather than asking every test that
 // scripts generateJson to write its own cast or an explicit `async <T,>()` signature.
-interface FakeAiScript {
+export interface FakeAiScript {
   embed?: AiClient["embed"];
   generateJson?: (args: {
     prompt: string;
