@@ -76,6 +76,52 @@ describe("embedNote", () => {
     expect(spy.mock.calls[0]?.[0]).toHaveLength(1);
   });
 
+  // THE RESYNCHRONISATION PROPERTY, at the embedNote level. The test above uses a same-length
+  // substitution ("B" for "b"), which never moves a chunk boundary -- the common case in real
+  // use is a length-CHANGING edit (typing a word), which shifts every later character. Before
+  // sentence packing (chunk.ts), that shifted every later chunk's fixed-offset window and its
+  // hash, so this edit would have re-embedded the whole tail of the note. It doesn't: only the
+  // chunk the insertion actually lands in goes stale, verified by inspecting what reaches
+  // ai.embed on the second call, not just the final row count (see chunk.test.ts's
+  // "resynchronises after a length-changing edit" for the same numbers pinned at the chunker
+  // level, and the RED evidence in the report for what this test catches).
+  it("re-embeds only the chunk touched by a length-changing edit near the start", async () => {
+    const templates = [
+      "Short note.",
+      "This sentence is a bit longer than the previous one.",
+      "Here is a mid-length sentence for variety.",
+      "This one is noticeably longer, adding several more words to change its length " +
+        "meaningfully and give the packer something to chew on.",
+      "Brief.",
+      "Another sentence of medium length appears here for good measure.",
+    ];
+    const original = Array.from(
+      { length: 150 },
+      (_, i) => `Sentence ${i}: ${templates[i % templates.length]}`,
+    ).join(" ");
+
+    const note = await seedNote(original);
+    const ai = createFakeAi();
+    const first = await embedNote({ db, ai }, { ...note, userId });
+    expect(first).toEqual({ embedded: 6, reused: 0 });
+
+    const spy = vi.fn(ai.embed);
+    const insertAt = original.indexOf(" ", 20) + 1;
+    const edited = `${original.slice(0, insertAt)}extra ${original.slice(insertAt)}`;
+    await db.from("notes").update({ content: edited }).eq("id", note.noteId);
+    const { data: updated } = await db.from("notes").select("content_text").eq("id", note.noteId).single();
+    const { data: hash } = await db.rpc("_test_md5_content_text", { p_note_id: note.noteId });
+
+    const out = await embedNote(
+      { db, ai: { ...ai, embed: spy } },
+      { noteId: note.noteId, userId, contentText: updated!.content_text, contentHash: hash as string },
+    );
+
+    expect(out).toEqual({ embedded: 1, reused: 5 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[0]).toHaveLength(1);
+  });
+
   it("deletes chunks that fall off the end when a note is shortened", async () => {
     const long = (c: string) => c.repeat(1500);
     const note = await seedNote(`${long("a")}\n\n${long("b")}\n\n${long("c")}`);
