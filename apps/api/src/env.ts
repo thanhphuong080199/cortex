@@ -32,9 +32,13 @@ const envSchema = z.object({
 
 export type ApiEnv = z.infer<typeof envSchema>;
 
-/** Loopback in either spelling; the Supabase CLI prints 127.0.0.1, humans type localhost. */
+/**
+ * Loopback in either spelling; the Supabase CLI prints 127.0.0.1, humans type localhost.
+ * WHATWG `URL.hostname` renders IPv6 loopback with brackets ("[::1]"), not bare "::1",
+ * so both spellings are checked.
+ */
 function isLocal(host: string): boolean {
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
 }
 
 /** `<ref>.supabase.co` -> ref; anything else (including a local stack) -> null. */
@@ -62,13 +66,22 @@ export function parseApiEnv(env: NodeJS.ProcessEnv = process.env): ApiEnv {
   // schema inside production and shares a single queue between dev and production.
   const apiRef = refFromSupabaseUrl(parsed.SUPABASE_URL);
   const dbRef = refFromDatabaseUrl(parsed.DATABASE_URL);
+  // A ref match is only meaningful when both sides actually carry one — `null === null`
+  // must NOT count as a match, or two unrelated hosts that are both ref-less (e.g. a local
+  // Supabase stack beside an arbitrary non-Supabase Postgres) would pass silently.
+  const sameRef = apiRef !== null && dbRef !== null && apiRef === dbRef;
+  // When NEITHER side carries a ref, the only way they can still be "the same database" is
+  // if both are the local stack — a project ref can't be compared, so loopback is the one
+  // fact this layer can check. This deliberately cannot distinguish a local Supabase stack
+  // (port 54322) from some other local Postgres (e.g. system Postgres on 5432): both are
+  // loopback and this check has no way to know which port the Supabase CLI assigned.
   const bothLocal =
     apiRef === null &&
     dbRef === null &&
     isLocal(new URL(parsed.SUPABASE_URL).hostname) &&
     isLocal(new URL(parsed.DATABASE_URL).hostname);
 
-  if (!bothLocal && apiRef !== dbRef) {
+  if (!sameRef && !bothLocal) {
     throw new z.ZodError([
       {
         code: "custom",

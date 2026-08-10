@@ -81,4 +81,31 @@ describe("parseApiEnv — enrichment configuration", () => {
   it("rejects a tier outside free|paid", () => {
     expect(() => parseApiEnv({ ...base, GEMINI_TIER: "enterprise" } as NodeJS.ProcessEnv)).toThrow();
   });
+
+  // Regression: the original guard only compared refs (`apiRef !== dbRef`), so two hosts
+  // that were both ref-less -- neither a "*.supabase.co" URL nor a Supavisor "postgres.<ref>"
+  // connection string -- always satisfied `apiRef !== dbRef === false` and passed silently,
+  // no matter what they actually pointed at.
+  it("rejects a local SUPABASE_URL paired with an unrelated non-Supabase DATABASE_URL", () => {
+    expect(() =>
+      parseApiEnv({
+        ...base,
+        DATABASE_URL: "postgresql://admin:pw@my-rds-instance.amazonaws.com:5432/mydb",
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/same database/i);
+  });
+
+  // Host-equal, port-different: SUPABASE_URL's local stack is 54321/54322 by Supabase CLI
+  // convention, but a project ref cannot be recovered from a bare loopback address, so this
+  // layer has no fact to distinguish "the Supabase stack's Postgres" from "some other local
+  // Postgres" beyond "both are loopback." Deliberately accepted rather than bent into a
+  // rejection this check cannot justify -- see the `bothLocal` comment in env.ts.
+  it("accepts a local SUPABASE_URL paired with a different local Postgres (port cannot be checked here)", () => {
+    expect(() =>
+      parseApiEnv({
+        ...base,
+        DATABASE_URL: "postgresql://postgres:postgres@127.0.0.1:5432/otherdb",
+      } as NodeJS.ProcessEnv),
+    ).not.toThrow();
+  });
 });
