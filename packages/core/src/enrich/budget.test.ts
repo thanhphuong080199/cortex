@@ -45,6 +45,24 @@ describe("usage and budget", () => {
     expect(await monthToDateUsd(db, userId)).toBeCloseTo(0.15, 6);
   });
 
+  // Review finding: the original monthToDateUsd did a plain `select("cost_usd")` with no
+  // `.limit()`. config.toml's `max_rows = 1000` (PostgREST's db-max-rows) silently truncates any
+  // response past 1000 rows -- no error, nothing to catch, unless the caller reads
+  // Content-Range, which the old code did not. recordUsage writes one row per model call, so an
+  // active user crosses 1000 rows in a UTC month at roughly 34 processed notes a day; past that
+  // point the old sum covered only the first 1000 rows and isOverBudget could return false for a
+  // user who was genuinely over budget. 1200 rows is comfortably past the 1000-row boundary
+  // while staying a single cheap bulk insert (well under a second locally).
+  it("sums correctly past PostgREST's 1000-row response cap", async () => {
+    const ROWS = 1200;
+    const rows = Array.from({ length: ROWS }, () => ({
+      user_id: userId, kind: "tag" as const, cost_usd: 0.01,
+    }));
+    const { error } = await db.from("usage_ledger").insert(rows);
+    if (error) throw error;
+    expect(await monthToDateUsd(db, userId)).toBeCloseTo(ROWS * 0.01, 6); // $12.00
+  }, 30_000);
+
   it("ignores rows from a previous month", async () => {
     await recordUsage(db, { userId, kind: "embed", model: "gemini-embedding-001", inputTokens: 1_000_000, outputTokens: 0 });
     const lastMonth = new Date();

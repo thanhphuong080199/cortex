@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   flashcardStatus, mediaKind, memoryCategory, memoryStatus, noteDomain,
-  noteLifecycle, noteSourceType, paraCategory, suggestionStatus, taskStatus,
+  noteLifecycle, noteSourceType, paraCategory, suggestionStatus, taskStatus, usageLedgerKind,
 } from "@cortex/shared";
 import { admin } from "./clients.js";
 
@@ -24,6 +24,7 @@ const PAIRS: Array<{ table: string; constraint: string; enum: { options: readonl
   { table: "notes", constraint: "notes_domain_check", enum: noteDomain },
   { table: "media_items", constraint: "media_items_kind_check", enum: mediaKind },
   { table: "flashcards", constraint: "flashcards_status_check", enum: flashcardStatus },
+  { table: "usage_ledger", constraint: "usage_ledger_kind_check", enum: usageLedgerKind },
 ];
 
 /** Extracts the ordered set of `'value'::text` literals out of a pg_get_constraintdef() string. */

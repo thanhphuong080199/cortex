@@ -14,6 +14,7 @@ import { z } from "zod";
 //   noteDomain        <-> notes.domain_check
 //   mediaKind         <-> media_items.kind_check
 //   flashcardStatus   <-> flashcards.status_check
+//   usageLedgerKind   <-> usage_ledger.kind_check
 //
 // links.status ('suggested'|'accepted'|'dismissed') and notes.para_status
 // ('none'|'suggested'|'accepted') are DELIBERATELY distinct vocabularies (design spec
@@ -63,6 +64,16 @@ export type MediaStatus = z.infer<typeof mediaStatus>;
 // Deliberately NOT suggestionStatus: a card's lifecycle ends in 'suspended' (stop
 // scheduling it), which is not the same act as rejecting a suggestion.
 export const flashcardStatus = z.enum(["suggested", "active", "suspended"]);
+
+// usage_ledger.kind's full SQL vocabulary (00007_integrations_ops.sql), for the enum-parity
+// pair only. This is deliberately WIDER than any TS call site: only 'embed' and 'tag' are
+// written today (packages/core/src/enrich/budget.ts's recordUsage narrows its own `kind`
+// parameter to that pair), while 'chat', 'digest', 'memory' and 'transcribe' anticipate
+// workloads later phases add. A narrow union assigning into this wider vocabulary is fine;
+// what must not happen again is a TS union value the SQL CHECK constraint does not accept --
+// recordUsage briefly had "extract" here, which does not appear in the constraint below, and
+// nothing caught it before the first real insert. Existing to close exactly that gap.
+export const usageLedgerKind = z.enum(["embed", "chat", "tag", "digest", "memory", "transcribe"]);
 
 // Pinned by 00012_embedding_dims_gemini.sql and asserted against the live column width
 // by packages/db's embedding-dims test. Changing either side alone breaks that test.

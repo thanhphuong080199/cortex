@@ -39,8 +39,25 @@ export async function recordUsage(
 }
 
 /**
- * Sums usage_ledger.cost_usd (a Postgres `numeric`, i.e. exact decimal, chosen precisely so
- * money never carries float error at rest) for the caller's UTC calendar month to date.
+ * Sums usage_ledger.cost_usd (a Postgres `numeric`, i.e. exact decimal) for the caller's UTC
+ * calendar month to date, via the `usage_month_to_date_usd` SQL function
+ * (00021_usage_month_to_date.sql) rather than a client-side `select` + reduce.
+ *
+ * This was NOT the original shape: the first version of this function did
+ * `.select("cost_usd").eq(...).gte(...)` and summed the rows in JS. That silently broke past
+ * 1000 rows -- config.toml's `max_rows = 1000` is PostgREST's `db-max-rows`, which truncates
+ * any response at that row count with NO error and no signal short of reading Content-Range,
+ * which the old code did not. recordUsage writes one row per model call, so an active user
+ * crosses 1000 rows in a UTC month at roughly 34 processed notes a day; past that point the
+ * old sum silently covered only the first 1000 rows, isOverBudget could return false for a
+ * user who was genuinely over budget, and the sweep would never stop billing them -- the exact
+ * "silently never stops" failure this gate exists to prevent. See budget.test.ts's
+ * ">1000 rows" test, which pins this at a scale that actually crosses the truncation boundary.
+ *
+ * Doing the SUM in Postgres also dissolves a second, smaller issue the old code carried: it
+ * decoded every row's `numeric` into a JS `number` and reduced with IEEE-754 double arithmetic.
+ * `numeric + numeric` inside Postgres stays exact; only the single returned total now passes
+ * through a JS `number` at all.
  *
  * Anchored to UTC, not the user's local timezone: usage_ledger.created_at is a timestamptz
  * (stored/compared in UTC) and no per-user timezone is tracked anywhere in this schema, so
@@ -48,21 +65,13 @@ export async function recordUsage(
  * consequence: a user east of UTC (e.g. Asia/Saigon, UTC+7) has their budget month roll over
  * up to several hours AFTER their local midnight on the 1st -- late, never early -- so this
  * never grants extra unbilled spend across the boundary, it can only be conservative by a few
- * hours. Rows are summed here (rather than left as `numeric` end-to-end) because supabase-js
- * decodes `numeric` into a JS `number`; the reduce below is therefore IEEE-754 double
- * arithmetic over already-double-rounded per-row values. At the token/price magnitudes this
- * pipeline produces (dollars, not fractions of a cent, and at most a few thousand rows a
- * month) that error is many orders of magnitude below a cent and cannot flip isOverBudget's
- * `>` comparison; it is not the same as doing the SUM in Postgres itself, and a future caller
- * who needs bit-for-bit exactness should sum server-side (e.g. an RPC) instead.
+ * hours. The SQL function implements the identical UTC-month boundary the original TS version
+ * used (`Date.UTC(year, month, 1)`), just computed server-side now.
  */
 export async function monthToDateUsd(db: SupabaseClient, userId: string): Promise<number> {
-  const now = new Date();
-  const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
-  const { data, error } = await db.from("usage_ledger")
-    .select("cost_usd").eq("user_id", userId).gte("created_at", since);
+  const { data, error } = await db.rpc("usage_month_to_date_usd", { p_user_id: userId });
   if (error) throw error;
-  return (data ?? []).reduce((sum, r) => sum + Number(r.cost_usd ?? 0), 0);
+  return Number(data ?? 0);
 }
 
 /**
