@@ -99,9 +99,9 @@ apps/api/src/
 └── search.controller.ts       ← POST /search
 
 packages/core/src/enrich/
-├── pipeline.ts                ← the embed step and the extract step
-├── extractor.ts               ← intent + domain + domain_meta + tags, one schema
-└── budget.ts                  ← usage_ledger rollup and the gate
+├── embed.ts                   ← chunk, embed only what changed, stamp embedded_hash
+├── extract.ts                 ← intent + domain + domain_meta + tags, one schema
+└── budget.ts                  ← usage_ledger rollup, pricing, and the tier guard
 
 packages/core/src/assistant/
 ├── router.ts                  ← what to do with a classified input
