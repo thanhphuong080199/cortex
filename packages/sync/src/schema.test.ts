@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SYNC_TABLES } from "@cortex/shared";
+import { SERVER_ONLY_TABLES, SYNC_TABLES } from "@cortex/shared";
 import { AppSchema } from "./schema.js";
 
 const tableNames = () => AppSchema.tables.map((t) => t.name).sort();
@@ -10,11 +10,7 @@ describe("AppSchema", () => {
   });
 
   it("never declares a server-only table", () => {
-    const forbidden = [
-      "note_chunks", "ingest_inbox", "memory_revisions",
-      "feedback_events", "usage_ledger", "integrations", "flashcards",
-    ];
-    for (const t of forbidden) expect(tableNames()).not.toContain(t);
+    for (const t of SERVER_ONLY_TABLES) expect(tableNames()).not.toContain(t);
   });
 
   it("marks note_edit_base local-only so a base timestamp never uploads", () => {

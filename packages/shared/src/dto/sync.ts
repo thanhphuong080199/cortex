@@ -16,6 +16,26 @@ export const SYNC_TABLES = [
 ] as const;
 export type SyncTable = (typeof SYNC_TABLES)[number];
 
+/**
+ * Tables deliberately absent from the PowerSync sync rules and from the `powersync`
+ * publication. The omission is load-bearing -- `integrations` holds credentials that must
+ * never reach a device, and the rest are server-side machinery -- so it is asserted rather
+ * than trusted: packages/db's sync-rules isolation suite and packages/sync's schema suite
+ * both read this list.
+ *
+ * ONE copy. Two hand-maintained copies existed until 2026-08-10, which is the same
+ * parallel-list trap phase 1b's Task 22 fixed for the media status vocabulary.
+ */
+export const SERVER_ONLY_TABLES = [
+  "note_chunks",
+  "usage_ledger",
+  "integrations",
+  "feedback_events",
+  "memory_revisions",
+  "ingest_inbox",
+  "flashcards",
+] as const;
+
 export const syncOpKind = z.enum(["PUT", "PATCH", "DELETE"]);
 
 export const syncOp = z.object({
