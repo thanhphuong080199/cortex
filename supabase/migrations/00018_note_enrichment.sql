@@ -87,10 +87,48 @@ grant execute on function public._test_md5_content_text(uuid) to service_role;
 -- doing its job (updated-at.test.ts pins it down), but it means note-enrichment.test.ts's
 -- fixtures -- which must age a note past claim_notes_for_enrichment's 90-second debounce
 -- window WITHOUT touching its content, in order to isolate the hash predicate from the
--- timestamp one -- cannot do that through an ordinary PostgREST update. `SET LOCAL
--- session_replication_role = replica` disables user-defined triggers (moddatetime included)
--- for the one statement inside this function only, and reverts automatically at the end of the
--- RPC's transaction.
+-- timestamp one -- cannot do that through an ordinary PostgREST update.
+--
+-- session_replication_role = 'replica' disables user-defined triggers (moddatetime included).
+--
+-- A function-level `set session_replication_role = replica` clause (applied by Postgres after
+-- the SECURITY DEFINER role switch, restored on return including on exception -- the textbook
+-- fix, and the first one tried here) does NOT work on this stack: CREATE FUNCTION rejects it
+-- with `permission denied to set parameter "session_replication_role"`, proven directly against
+-- this container as the exact role (`postgres`) that runs these migrations. That is because
+-- session_replication_role is a SUSET parameter, and a function's `set` clause requires actual
+-- superuser to attach one for a SUSET parameter -- there is no per-parameter-grant carve-out for
+-- that specific code path, unlike an interactive SET/SET LOCAL statement, which Postgres checks
+-- through a different, more permissive path. `postgres` is not superuser on this stack (only
+-- `supabase_admin` is; `select rolsuper from pg_roles` confirms it), so the function-level form
+-- is unavailable here regardless of what SECURITY DEFINER grants at the row/table level.
+--
+-- Given that, this function uses `set local` in the body instead, WITH AN EXPLICIT RESET on
+-- both the success and exception paths, rather than relying on the PostgREST-wraps-every-RPC-in-
+-- its-own-transaction assumption to make an un-reset `set local` merely accidentally safe. `set
+-- local` is transaction-scoped, not function-scoped, so without the explicit reset below it would
+-- still be in effect for whatever runs next in the same transaction once this function returns --
+-- and this phase adds pg-boss workers on a direct Postgres connection, where a caller inside an
+-- explicit multi-statement transaction would otherwise inherit `replica` mode (disabling all user
+-- triggers AND foreign-key enforcement) for every statement after this one. PL/pgSQL's EXCEPTION
+-- clause runs inside an implicit subtransaction, so the reset in the handler below still executes
+-- even if the UPDATE itself fails.
+--
+-- Portability: this depends on the LOCAL Supabase CLI's `postgres` role being able to run
+-- `SET LOCAL session_replication_role = replica` interactively at all -- which it can here,
+-- despite not being superuser and despite `has_parameter_privilege(current_user,
+-- 'session_replication_role', 'SET')` returning false, so whatever permits it is specific to this
+-- stack's role setup, not the PG15 per-parameter-grant mechanism. Whether hosted Supabase's
+-- `postgres` role has the same allowance has not been verified from here and is NOT assumed: if
+-- it does not, this function fails at CALL time there (not at CREATE FUNCTION time, since the
+-- body is plpgsql and unchecked), which is safe, because nothing but local `packages/db` test
+-- suites call it. Same local-passes/hosted-fails shape 00012 is the standing precedent for --
+-- written down here rather than left to be rediscovered against a hosted project.
+--
+-- Also the first _test_* helper that WRITES. The other four (00001, 00012, 00016) are read-only
+-- `language sql` introspection wrappers; this one is `language plpgsql` and mutates a row. It
+-- extends that convention rather than matching it exactly, which is worth saying so the pattern
+-- stays honest for the next one.
 create or replace function public._test_backdate_note(p_note_id uuid, p_when timestamptz)
 returns void
 language plpgsql
@@ -100,6 +138,10 @@ as $$
 begin
   set local session_replication_role = replica;
   update public.notes set updated_at = p_when where id = p_note_id;
+  set local session_replication_role = default;
+exception when others then
+  set local session_replication_role = default;
+  raise;
 end;
 $$;
 revoke execute on function public._test_backdate_note(uuid, timestamptz) from public;
