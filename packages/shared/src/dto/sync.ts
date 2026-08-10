@@ -6,10 +6,9 @@ import { z } from "zod";
  * still have no service or UI: each table joins this list in the phase that builds its
  * feature, with its sync rule and isolation test in the same PR.
  *
- * `flashcards` is deliberately absent (phase 6). Server-only tables -- note_chunks,
- * ingest_inbox, memory_revisions, feedback_events, usage_ledger, integrations -- must
- * never appear here; integrations in particular holds credentials that never leave the
- * server.
+ * Server-only tables are deliberately absent from here (see `SERVER_ONLY_TABLES` below);
+ * they must never appear here, as integrations in particular holds credentials that never
+ * leave the server.
  */
 export const SYNC_TABLES = [
   "notes", "tags", "note_tags", "links", "media_items", "checkins",
