@@ -68,10 +68,11 @@ export async function extractNote(
     prompt: buildPrompt(note.contentText, vocabulary.map((t) => t.name)),
     schema: RESPONSE_SCHEMA,
   });
-  // "extract", not the more specific "tag": budget.ts's usage kind is the two-step pipeline
-  // stage ("embed" | "extract"), not a per-artifact label -- this step also writes domain and
-  // domain_meta from the same model call, not only tags.
-  await recordUsage(db, { userId: note.userId, kind: "extract", model, inputTokens, outputTokens });
+  // "tag": usage_ledger.kind's CHECK constraint (00007_integrations_ops.sql) is a fixed
+  // vocabulary -- 'embed','chat','tag','digest','memory','transcribe' -- with no 'extract'
+  // option. 'tag' is the closest fit even though this call also writes domain and domain_meta
+  // from the same model output, not only tags.
+  await recordUsage(db, { userId: note.userId, kind: "tag", model, inputTokens, outputTokens });
 
   // ---- tags ----
   const { data: linkedRows, error: linkedErr } = await db.from("note_tags").select("tag_id").eq("note_id", note.noteId);
