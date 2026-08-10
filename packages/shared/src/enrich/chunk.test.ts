@@ -16,14 +16,16 @@ describe("chunkText", () => {
     const b = "y".repeat(1000);
     const chunks = chunkText(`${a}\n\n${b}`);
     expect(chunks).toHaveLength(2);
-    expect(chunks[0].content).toBe(a);
-    expect(chunks[1].content).toBe(b);
+    const [first, second] = chunks;
+    expect(first?.content).toBe(a);
+    expect(second?.content).toBe(b);
   });
 
   it("packs several short paragraphs into one chunk", () => {
     const chunks = chunkText("one\n\ntwo\n\nthree");
     expect(chunks).toHaveLength(1);
-    expect(chunks[0].content).toBe("one\n\ntwo\n\nthree");
+    const [only] = chunks;
+    expect(only?.content).toBe("one\n\ntwo\n\nthree");
   });
 
   it("splits a single oversized paragraph, because it cannot be packed whole", () => {
