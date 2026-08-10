@@ -64,6 +64,7 @@ describe("SERVER_ONLY_TABLES", () => {
         "integrations",
         "memory_revisions",
         "note_chunks",
+        "note_enrichment",
         "usage_ledger",
       ].sort(),
     );

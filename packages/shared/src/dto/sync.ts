@@ -33,6 +33,7 @@ export const SERVER_ONLY_TABLES = [
   "memory_revisions",
   "ingest_inbox",
   "flashcards",
+  "note_enrichment",
 ] as const;
 
 export const syncOpKind = z.enum(["PUT", "PATCH", "DELETE"]);
