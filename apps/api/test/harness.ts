@@ -3,6 +3,8 @@
 import { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { createClient } from "@supabase/supabase-js";
+import type { AiClient } from "@cortex/core";
+import { AI_CLIENT } from "../src/ai-client.provider";
 import { AppModule } from "../src/app.module";
 import { CoreErrorFilter } from "../src/core-error.filter";
 
@@ -26,9 +28,23 @@ export async function makeUser(email: string): Promise<TestUser> {
   return { id: data.user!.id, token: data.session!.access_token };
 }
 
+export interface TestAppOverrides {
+  /**
+   * Replaces AppModule's AI_CLIENT provider before the app boots. Only search.e2e.test.ts
+   * passes this (with @cortex/core's createFakeAi -- NO TEST MAY EVER CALL THE REAL GEMINI
+   * API). Every other suite gets the untouched provider from ai-client.provider.ts, which is
+   * safe to leave in place unoverridden: it never actually constructs a Gemini client or calls
+   * parseApiEnv until something calls embed()/generateJson(), and none of those suites' routes
+   * do.
+   */
+  ai?: AiClient;
+}
+
 /** Boots the real AppModule with the same global filter main.ts registers. */
-export async function bootstrapTestApp(): Promise<INestApplication> {
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+export async function bootstrapTestApp(overrides: TestAppOverrides = {}): Promise<INestApplication> {
+  const builder = Test.createTestingModule({ imports: [AppModule] });
+  if (overrides.ai) builder.overrideProvider(AI_CLIENT).useValue(overrides.ai);
+  const moduleRef = await builder.compile();
   const app = moduleRef.createNestApplication();
   app.useGlobalFilters(new CoreErrorFilter());
   await app.init();
