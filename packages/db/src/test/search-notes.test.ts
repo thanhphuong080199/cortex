@@ -5,14 +5,17 @@ import { admin, makeUser } from "./clients.js";
 const vec = (seed: number) => Array.from({ length: 1536 }, (_, i) => Math.sin(seed * (i + 1)) / 40);
 
 /**
- * A single-component nudge off `v`. pgvector's cosine distance (`<=>`) is scale-invariant
- * -- multiplying a vector by a positive scalar leaves its distance to any fixed target
- * unchanged -- so shifting one coordinate is the cheap way to get a vector that is
- * DETERMINISTICALLY (not just usually) farther from `v` than `v` is from itself, without
- * relying on floating-point noise. Used to break two vectors out of an exact-cosine-match
- * tie so their pgvector `row_number()` ranks are 1 and 2, not an unspecified tie order.
+ * A single-component nudge off `v`, by `epsilon`. pgvector's cosine distance (`<=>`) is
+ * scale-invariant -- multiplying a vector by a positive scalar leaves its distance to any
+ * fixed target unchanged -- so shifting one coordinate is the cheap way to get a vector that
+ * is DETERMINISTICALLY (not just usually) farther from `v` than `v` is from itself, without
+ * relying on floating-point noise. Used to break vectors out of an exact-cosine-match tie so
+ * their pgvector `row_number()` ranks are distinct, ordered ranks (1, 2, 3, ...) rather than
+ * an unspecified tie order -- and, with two different epsilons, to order two DIFFERENT
+ * nudged vectors relative to each other (a larger epsilon is a larger perturbation, hence a
+ * strictly larger cosine distance from the unperturbed target, for the epsilons used here).
  */
-const nudge = (v: number[]) => v.map((x, i) => (i === 0 ? x + 0.01 : x));
+const nudge = (v: number[], epsilon = 0.01) => v.map((x, i) => (i === 0 ? x + epsilon : x));
 
 const search = async (userId: string, query: string, embedding: number[], limit = 10) => {
   const { data, error } = await admin.rpc("search_notes", {
@@ -77,38 +80,58 @@ describe("search_notes", () => {
     expect(row!.matched_by).toBe("both");
   });
 
+  // Same rank-tie hazard as the provenance tests below, same fix: `oldId` gets the exact
+  // target (guaranteed rank 1 -- the better RAW rank), `newId` gets a nudged vector
+  // (guaranteed rank 2). Without this, both were seeded with the identical `target` vector,
+  // so their row_number() order was the same unspecified Postgres tie-break that made the
+  // provenance tests vacuous -- this test happened to go red under mutation 1 on this
+  // machine, but that only proved the tie landed on `old` first HERE, not that recency was
+  // being tested. Now raw RRF deterministically favours `oldId`; only the recency factor
+  // (exp(-400/180) ~= 0.108, which swamps the ~1.6% adjacent-rank gap) can flip the order
+  // back to `newId`. The query has no token overlap with the seeded content so the FTS arm
+  // can't reintroduce a second, uncontrolled tie.
   it("ranks a recent note above an old one of equal relevance", async () => {
     const target = vec(21);
     const old = new Date(Date.now() - 400 * 86_400_000).toISOString();
     const oldId = await seed(alice, "identical relevance text", { embedding: target, createdAt: old });
-    const newId = await seed(alice, "identical relevance text", { embedding: target });
-    const rows = await search(alice, "identical relevance text", target);
+    const newId = await seed(alice, "identical relevance text", { embedding: nudge(target) });
+    const rows = await search(alice, "zzz-no-fts-token-overlap-zzz", target);
     const order = rows.map((r) => r.note_id);
+    expect(order).toContain(oldId);
+    expect(order).toContain(newId);
     expect(order.indexOf(newId)).toBeLessThan(order.indexOf(oldId));
   });
 
   // The provenance multiplier. Nothing produces these notes until stage C; the hook is built
   // now because stages B, C and phase 9 all call this function.
   //
-  // "Equal relevance" is deliberately NOT built from two identical embeddings: RRF's
+  // "Equal relevance" is deliberately NOT built from identical embeddings: RRF's
   // row_number() gives every candidate a distinct integer rank even when their underlying
   // distance/ts_rank ties, so two literally-identical vectors don't produce two identical
   // scores -- they produce adjacent ranks (1/61 vs 1/62) whose ordering is an unspecified
   // Postgres tie-break, not something this test controls. That made this assertion pass
   // whether or not the 0.8 multiplier ran at all (confirmed by mutation-testing the
-  // multiplier away and watching this test stay green). Instead, `saved` gets the exact
-  // target embedding (guaranteed rank 1: cosine distance 0 is the unique minimum) and `own`
-  // gets a nudged one (guaranteed rank 2). Raw RRF now deterministically favours `saved`;
-  // only the 0.8 multiplier can flip the order back to `own`. The query string is chosen to
-  // have no token overlap with the seeded content, so the FTS arm contributes nothing to
-  // either row and can't reintroduce a second, uncontrolled tie.
+  // multiplier away and watching this test stay green). Instead, `saved` (assistant) gets
+  // the exact target embedding (guaranteed rank 1: cosine distance 0 is the unique minimum),
+  // `webSearch` gets a small nudge (guaranteed rank 2, still better than `own`), and `own`
+  // gets a larger nudge (guaranteed rank 3, the worst raw rank of the three). Raw RRF now
+  // deterministically favours BOTH down-weighted notes over `own`; only applying the 0.8
+  // multiplier to both `assistant` and `web_search` can flip the order back to `own` on top
+  // -- narrowing the multiplier's `in (...)` list to just one of them would leave the other
+  // assertion red. The query string has no token overlap with the seeded content, so the FTS
+  // arm contributes nothing to any row and can't reintroduce a second, uncontrolled tie.
   it("ranks a saved assistant answer below the user's own note of equal relevance", async () => {
     const target = vec(31);
-    const own = await seed(alice, "duplicate relevance body", { embedding: nudge(target) });
+    const own = await seed(alice, "duplicate relevance body", { embedding: nudge(target, 0.02) });
     const saved = await seed(alice, "duplicate relevance body", { embedding: target, sourceType: "assistant" });
+    const webSearch = await seed(alice, "duplicate relevance body", { embedding: nudge(target, 0.005), sourceType: "web_search" });
     const rows = await search(alice, "zzz-no-fts-token-overlap-zzz", target);
     const order = rows.map((r) => r.note_id);
+    expect(order).toContain(own);
+    expect(order).toContain(saved);
+    expect(order).toContain(webSearch);
     expect(order.indexOf(own)).toBeLessThan(order.indexOf(saved));
+    expect(order.indexOf(own)).toBeLessThan(order.indexOf(webSearch));
   });
 
   // Same rank-tie hazard as above, same fix: `assistant` gets the exact target (rank 1,
@@ -120,6 +143,8 @@ describe("search_notes", () => {
     const assistant = await seed(alice, "what did I conclude about MCP", { embedding: target, sourceType: "assistant" });
     const rows = await search(alice, "zzz-no-fts-token-overlap-zzz", target);
     const order = rows.map((r) => r.note_id);
+    expect(order).toContain(chat);
+    expect(order).toContain(assistant);
     expect(order.indexOf(chat)).toBeLessThan(order.indexOf(assistant));
   });
 
@@ -159,7 +184,13 @@ describe("search_notes", () => {
     expect(rows.filter((r) => r.note_id === data!.id)).toHaveLength(1);
   });
 
+  // toBeLessThanOrEqual(3) would also pass if the vector arm returned zero rows, so a
+  // totally broken vector arm would leave this green. By this point in the suite alice has
+  // ~12 embedded notes from prior tests (never deleted -- only the beforeAll clears the
+  // table), so the vector arm alone guarantees at least 3 candidates and toBe(3) is
+  // deterministic. "the" is still an English stopword against websearch_to_tsquery, so this
+  // stays a vector-arm-only exercise of the limit, not a fused-arm one (see report).
   it("honours the limit", async () => {
-    expect((await search(alice, "the", vec(81), 3)).length).toBeLessThanOrEqual(3);
+    expect((await search(alice, "the", vec(81), 3)).length).toBe(3);
   });
 });

@@ -94,8 +94,17 @@ as $$
          fused.matched_by
   from fused
   join public.notes n on n.id = fused.note_id
-  where n.deleted_at is null
-  order by score desc
+  -- Redundant with the per-arm `c.user_id = p_user_id` / `n.user_id = p_user_id` filters
+  -- above, and nearly free here. p_user_id is described above as "the ONLY thing separating
+  -- two users' corpora" -- a redundant predicate on the final select turns a future missing
+  -- filter in just ONE arm into a no-op instead of a cross-user leak.
+  where n.user_id = p_user_id
+    and n.deleted_at is null
+  -- Deterministic tiebreaker: `score desc` alone leaves ties (e.g. two notes with identical
+  -- RRF base, recency and provenance) in an unspecified order, which matters once Task 15
+  -- exposes this over an API -- a non-reproducible top-N cut is a bad API contract even
+  -- before it's a UX problem.
+  order by score desc, n.created_at desc, n.id
   limit p_limit;
 $$;
 revoke execute on function public.search_notes(uuid, text, extensions.vector(1536), int) from public;
