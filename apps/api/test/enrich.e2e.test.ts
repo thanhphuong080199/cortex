@@ -55,14 +55,29 @@ describe("runSweep", () => {
     // actually responsible for.
     expect(first.processed).toBeGreaterThanOrEqual(1);
 
-    const { data: chunks } = await db.from("note_chunks").select("id").eq("note_id", noteId);
+    const { data: chunks } = await db.from("note_chunks")
+      .select("id, chunk_index, content_hash").eq("note_id", noteId).order("chunk_index");
     expect(chunks!.length).toBeGreaterThan(0);
     const { data: note } = await db.from("notes").select("domain, enriched_at").eq("id", noteId).single();
     expect(note!.domain).toBe("health");
     expect(note!.enriched_at).not.toBeNull();
+    const { data: enrichedBefore } = await db.from("note_enrichment")
+      .select("updated_at").eq("note_id", noteId).single();
 
-    const second = await runSweep({ db, ai, budgetUsd: 100, limit: 10 });
-    expect(second.processed).toBe(0);
+    // `second.processed` is a GLOBAL counter -- claim_notes_for_enrichment is deliberately not
+    // scoped to this test's user (00018:50-60), so another suite's note legitimately aging past
+    // the 90-second debounce during this test could make it nonzero without this note being
+    // touched again, and `expect(second.processed).toBe(0)` would go red for a reason that has
+    // nothing to do with whether the sweep actually re-processed THIS note. Assert the
+    // note-scoped effect instead, which is immune to the shared database: nothing about this
+    // specific note moved on the second run.
+    await runSweep({ db, ai, budgetUsd: 100, limit: 10 });
+    const { data: chunksAfter } = await db.from("note_chunks")
+      .select("id, chunk_index, content_hash").eq("note_id", noteId).order("chunk_index");
+    expect(chunksAfter).toEqual(chunks);
+    const { data: enrichedAfter } = await db.from("note_enrichment")
+      .select("updated_at").eq("note_id", noteId).single();
+    expect(enrichedAfter!.updated_at).toBe(enrichedBefore!.updated_at);
   });
 
   it("records the failure and stops after five attempts rather than retrying forever", async () => {
@@ -99,9 +114,21 @@ describe("runSweep", () => {
       userId, kind: "tag", model: "gemini-3.5-flash-lite", inputTokens: 20_000_000, outputTokens: 0,
     });
 
-    await seedBackdated("would be enriched if there were money");
-    const out = await runSweep({ db, ai, budgetUsd: 1, limit: 10 });
-    expect(out.processed).toBe(0);
-    expect(out.skippedOverBudget).toBeGreaterThan(0);
+    const noteId = await seedBackdated("would be enriched if there were money");
+    // `out.processed`/`out.skippedOverBudget` are both GLOBAL counters and both exposed here,
+    // in opposite directions: `processed` could read nonzero from a wholly unrelated,
+    // under-budget note elsewhere in the shared database (the false positive already hit
+    // above), while `skippedOverBudget` could read 0 even though the over-budget gate is
+    // working correctly, because claim_notes_for_enrichment orders globally by updated_at asc
+    // (00018:58) and `limit: 10` can fill entirely on older foreign notes before it ever
+    // reaches this one -- a false negative. Assert what the over-budget gate is actually
+    // responsible for instead: THIS note was never embedded or extracted, which holds whether
+    // it was claimed-then-skipped for budget or never claimed at all.
+    await runSweep({ db, ai, budgetUsd: 1, limit: 10 });
+
+    const { data: chunks } = await db.from("note_chunks").select("id").eq("note_id", noteId);
+    expect(chunks).toEqual([]);
+    const { data: note } = await db.from("notes").select("enriched_at").eq("id", noteId).single();
+    expect(note!.enriched_at).toBeNull();
   });
 });

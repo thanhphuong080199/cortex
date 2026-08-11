@@ -38,17 +38,24 @@ export class EnrichModule implements OnModuleInit, OnApplicationShutdown {
     // different queued job at the same time this one is still working (SKIP LOCKED, per
     // Task 4's parked review finding, only keeps two workers off the SAME job row -- the
     // claim transaction inside claim_notes_for_enrichment commits, and its lock releases,
-    // long before embedNote/extractNote's AI calls return). For exactly one API instance --
-    // this deployment's shape today -- that never happens: schedule()'s cron firing is
-    // itself singleton across instances (dist/timekeeper.js's trySetCronTime does an atomic
-    // conditional UPDATE against a single pgboss.version row), so there is only ever one
-    // process's worker to race against. A second instance existing at the same time (a
-    // rolling redeploy overlap, or horizontal scaling) is the one case this does not cover;
-    // see Task 13's report for the full three-question trace through node_modules/pg-boss
-    // and why a fix (e.g. `policy: 'singleton'` on createQueue, which trades "queues behind"
-    // for "a slow sweep silently drops the next tick") is left as a decision for the human
-    // rather than added here.
-    await this.boss.work(QUEUE, async () => { await runSweep(deps); });
+    // long before embedNote/extractNote's AI calls return). What makes today's deployment
+    // safe is simpler and narrower than a pg-boss guarantee: there is exactly one API
+    // instance, so there is only ever one process's worker to race against in the first
+    // place. A second instance existing at the same time (a rolling redeploy overlap, or
+    // horizontal scaling) is the one case this does not cover; see Task 13's report for the
+    // full three-question trace through node_modules/pg-boss and why a fix (e.g.
+    // `policy: 'singleton'` on createQueue, which trades "queues behind" for "a slow sweep
+    // silently drops the next tick") is left as a decision for the human rather than added
+    // here.
+    await this.boss.work(QUEUE, async () => {
+      const result = await runSweep(deps);
+      // The only evidence a sweep ran at all, otherwise: per-note error output only fires on
+      // failure, so a healthy deployment and a dead cron look identical in the logs.
+      console.log(
+        `[enrich] sweep complete: processed=${result.processed} failed=${result.failed} ` +
+          `skippedOverBudget=${result.skippedOverBudget}`,
+      );
+    });
     await this.boss.schedule(QUEUE, "* * * * *");
   }
 

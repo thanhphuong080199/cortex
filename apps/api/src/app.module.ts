@@ -17,7 +17,7 @@ import { TagsController } from "./tags.controller";
 // 5-10s of any suite calling app.init(), a live sweep -- and a live Gemini API call -- could
 // fire in the middle of an unrelated test run. "NO TEST MAY EVER CALL THE REAL GEMINI API"
 // (ai/fake.ts) has no exception for "the app happened to boot with the module attached", so
-// EnrichModule is composed onto AppModule only in main.ts, where the real process runs.
+// EnrichModule is composed onto AppModule only in root.module.ts, which only main.ts imports.
 @Module({
   controllers: [
     HealthController, MeController, NotesController, TagsController, ExportController,
