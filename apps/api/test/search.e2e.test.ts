@@ -45,14 +45,41 @@ describe("POST /search", () => {
     expect(res.body.issues).toBeDefined();
   });
 
-  it("finds the caller's own note by keyword", async () => {
+  it("finds the caller's own note by keyword, shaped exactly as noteId/title/snippet/score/matchedBy", async () => {
     await request(app.getHttpServer()).post("/notes")
       .set(auth(alice.token)).send({ content: "the marginal cost of a second cup" }).expect(201);
 
     const res = await request(app.getHttpServer()).post("/search")
       .set(auth(alice.token)).send({ q: "marginal cost" }).expect(201);
     expect(res.body.results.length).toBeGreaterThan(0);
-    expect(res.body.results[0]).toHaveProperty("snippet");
+
+    // The controller's response map (search.controller.ts) is otherwise untypechecked --
+    // db.rpc() returns `any`, so `r.matched_by` mistyped as e.g. `r.matchedby` would compile
+    // clean and silently emit `undefined`, which JSON drops from the wire entirely (unlike
+    // `null`). Asserting the exact key set, not just "has a snippet", is what would catch that:
+    // a dropped key fails toEqual's key-set check even though every OTHER field still matches.
+    const result = res.body.results[0];
+    expect(Object.keys(result).sort()).toEqual(["matchedBy", "noteId", "score", "snippet", "title"]);
+    expect(typeof result.noteId).toBe("string");
+    expect(typeof result.snippet).toBe("string");
+    expect(typeof result.score).toBe("number");
+    expect(typeof result.matchedBy).toBe("string");
+  });
+
+  it("honours a caller-supplied limit", async () => {
+    const marker = "kaleidoscope-ferret-invoice-marker";
+    for (let i = 0; i < 3; i++) {
+      await request(app.getHttpServer()).post("/notes")
+        .set(auth(alice.token)).send({ content: `${marker} note number ${i}` }).expect(201);
+    }
+
+    // Three notes exist that match `marker`; a limit of 1 over HTTP must come back as exactly
+    // one result. This is the one thing packages/db's own search_notes.test.ts (Task 14) does
+    // NOT cover: that body.limit -- not just p_limit at the RPC layer -- actually reaches the
+    // RPC, rather than the controller silently ignoring it and always using its ?? 20 default.
+    const res = await request(app.getHttpServer()).post("/search")
+      .set(auth(alice.token)).send({ q: marker, limit: 1 }).expect(201);
+    expect(res.body.results.length).toBe(1);
   });
 
   // The security property this endpoint exists to protect: the p_user_id passed to

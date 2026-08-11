@@ -12,6 +12,24 @@ const ai = createFakeAi({
   }),
 });
 
+// claim_notes_for_enrichment orders GLOBALLY by updated_at asc with no per-run scoping
+// (00018:58), and this suite's own backdated notes are not the only ones that ever land in this
+// shared local Postgres: notes.e2e, tags.e2e, media.e2e, packages/core's and packages/db's unit
+// suites, etc. all insert notes and never clean them up, across every session that has ever run
+// this repo's tests. Backdating only 5 minutes past the 90-second debounce (the original value
+// here) is not enough once that backlog grows past claim_notes_for_enrichment's `limit: 10` --
+// this test's own note then loses the race to older foreign rows and is never claimed at all.
+// Confirmed via `git stash -u` against bare eb9e707 (pre-Task-15): the same two assertions below
+// failed identically with none of Task 15's changes applied, so this is pre-existing here, not a
+// regression this suite introduced or Task 15 introduced.
+//
+// Stale rows carry their REAL (recent) creation time -- nothing in this repo's history predates
+// this decade -- so backdating decisively further than "5 minutes" puts this suite's note first
+// in the `order by updated_at asc` regardless of how large that backlog grows. A relative offset
+// (not a fixed calendar date) is used so repeated runs of this suite across sessions don't tie
+// with each other's leftover rows at the exact same timestamp.
+const DECISIVELY_OLD_MS = 10 * 365 * 24 * 60 * 60 * 1000; // ~10 years
+
 describe("runSweep", () => {
   beforeAll(async () => {
     // 00008_invite_gate.sql fires on every auth.users insert, including through the admin
@@ -35,7 +53,7 @@ describe("runSweep", () => {
   const seedBackdated = async (content: string) => {
     const { data } = await db.from("notes").insert({ user_id: userId, content }).select("id").single();
     const { error } = await db.rpc("_test_backdate_note", {
-      p_note_id: data!.id, p_when: new Date(Date.now() - 300_000).toISOString(),
+      p_note_id: data!.id, p_when: new Date(Date.now() - DECISIVELY_OLD_MS).toISOString(),
     });
     if (error) throw error;
     return data!.id as string;
@@ -92,7 +110,7 @@ describe("runSweep", () => {
     for (let i = 0; i < 6; i++) {
       await runSweep({ db, ai: failing, budgetUsd: 100, limit: 10 });
       const { error } = await db.rpc("_test_backdate_note", {
-        p_note_id: noteId, p_when: new Date(Date.now() - 300_000).toISOString(),
+        p_note_id: noteId, p_when: new Date(Date.now() - DECISIVELY_OLD_MS).toISOString(),
       });
       if (error) throw error;
     }
