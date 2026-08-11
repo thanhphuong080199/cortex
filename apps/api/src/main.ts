@@ -1,13 +1,23 @@
 import "reflect-metadata";
+import { Module } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import { AppModule } from "./app.module";
 import { CoreErrorFilter } from "./core-error.filter";
+import { EnrichModule } from "./enrich/enrich.module";
 import { parseApiEnv } from "./env";
 
 // Falls back to these when CORS_ORIGINS is unset — covers apps/web's dev server
 // (`next dev --port 3000`) on both hostnames browsers may use for localhost.
 const DEFAULT_CORS_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"];
+
+// Composed here rather than inside AppModule's own `imports`: AppModule is the exact module
+// every e2e suite boots (test/harness.ts), and EnrichModule starts a real pg-boss worker
+// against a real Gemini client the moment it initialises (see app.module.ts's comment). This
+// wrapper is what puts the cron in the actually-deployed process while keeping it entirely
+// out of every test's module graph.
+@Module({ imports: [AppModule, EnrichModule] })
+class RootModule {}
 
 async function bootstrap() {
   let env: ReturnType<typeof parseApiEnv>;
@@ -20,7 +30,7 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(RootModule);
 
   // Express defaults the JSON body to 100 kB, and a full sync batch is bigger than that:
   // SYNC_UPLOAD_MAX_OPS is 500, whose envelope alone is ~75 kB before a single note's text.
