@@ -153,6 +153,50 @@ describe("embedNote", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  // THE SILENT-CORPUS-WIPE GUARD, at the use site.
+  //
+  // gemini.ts's extractVectors now refuses a short response, but embedNote takes an AiClient,
+  // not a Gemini client -- a second implementation, a future cache layer, or a mock that drifts
+  // from the interface can all hand it fewer vectors than chunks. The consequence does not
+  // depend on where the short array came from: `embedding: vectors[i]` is `undefined` on every
+  // row UNIFORMLY, JSON.stringify drops the key, PostgREST accepts the batch, embedded_hash is
+  // stamped at the end of this function, and search_notes' `c.embedding is not null` filter
+  // (00022:40) then hides those chunks forever, because the hash predicate will never claim the
+  // note again. Nothing in the type system catches it: `SupabaseClient` is ungeneric, so
+  // noUncheckedIndexedAccess has no typed destination to complain about.
+  //
+  // What this pins is the DURABLE consequence, not just the throw: no chunk rows, and above all
+  // no embedded_hash -- so the next sweep still claims this note.
+  it("refuses to write rows when embed returns fewer vectors than chunks", async () => {
+    const note = await seedNote("one chunk of text");
+    const short = createFakeAi({
+      embed: async () => ({ vectors: [], inputTokens: 1, model: "fake-embed" }),
+    });
+
+    await expect(embedNote({ db, ai: short }, { ...note, userId })).rejects.toBeTruthy();
+
+    const { data: chunks } = await db.from("note_chunks").select("id, embedding").eq("note_id", note.noteId);
+    expect(chunks).toEqual([]);
+    const { data: mark } = await db.from("note_enrichment")
+      .select("embedded_hash").eq("note_id", note.noteId).maybeSingle();
+    expect(mark).toBeNull();
+  });
+
+  it("refuses a vector-shaped hole in an otherwise correct-length response", async () => {
+    const note = await seedNote("one chunk of text");
+    const holed = createFakeAi({
+      embed: async (texts: string[]) => ({
+        vectors: texts.map(() => undefined) as unknown as number[][],
+        inputTokens: 1, model: "fake-embed",
+      }),
+    });
+
+    await expect(embedNote({ db, ai: holed }, { ...note, userId })).rejects.toBeTruthy();
+    const { data: mark } = await db.from("note_enrichment")
+      .select("embedded_hash").eq("note_id", note.noteId).maybeSingle();
+    expect(mark).toBeNull();
+  });
+
   it("writes an empty note's hash without calling the model", async () => {
     const note = await seedNote("");
     const spy = vi.fn(createFakeAi().embed);

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createFakeAi } from "../ai/fake.js";
 import { createServiceClient } from "../supabase.js";
-import { extractNote } from "./extract.js";
+import { extractNote, TAG_VOCABULARY_LIMIT } from "./extract.js";
 
 const db = createServiceClient();
 let userId: string;
@@ -10,6 +10,44 @@ const aiReturning = (value: unknown) =>
   createFakeAi({
     generateJson: async () => ({ value, inputTokens: 10, outputTokens: 5, model: "fake-classify" }),
   });
+
+/** Same script, but hands back the prompt the model was actually shown. */
+const aiCapturingPrompt = (value: unknown) => {
+  const seen: string[] = [];
+  return {
+    seen,
+    ai: createFakeAi({
+      generateJson: async (args) => {
+        seen.push(args.prompt);
+        return { value, inputTokens: 10, outputTokens: 5, model: "fake-classify" };
+      },
+    }),
+  };
+};
+
+/** The comma-separated vocabulary line buildPrompt writes, split back into names. */
+const vocabularyIn = (prompt: string): string[] => {
+  const line = prompt.split("\n")[3] ?? "";
+  return line === "(none yet)" ? [] : line.split(", ");
+};
+
+/**
+ * `created_at` is written explicitly and spread over distinct instants. A single batch INSERT
+ * stamps every default `now()` with the SAME transaction timestamp, which would make
+ * `order by created_at desc` a tie across the whole fixture and "which tags fall outside the cap"
+ * non-deterministic -- the tests below would pass or fail by luck.
+ */
+const seedTags = async (count: number, prefix: string): Promise<string[]> => {
+  const base = Date.parse("2020-01-01T00:00:00.000Z");
+  const names = Array.from({ length: count }, (_, i) => `${prefix}-${String(i).padStart(4, "0")}`);
+  const { error } = await db.from("tags").insert(
+    names.map((name, i) => ({
+      user_id: userId, name, created_at: new Date(base + i * 60_000).toISOString(),
+    })),
+  );
+  if (error) throw error;
+  return names; // index 0 is the OLDEST, i.e. the first to fall outside a `created_at desc` cap
+};
 
 async function seedNote(content: string) {
   const { data } = await db.from("notes").insert({ user_id: userId, content }).select("id, content_text").single();
@@ -135,6 +173,96 @@ describe("extractNote", () => {
 
     const { data } = await db.from("notes").select("domain").eq("id", note.noteId).single();
     expect(data!.domain).toBeNull();
+  });
+
+  // THE max_rows BUG, for the second time. Task 12 already fixed this shape once in
+  // monthToDateUsd (see 00021's header): config.toml sets PostgREST's `max_rows = 1000`, which
+  // truncates a response at 1000 rows with NO error and no signal short of reading
+  // Content-Range. The tag read had no `.limit()` and no pagination, so a user at 1000 tags got
+  // an arbitrary 1000-row slice, and every tag outside it read as novel.
+  //
+  // The cap is now a product decision, not a PostgREST default, and it is well under 1000 --
+  // which is what makes this test able to fail: with no `.limit()` at all, the fixture below
+  // (LIMIT + 5 tags, still under max_rows) reaches buildPrompt whole.
+  it("shows the model at most TAG_VOCABULARY_LIMIT tags, however many the user has", async () => {
+    await seedTags(TAG_VOCABULARY_LIMIT + 5, "vocab");
+    const note = await seedNote("body");
+    const { seen, ai } = aiCapturingPrompt({ domain: null, domain_meta: {}, tags: [] });
+    await extractNote({ db, ai }, note);
+
+    expect(vocabularyIn(seen[0]!)).toHaveLength(TAG_VOCABULARY_LIMIT);
+  });
+
+  it("keeps the most recent tags when it has to cut", async () => {
+    const names = await seedTags(TAG_VOCABULARY_LIMIT + 5, "recency");
+    const note = await seedNote("body");
+    const { seen, ai } = aiCapturingPrompt({ domain: null, domain_meta: {}, tags: [] });
+    await extractNote({ db, ai }, note);
+
+    const shown = new Set(vocabularyIn(seen[0]!));
+    expect(shown.has(names.at(-1)!)).toBe(true); // newest survives
+    expect(shown.has(names[0]!)).toBe(false); // oldest is the one cut
+  });
+
+  // The cap would be a REGRESSION on its own. A tag outside the slice is not in byLowerName, so
+  // the old code treated it as novel and inserted it -- against tags_user_name_uidx, a unique
+  // index on (user_id, lower(name)) where deleted_at is null. That insert does not silently
+  // duplicate, it RAISES, and extract.ts rethrows: the note fails, five times, and 00018's cap
+  // tombstones it. Narrowing the vocabulary from 1000 to a few hundred would have made that
+  // failure common instead of rare. The vocabulary is what the MODEL sees; it is not the set of
+  // tags that exist, and tag resolution must not assume it is.
+  it("reuses a tag that exists but fell outside the capped vocabulary", async () => {
+    const names = await seedTags(TAG_VOCABULARY_LIMIT + 5, "outside");
+    const oldest = names[0]!;
+    const { data: existing } = await db.from("tags")
+      .select("id").eq("user_id", userId).eq("name", oldest).single();
+
+    const note = await seedNote("body");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [{ name: oldest, confidence: 0.9 }] });
+    await extractNote({ db, ai }, note);
+
+    const { data: sameName } = await db.from("tags")
+      .select("id").eq("user_id", userId).ilike("name", oldest);
+    expect(sameName).toHaveLength(1); // no near-duplicate created
+    const { data: links } = await db.from("note_tags").select("tag_id").eq("note_id", note.noteId);
+    expect(links).toHaveLength(1);
+    expect(links![0]!.tag_id).toBe(existing!.id);
+  });
+
+  // Same path, case-varied: the unique index is on lower(name), so "Outside-0000" and
+  // "outside-0000" are the SAME tag as far as Postgres is concerned, and the fallback lookup has
+  // to agree with the index rather than with `=`.
+  it("reuses an out-of-vocabulary tag that differs only by case", async () => {
+    const names = await seedTags(TAG_VOCABULARY_LIMIT + 5, "cased");
+    const oldest = names[0]!;
+    const note = await seedNote("body");
+    const ai = aiReturning({
+      domain: null, domain_meta: {}, tags: [{ name: oldest.toUpperCase(), confidence: 0.9 }],
+    });
+    await extractNote({ db, ai }, note);
+
+    const { data: sameName } = await db.from("tags")
+      .select("id").eq("user_id", userId).ilike("name", oldest);
+    expect(sameName).toHaveLength(1);
+  });
+
+  // tags_user_name_uidx is PARTIAL (`where deleted_at is null`), so a soft-deleted tag does not
+  // block re-creating its name -- and it must not be offered to the model or resurrected by a
+  // link either. The read had no deleted_at filter at all, which meant a tag the user had
+  // deleted kept being suggested back to them.
+  it("ignores a soft-deleted tag rather than suggesting it back", async () => {
+    const { data: gone } = await db.from("tags")
+      .insert({ user_id: userId, name: "retired", deleted_at: new Date().toISOString() })
+      .select("id").single();
+    const note = await seedNote("body");
+    const { seen, ai } = aiCapturingPrompt({
+      domain: null, domain_meta: {}, tags: [{ name: "retired", confidence: 0.9 }],
+    });
+    await extractNote({ db, ai }, note);
+
+    expect(vocabularyIn(seen[0]!)).not.toContain("retired");
+    const { data: links } = await db.from("note_tags").select("tag_id").eq("note_id", note.noteId);
+    expect(links!.map((l) => l.tag_id)).not.toContain(gone!.id);
   });
 
   it("stamps extracted_hash", async () => {

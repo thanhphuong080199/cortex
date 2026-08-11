@@ -41,18 +41,44 @@ export async function embedNote(
 
   if (stale.length > 0) {
     const { vectors, inputTokens, model } = await ai.embed(stale.map((c) => c.content));
+    // gemini.ts's extractVectors already refuses a short response, and this repeats the check
+    // because the two guards protect different things. That one protects the Gemini client; this
+    // one protects the WRITE, and embedNote takes an AiClient -- an interface, satisfied today by
+    // a fake, tomorrow by a cache layer or a second provider.
+    //
+    // What a short array does here is uniquely bad and completely silent. `embedding: vectors[i]`
+    // is `undefined` on every row, UNIFORMLY, so JSON.stringify drops the key from all of them,
+    // PostgREST accepts the batch (the keys match), recordUsage bills the call, embedded_hash is
+    // stamped below, and the sweep logs a success. The chunks are then invisible to search_notes,
+    // which filters on `c.embedding is not null` (00022:40), and the hash predicate guarantees
+    // the note is never claimed again -- so they stay invisible permanently.
+    //
+    // The type checker cannot catch it: `SupabaseClient` is ungeneric, so `.upsert(rows)` takes
+    // `any` and noUncheckedIndexedAccess has no typed destination to complain about. This is a
+    // runtime check because there is nowhere else to put one.
+    if (vectors.length !== stale.length) {
+      throw new Error(`enrich: embed returned ${vectors.length} vectors for ${stale.length} chunks`);
+    }
     const now = new Date().toISOString();
-    const rows = stale.map((c, i) => ({
-      user_id: note.userId,
-      note_id: note.noteId,
-      chunk_index: c.index,
-      content: c.content,
-      content_hash: md5(c.content),
-      token_count: Math.ceil(c.content.length / 4),
-      embedding: vectors[i],
-      embedding_model: EMBEDDING_MODEL,
-      embedded_at: now,
-    }));
+    const rows = stale.map((c, i) => {
+      const embedding = vectors[i];
+      if (!Array.isArray(embedding) || embedding.length === 0) {
+        // A correct-length array with a hole in it lands on the same NULL embedding as a short
+        // one, so the length check above is not on its own sufficient.
+        throw new Error(`enrich: embed returned no vector for chunk ${c.index}`);
+      }
+      return {
+        user_id: note.userId,
+        note_id: note.noteId,
+        chunk_index: c.index,
+        content: c.content,
+        content_hash: md5(c.content),
+        token_count: Math.ceil(c.content.length / 4),
+        embedding,
+        embedding_model: EMBEDDING_MODEL,
+        embedded_at: now,
+      };
+    });
     const { error } = await db.from("note_chunks").upsert(rows, { onConflict: "note_id,chunk_index" });
     if (error) throw error;
     await recordUsage(db, { userId: note.userId, kind: "embed", model, inputTokens, outputTokens: 0 });
