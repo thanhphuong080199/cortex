@@ -59,6 +59,7 @@ export default async function Home(
       <div className="topbar">
         <h1>Cortex</h1>
         <span className="spacer" />
+        <Link className="btn" href="/search">Search</Link>
         <ExportButton token={session.access_token} />
         <form action="/auth/signout" method="post"><button>Sign out</button></form>
       </div>

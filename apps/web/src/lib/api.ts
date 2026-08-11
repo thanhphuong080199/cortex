@@ -1,9 +1,17 @@
 import {
-  attachTagInput, createCheckinInput, createNoteInput, createTagInput, logMediaInput, updateNoteInput,
+  attachTagInput, createCheckinInput, createNoteInput, createTagInput, logMediaInput, searchInput, updateNoteInput,
   type AttachTagInput, type CreateCheckinInput, type CreateNoteInput, type CreateTagInput,
-  type LogMediaInput, type UpdateNoteInput,
+  type LogMediaInput, type SearchInput, type UpdateNoteInput,
 } from "@cortex/shared";
 import type { ZodType } from "zod";
+
+export interface SearchResult {
+  noteId: string;
+  title: string | null;
+  snippet: string;
+  score: number;
+  matchedBy: string;
+}
 
 export class ApiError extends Error {
   constructor(public status: number, public issues?: unknown) { super(`API ${status}`); }
@@ -53,4 +61,6 @@ export const api = {
   deleteCheckin: async (token: string, id: string) => send(`/checkins/${id}`, "DELETE", token),
   logMedia: async (token: string, input: LogMediaInput) =>
     send("/media-log", "POST", token, validated(logMediaInput, input)),
+  search: async (token: string, input: SearchInput) =>
+    (await send("/search", "POST", token, validated(searchInput, input)) as { results: SearchResult[] }).results,
 };
