@@ -6,8 +6,12 @@ import {
 } from "@cortex/shared";
 import { useQuery } from "@powersync/react-native";
 import { Link } from "expo-router";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { FlatList, Pressable, Text, TextInput, View } from "react-native";
+
+import { createInFlightGuard } from "../lib/in-flight";
+import { OfflineError, semanticSearch, type SemanticResult } from "../lib/semantic-search";
+import { supabase } from "../lib/supabase";
 
 /**
  * Reads the local replica directly -- no service layer, no network (spec §2.1). The narrowing
@@ -45,6 +49,53 @@ export function NoteList({
 } = {}) {
   const [filters, setFilters] = useState<NoteFilters>({ view: "inbox" });
 
+  // Semantic search is a separate, explicit action layered on top of the reactive FTS5 query
+  // above -- never a replacement for it. `semanticResults` is additive state; nothing here ever
+  // touches `filters` or the local `notes` query, so a failed or offline meaning-search cannot
+  // make the always-on local list disappear or look empty.
+  const [semanticResults, setSemanticResults] = useState<SemanticResult[] | null>(null);
+  const [semanticBusy, setSemanticBusy] = useState(false);
+  const [semanticError, setSemanticError] = useState<string | null>(null);
+  const semanticGuard = useRef(createInFlightGuard()).current;
+
+  async function runSemanticSearch() {
+    const q = filters.q;
+    if (!q) return;
+    await semanticGuard(async () => {
+      setSemanticBusy(true);
+      setSemanticError(null);
+      try {
+        const apiUrl = process.env.EXPO_PUBLIC_API_URL;
+        if (!apiUrl) throw new Error("no API URL configured");
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        if (!session) throw new Error("not signed in");
+        const results = await semanticSearch({
+          q,
+          token: session.access_token,
+          apiUrl,
+          fetchFn: fetch,
+        });
+        setSemanticResults(results);
+      } catch (err) {
+        // OfflineError gets its own message and the PREVIOUS semantic results (if any) are left
+        // alone -- silently swapping them for local FTS results, or for nothing, would tell the
+        // user their notes are not there, which is false. Any other failure (a 500, a malformed
+        // body) is reported the same way: never rendered as an empty match list.
+        setSemanticError(
+          err instanceof OfflineError
+            ? "Semantic search needs a connection — showing local results"
+            : err instanceof Error
+              ? err.message
+              : "Search failed. Try again.",
+        );
+      } finally {
+        setSemanticBusy(false);
+      }
+    });
+  }
+
   const { sql, params } = useMemo(() => {
     const { where, params: p, join } = noteFiltersToSql(filters);
     return {
@@ -73,7 +124,7 @@ export function NoteList({
         placeholder="Search"
         accessibilityLabel="Search notes"
         testID="search-input"
-        onChangeText={(q) =>
+        onChangeText={(q) => {
           // Spread-if rather than assigning undefined: `noteFiltersToSql` emits the FTS clause
           // on any truthy `q`, and a present-but-empty one would match nothing and empty the
           // list the moment the user cleared the box.
@@ -81,10 +132,59 @@ export function NoteList({
             const trimmed = q.trim();
             const { q: _dropped, ...rest } = f;
             return trimmed ? { ...rest, q: trimmed } : rest;
-          })
-        }
+          });
+          // A stale meaning-search answer sitting under a query the user has since changed
+          // would look like a live result for text nobody searched.
+          setSemanticResults(null);
+          setSemanticError(null);
+        }}
         style={{ borderWidth: 1, borderColor: "#ccc", borderRadius: 8, padding: 10 }}
       />
+      <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+        <Pressable
+          onPress={() => void runSemanticSearch()}
+          disabled={!filters.q || semanticBusy}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: !filters.q || semanticBusy }}
+          testID="semantic-search-button"
+          style={{
+            paddingVertical: 8,
+            paddingHorizontal: 14,
+            borderRadius: 8,
+            backgroundColor: !filters.q || semanticBusy ? "#eee" : "#222",
+          }}
+        >
+          <Text style={{ color: !filters.q || semanticBusy ? "#999" : "white" }}>
+            {semanticBusy ? "Searching by meaning…" : "Search by meaning"}
+          </Text>
+        </Pressable>
+      </View>
+      {semanticError ? (
+        <Text testID="semantic-search-error" style={{ color: "crimson" }}>
+          {semanticError}
+        </Text>
+      ) : null}
+      {semanticResults ? (
+        // Its own section, never a swap-in for the FlatList's `data`: the local FTS5 list below
+        // stays exactly as it was regardless of what meaning-search returns.
+        <View style={{ gap: 8 }}>
+          <Text style={{ fontWeight: "600" }}>Matches by meaning</Text>
+          {semanticResults.length === 0 ? (
+            <Text style={{ opacity: 0.6 }}>No notes matched.</Text>
+          ) : (
+            semanticResults.map((r) => (
+              <Link key={r.noteId} href={`/notes/${r.noteId}`} asChild>
+                <Pressable accessibilityRole="link" style={{ paddingVertical: 8 }}>
+                  <Text numberOfLines={1}>{r.title ?? "Untitled"}</Text>
+                  <Text numberOfLines={2} style={{ opacity: 0.6, fontSize: 12 }}>
+                    {r.snippet}
+                  </Text>
+                </Pressable>
+              </Link>
+            ))
+          )}
+        </View>
+      ) : null}
       <View style={{ flexDirection: "row", gap: 8 }}>
         {NOTE_VIEWS.map((v) => (
           <Pressable
