@@ -38,13 +38,18 @@ export function SearchForm({ onSearch }: { onSearch: (q: string) => Promise<Sear
     <div>
       {/* Submit-driven, never search-as-you-type: each query costs an embedding call. */}
       <form className="search" role="search" onSubmit={submit}>
-        <input type="search" name="q" placeholder="Search your notes by meaning…" aria-label="Search notes" />
+        <input
+          type="search" name="q" maxLength={500}
+          placeholder="Search your notes by meaning…" aria-label="Search notes"
+        />
         <button type="submit" disabled={busy}>{busy ? "Searching…" : "Search"}</button>
       </form>
 
       {error && <p className="error" role="alert">{error}</p>}
 
-      {results !== null && results.length === 0 && !error && <p className="empty">No notes matched.</p>}
+      {/* error implies results === null (the catch below always sets both), so results !== null
+          here already rules out the error path -- no need for a redundant `&& !error`. */}
+      {results !== null && results.length === 0 && <p className="empty">No notes matched.</p>}
 
       <ul className="notes">
         {(results ?? []).map((r) => (

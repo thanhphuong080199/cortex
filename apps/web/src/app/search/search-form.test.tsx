@@ -27,7 +27,30 @@ describe("SearchForm", () => {
   it("says why a result matched, so a semantic hit is not mistaken for a typo", async () => {
     render(<SearchForm onSearch={vi.fn().mockResolvedValue(results)} />);
     await userEvent.type(screen.getByRole("searchbox"), "x{Enter}");
-    await waitFor(() => expect(screen.getByText(/by meaning/i)).toBeInTheDocument());
+    // Anchored, not `/by meaning/i`: that substring also matches "by meaning and wording"
+    // (matchedBy "both"), so it wouldn't actually distinguish "vector" from "both".
+    await waitFor(() => expect(screen.getByText(/^by meaning$/i)).toBeInTheDocument());
+  });
+
+  it("labels a hybrid match distinctly from a pure-vector one", async () => {
+    const hybrid = [{ ...results[0]!, noteId: "n2", matchedBy: "both" }];
+    render(<SearchForm onSearch={vi.fn().mockResolvedValue(hybrid)} />);
+    await userEvent.type(screen.getByRole("searchbox"), "x{Enter}");
+    await waitFor(() => expect(screen.getByText(/^by meaning and wording$/i)).toBeInTheDocument());
+  });
+
+  it("falls back to the raw matchedBy value when it doesn't recognize it", async () => {
+    const odd = [{ ...results[0]!, noteId: "n3", matchedBy: "keyword" }];
+    render(<SearchForm onSearch={vi.fn().mockResolvedValue(odd)} />);
+    await userEvent.type(screen.getByRole("searchbox"), "x{Enter}");
+    await waitFor(() => expect(screen.getByText("keyword")).toBeInTheDocument());
+  });
+
+  it("shows Untitled for a result with no title, instead of an empty link", async () => {
+    const untitled = [{ ...results[0]!, noteId: "n4", title: null }];
+    render(<SearchForm onSearch={vi.fn().mockResolvedValue(untitled)} />);
+    await userEvent.type(screen.getByRole("searchbox"), "x{Enter}");
+    await waitFor(() => expect(screen.getByText("Untitled")).toBeInTheDocument());
   });
 
   it("reports an empty result rather than rendering nothing", async () => {
