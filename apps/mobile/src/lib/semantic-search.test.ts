@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { OfflineError, semanticSearch } from "./semantic-search.js";
+import {
+  describeSearchFailure,
+  OfflineError,
+  SEARCH_OFFLINE_MESSAGE,
+  semanticSearch,
+} from "./semantic-search.js";
 
 const ok = { results: [{ noteId: "n1", title: null, snippet: "s", score: 1, matchedBy: "vector" }] };
 
@@ -31,6 +36,16 @@ describe("semanticSearch", () => {
 
     const [, init] = firstCall(fetchFn);
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ q: "x", limit: 5 });
+  });
+
+  // `limit: 0` is not a valid input -- the shared DTO requires a positive integer. Dropping it
+  // here would turn the caller's bad input into a successful search over the default 20.
+  it("sends a zero limit through rather than silently dropping it", async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true, json: async () => ok });
+    await semanticSearch({ q: "x", token: "j", apiUrl: "https://api.test", limit: 0, fetchFn });
+
+    const [, init] = firstCall(fetchFn);
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ q: "x", limit: 0 });
   });
 
   it("returns the results", async () => {
@@ -66,5 +81,33 @@ describe("semanticSearch", () => {
     await expect(
       semanticSearch({ q: "x", token: "j", apiUrl: "https://api.test", fetchFn }),
     ).rejects.toThrow(/results/);
+  });
+});
+
+// The screen renders whatever this returns, so this is where the offline-vs-everything-else
+// contract is actually decided. It lives here, out of the `.tsx`, precisely so it can be tested.
+describe("describeSearchFailure", () => {
+  it("gives OfflineError the offline copy", () => {
+    expect(describeSearchFailure(new OfflineError("boom"))).toBe(SEARCH_OFFLINE_MESSAGE);
+  });
+
+  // The screen hits the network in supabase.auth.getSession() before semanticSearch ever runs,
+  // and that one rejects with a raw platform message, not an OfflineError. Same situation to the
+  // user, so the same copy -- otherwise being offline shows "Network request failed" roughly
+  // half the time depending on which call happens to go first.
+  it("gives a raw network failure the offline copy too", () => {
+    expect(describeSearchFailure(new TypeError("Network request failed"))).toBe(
+      SEARCH_OFFLINE_MESSAGE,
+    );
+    expect(describeSearchFailure(new Error("Failed to fetch"))).toBe(SEARCH_OFFLINE_MESSAGE);
+  });
+
+  it("passes any other error's message through so a real failure stays diagnosable", () => {
+    expect(describeSearchFailure(new Error("search failed (500)"))).toBe("search failed (500)");
+    expect(describeSearchFailure(new Error("not signed in"))).toBe("not signed in");
+  });
+
+  it("has copy for a thrown non-Error", () => {
+    expect(describeSearchFailure("nope")).toBe("Search failed. Try again.");
   });
 });

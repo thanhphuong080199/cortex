@@ -10,7 +10,7 @@ import { useMemo, useRef, useState } from "react";
 import { FlatList, Pressable, Text, TextInput, View } from "react-native";
 
 import { createInFlightGuard } from "../lib/in-flight";
-import { OfflineError, semanticSearch, type SemanticResult } from "../lib/semantic-search";
+import { describeSearchFailure, semanticSearch, type SemanticResult } from "../lib/semantic-search";
 import { supabase } from "../lib/supabase";
 
 /**
@@ -79,17 +79,12 @@ export function NoteList({
         });
         setSemanticResults(results);
       } catch (err) {
-        // OfflineError gets its own message and the PREVIOUS semantic results (if any) are left
+        // Being offline gets its own message and the PREVIOUS semantic results (if any) are left
         // alone -- silently swapping them for local FTS results, or for nothing, would tell the
         // user their notes are not there, which is false. Any other failure (a 500, a malformed
-        // body) is reported the same way: never rendered as an empty match list.
-        setSemanticError(
-          err instanceof OfflineError
-            ? "Semantic search needs a connection — showing local results"
-            : err instanceof Error
-              ? err.message
-              : "Search failed. Try again.",
-        );
+        // body) is reported the same way: never rendered as an empty match list. The mapping
+        // itself lives in `../lib/semantic-search` so it can be tested; this file cannot be.
+        setSemanticError(describeSearchFailure(err));
       } finally {
         setSemanticBusy(false);
       }
