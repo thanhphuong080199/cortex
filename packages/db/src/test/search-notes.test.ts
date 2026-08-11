@@ -43,11 +43,20 @@ async function seed(userId: string, content: string, opts: { embedding?: number[
 describe("search_notes", () => {
   let alice: string;
   let bob: string;
+  // The fusion and recency-clamp tests below assert things about RRF *ranks*, and a rank is
+  // computed over the whole of one user's corpus -- alice accumulates ~15 notes across this
+  // file, so "rank 1" and "rank 2" there are only true because the other candidates happen to
+  // be far away in cosine distance. These two users hold nothing but the three or four notes
+  // their own test seeds, so the ranks the assertions depend on are the ranks that exist.
+  let fusion: string;
+  let clock: string;
 
   beforeAll(async () => {
     ({ id: alice } = await makeUser("search-alice@example.com"));
     ({ id: bob } = await makeUser("search-bob@example.com"));
-    await admin.from("notes").delete().in("user_id", [alice, bob]);
+    ({ id: fusion } = await makeUser("search-fusion@example.com"));
+    ({ id: clock } = await makeUser("search-clock@example.com"));
+    await admin.from("notes").delete().in("user_id", [alice, bob, fusion, clock]);
   });
 
   it("finds a note by keyword alone, with no useful embedding", async () => {
@@ -80,6 +89,52 @@ describe("search_notes", () => {
     expect(row!.matched_by).toBe("both");
   });
 
+  // THE FUSION ITSELF. `matched_by` is computed in a `case` expression entirely separate from
+  // the score, so every other test in this file survives deleting either term of
+  // `coalesce(1/(60+v.rank),0) + coalesce(1/(60+f.rank),0)`: a row whose base collapsed to 0
+  // still reports "fts" or "both", the recency and provenance tests all query
+  // `zzz-no-fts-token-overlap-zzz` and are single-arm by construction, and the rest assert
+  // containment or counts. Verified by mutation -- with the FTS term removed, all ten of the
+  // other tests stay green.
+  //
+  // RRF's whole claim is that AGREEMENT between two weak signals beats one strong signal, so
+  // the note in both arms is given the WORSE rank in each: it cannot win on membership, only
+  // on the sum. `bothArms` is vector rank 2 (nudged) and FTS rank 2 (one query term);
+  // `vectorOnly` is vector rank 1 (the exact target) and contains neither query token;
+  // `ftsOnly` is FTS rank 1 (both query terms -- ts_rank combines matched operands, so two
+  // beats one deterministically) and has no chunk at all. That catches both mutations, in
+  // opposite directions:
+  //   drop the FTS term    -> bothArms 1/62 = 0.01613 loses to vectorOnly 1/61 = 0.01639
+  //   drop the vector term -> bothArms 1/62 = 0.01613 loses to ftsOnly    1/61 = 0.01639
+  // while the intact sum gives bothArms 1/62 + 1/62 = 0.03226, ahead of both. The three notes
+  // share one created_at and the default 'quick' source_type, so the recency and provenance
+  // multipliers are identical across them and cannot be what orders the result.
+  it("fuses both arms: agreement at rank 2 beats a single arm at rank 1", async () => {
+    const target = vec(101);
+    const at = new Date().toISOString();
+    const bothArms = await seed(fusion, "quokka", { embedding: nudge(target), createdAt: at });
+    const vectorOnly = await seed(fusion, "unrelated ledger body", { embedding: target, createdAt: at });
+    const ftsOnly = await seed(fusion, "quokka wombat", { createdAt: at });
+
+    const rows = await search(fusion, "quokka or wombat", target);
+    const byId = new Map(rows.map((r) => [r.note_id, r]));
+    const fused = byId.get(bothArms);
+    const vectorRow = byId.get(vectorOnly);
+    const ftsRow = byId.get(ftsOnly);
+    expect(fused).toBeDefined();
+    expect(vectorRow).toBeDefined();
+    expect(ftsRow).toBeDefined();
+
+    // The fixture is only meaningful if each note reached the arms it was built for; assert it
+    // rather than let a mis-seeded row make the comparison below pass for some other reason.
+    expect(fused!.matched_by).toBe("both");
+    expect(vectorRow!.matched_by).toBe("vector");
+    expect(ftsRow!.matched_by).toBe("fts");
+
+    expect(fused!.score).toBeGreaterThan(vectorRow!.score);
+    expect(fused!.score).toBeGreaterThan(ftsRow!.score);
+  });
+
   // Same rank-tie hazard as the provenance tests below, same fix: `oldId` gets the exact
   // target (guaranteed rank 1 -- the better RAW rank), `newId` gets a nudged vector
   // (guaranteed rank 2). Without this, both were seeded with the identical `target` vector,
@@ -100,6 +155,43 @@ describe("search_notes", () => {
     expect(order).toContain(oldId);
     expect(order).toContain(newId);
     expect(order.indexOf(newId)).toBeLessThan(order.indexOf(oldId));
+  });
+
+  // `created_at` arrives from the DEVICE (apps/api/src/sync/router.ts's notes PUT passes
+  // `data.created_at` through), so the age fed to `exp(-age/180)` can be negative and the decay
+  // becomes an amplifier: a note dated two years ahead scored exp(+4.05) ~= 57x and pinned
+  // itself to rank 1 of every query that user ran.
+  //
+  // The direction matters. `future` is deliberately given the WORSE raw rank (nudged, rank 2)
+  // and `present` the better one (exact target, rank 1), so an unclamped decay is the only
+  // thing that can put `future` first -- seeded the other way round the test would pass with or
+  // without the clamp. Both share content and source_type; the query has no token overlap, so
+  // the FTS arm contributes nothing to either.
+  it("does not let a future created_at amplify a note above a present-dated one", async () => {
+    const target = vec(111);
+    const ahead = new Date(Date.now() + 730 * 86_400_000).toISOString();
+    const present = await seed(clock, "identical decay body", { embedding: target });
+    const future = await seed(clock, "identical decay body", { embedding: nudge(target), createdAt: ahead });
+    const order = (await search(clock, "zzz-no-fts-token-overlap-zzz", target)).map((r) => r.note_id);
+    expect(order).toContain(present);
+    expect(order).toContain(future);
+    expect(order.indexOf(present)).toBeLessThan(order.indexOf(future));
+  });
+
+  // The same unbounded age, one bad import further along. `extract(epoch from interval)` is
+  // NUMERIC in PG 14+, so the exponent goes to numeric_exp, which raises "value overflows
+  // numeric format" above ~6000 -- and 9999-12-31, the sentinel a "no expiry" default or a
+  // botched date parse writes, is ~16179. The error is raised while projecting the final
+  // select, so ONE such row anywhere in a user's corpus turned every POST /search that user
+  // made into a 500, for queries that had nothing to do with the note.
+  //
+  // Asserted as "the search still returns this row", not merely "does not throw": the helper
+  // rethrows the RPC error, so a 500 fails here loudly, and requiring the row in the result
+  // proves the clamp kept the note scoreable rather than filtering it out of existence.
+  it("survives a far-future created_at instead of failing the whole search", async () => {
+    const sentinel = await seed(clock, "sentinel dated import row", { createdAt: "9999-12-31T00:00:00Z" });
+    const rows = await search(clock, "sentinel dated import", vec(121));
+    expect(rows.map((r) => r.note_id)).toContain(sentinel);
   });
 
   // The provenance multiplier. Nothing produces these notes until stage C; the hook is built
