@@ -18,6 +18,19 @@ describe("createFakeAi", () => {
     expect(first).toEqual(second);
   });
 
+  // The real client (gemini.ts's normalizeEmbedding) guarantees unit length and documents it as
+  // something downstream code may assume. A fake that violates the guarantee lets the first
+  // inner-product or raw-L2 consumer pass its whole suite and be wrong only against real
+  // vectors in production -- by which point the fix is re-embedding the corpus. Cosine ranking
+  // is scale-invariant, so this assertion is the ONLY thing that would catch a regression here.
+  it("returns unit vectors, matching the real client's guarantee", async () => {
+    const ai = createFakeAi();
+    const { vectors } = await ai.embed(["alpha", "beta"]);
+    for (const v of vectors) {
+      expect(Math.sqrt(v.reduce((sum, x) => sum + x * x, 0))).toBeCloseTo(1, 10);
+    }
+  });
+
   it("gives different texts different vectors", async () => {
     const ai = createFakeAi();
     const { vectors } = await ai.embed(["alpha", "beta"]);

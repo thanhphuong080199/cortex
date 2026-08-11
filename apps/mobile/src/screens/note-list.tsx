@@ -119,6 +119,11 @@ export function NoteList({
         placeholder="Search"
         accessibilityLabel="Search notes"
         testID="search-input"
+        // The same cap `searchInput` enforces server-side (packages/shared/src/dto/search.ts) and
+        // the same one apps/web's search box carries, so a pasted article is truncated at entry
+        // rather than becoming a `search failed (400)` the user cannot act on. `semanticSearch`
+        // validates too -- this only stops the text existing, that stops it being sent.
+        maxLength={500}
         onChangeText={(q) => {
           // Spread-if rather than assigning undefined: `noteFiltersToSql` emits the FTS clause
           // on any truthy `q`, and a present-but-empty one would match nothing and empty the

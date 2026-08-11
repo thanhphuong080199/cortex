@@ -4,6 +4,7 @@ import {
   describeSearchFailure,
   OfflineError,
   SEARCH_OFFLINE_MESSAGE,
+  SearchInputError,
   semanticSearch,
 } from "./semantic-search.js";
 
@@ -38,14 +39,62 @@ describe("semanticSearch", () => {
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ q: "x", limit: 5 });
   });
 
-  // `limit: 0` is not a valid input -- the shared DTO requires a positive integer. Dropping it
-  // here would turn the caller's bad input into a successful search over the default 20.
-  it("sends a zero limit through rather than silently dropping it", async () => {
+  // `limit: 0` is not a valid input -- the shared DTO requires a positive integer. The invariant
+  // this pins is that it is never SILENTLY DROPPED, which would turn the caller's bad input into
+  // a successful search over the default 20. It is now rejected here instead of being sent for
+  // the server to 400, which is the same reason the length cap below is local: reporting the bad
+  // field beats a status code the caller has to decode. The `not.toHaveBeenCalled` is the half
+  // that actually rules out the silent-success failure mode.
+  it("rejects a zero limit locally rather than silently dropping it", async () => {
     const fetchFn = vi.fn().mockResolvedValue({ ok: true, json: async () => ok });
-    await semanticSearch({ q: "x", token: "j", apiUrl: "https://api.test", limit: 0, fetchFn });
+    await expect(
+      semanticSearch({ q: "x", token: "j", apiUrl: "https://api.test", limit: 0, fetchFn }),
+    ).rejects.toBeInstanceOf(SearchInputError);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  // A pasted article is the realistic case. Before this, 800 characters went to the server, came
+  // back 400, and the screen showed "search failed (400)" -- a VALIDATION problem wearing a
+  // REQUEST FAILURE's clothes, with nothing in it the user could act on. Web fixed exactly this
+  // one round earlier (maxLength={500} plus `validated(searchInput, ...)` in its api.ts); mobile
+  // shipped without either.
+  it("rejects an over-long query before making any request", async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true, json: async () => ok });
+    await expect(
+      semanticSearch({ q: "a".repeat(501), token: "j", apiUrl: "https://api.test", fetchFn }),
+    ).rejects.toBeInstanceOf(SearchInputError);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  // The message has to say what is wrong and what the limit is, or it is no better than the 400
+  // it replaced. The cap is quoted from the schema's own issue, so this stays true if the
+  // server's limit ever moves.
+  it("says the query is too long, and names the limit", async () => {
+    const fetchFn = vi.fn();
+    await expect(
+      semanticSearch({ q: "a".repeat(800), token: "j", apiUrl: "https://api.test", fetchFn }),
+    ).rejects.toThrow(/too long.*500/i);
+  });
+
+  // The boundary itself, so an off-by-one in either direction is caught: 500 is the largest
+  // value the shared schema accepts, and it must still go out.
+  it("still sends a query of exactly the maximum length", async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true, json: async () => ok });
+    const q = "a".repeat(500);
+    await semanticSearch({ q, token: "j", apiUrl: "https://api.test", fetchFn });
 
     const [, init] = firstCall(fetchFn);
-    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ q: "x", limit: 0 });
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ q });
+  });
+
+  // searchInput trims before measuring, so trailing whitespace must not push an otherwise-legal
+  // query over the cap -- the server would have accepted this one.
+  it("measures the trimmed query, not the raw one", async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true, json: async () => ok });
+    await semanticSearch({
+      q: `${"a".repeat(500)}   `, token: "j", apiUrl: "https://api.test", fetchFn,
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
   it("returns the results", async () => {
@@ -100,6 +149,15 @@ describe("describeSearchFailure", () => {
       SEARCH_OFFLINE_MESSAGE,
     );
     expect(describeSearchFailure(new Error("Failed to fetch"))).toBe(SEARCH_OFFLINE_MESSAGE);
+  });
+
+  // The whole point of validating locally is that the user READS the reason. If this mapping
+  // ever swallowed SearchInputError into generic copy, the too-long query would be back to
+  // being indistinguishable from a broken search -- just without the round trip.
+  it("shows a validation failure's own message, not generic search-failed copy", () => {
+    const msg = describeSearchFailure(new SearchInputError("That search is too long — 500 characters max, this one is 800."));
+    expect(msg).toMatch(/too long/);
+    expect(msg).not.toBe(SEARCH_OFFLINE_MESSAGE);
   });
 
   it("passes any other error's message through so a real failure stays diagnosable", () => {

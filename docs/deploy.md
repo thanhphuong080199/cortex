@@ -604,18 +604,129 @@ supabase migration list # confirm local == remote (should now show 00001..00011)
 
 ### 2. Railway environment variables (API)
 
+**This table is the whole set the API requires, not just 1a's additions** — deliberately one
+table rather than a per-phase delta in each checklist, because two copies drift and the
+operator reading the wrong one gets a container that will not boot. It mirrors
+`apps/api/src/env.ts`'s `envSchema`; that file is the authority, and if the two ever
+disagree, the file wins and this table is the bug.
+
+Everything marked ✅ is validated at boot by `parseApiEnv`. A missing or malformed one is
+**not** a degraded mode: `main.ts` catches the `ZodError`, logs it, and calls
+`process.exit(1)`. The container never listens, so `/health` never answers and Railway shows
+a crash loop rather than a healthy deploy with a broken feature.
+
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `SUPABASE_URL` | ✅ | Already set in Phase 0. |
-| `SUPABASE_ANON_KEY` | ✅ **new in 1a** | Phase 0 never needed it; every write now does. |
+| `SUPABASE_ANON_KEY` | ✅ **1a** | Phase 0 never needed it; every write now does. |
+| `SUPABASE_SERVICE_ROLE_KEY` | ✅ **2** — *was "do not set"* | **Reversed in phase 2; see below.** |
+| `DATABASE_URL` | ✅ **2** | The **session** pooler, port **5432**. Not 6543 — [see below](#database_url-must-be-the-session-pooler-5432-not-the-transaction-pooler-6543). |
+| `GEMINI_API_KEY` | ✅ **2** | A **paid-tier** key. The 1c note saying "do not add this yet" expired when phase 2 shipped. |
+| `GEMINI_TIER` | ✅ **2** | Literally `free` or `paid`; anything else fails the schema. Must be `paid` in production — enforced, [see below](#gemini_tier-must-be-paid-in-production-and-that-is-enforced-not-advised). |
+| `ENRICH_MONTHLY_BUDGET_USD` | ✅ **2** | A positive number, e.g. `10`. The enrichment sweep stops for a user once their month-to-date spend passes it. |
+| `CORS_ORIGINS` | ✅ in practice | Optional in the schema (it falls back to localhost dev origins), but a deployed API without the real web origin blocks every browser write. |
 | `SUPABASE_JWT_SECRET` | ❌ must stay **unset** | Setting it forces the HS256 branch, which rejects the project's real ES256 tokens — every request 401s. |
-| `SUPABASE_SERVICE_ROLE_KEY` | ❌ do **not** set | Tests only. No service-role key belongs on a request path; RLS is the enforcement (spec §4.1). |
-| `CORS_ORIGINS` | ✅ | Must list the deployed web origin, or the browser blocks every write. |
+| `PORT` | ❌ leave to Railway | Railway injects it; setting it by hand only creates a way to disagree with the platform. |
 
 > **`SUPABASE_ANON_KEY` is the one that bites.** `createUserClient()` builds each
 > per-request Supabase client from it, so if it is missing the API still boots, `/health`
 > still returns 200, and only *writes* fail. Local dev passes because the key is in
 > `apps/api/.env`. Verify after deploy with an authenticated `POST /notes`, not `/health`.
+>
+> That is the *old* trap and it still applies to `CORS_ORIGINS`. The seven ✅ variables above
+> now fail the opposite way — loudly, at boot — which is the better failure, but it means a
+> phase-2 deploy against a phase-1 variable set does not limp: it never starts.
+
+#### `SUPABASE_SERVICE_ROLE_KEY` — this row used to say "do **not** set"
+
+Until phase 2 this table read *"Tests only. No service-role key belongs on a request path;
+RLS is the enforcement (spec §4.1)."* That was a **security rule**, not a convenience, and
+phase 2 overrides it deliberately. Ignoring the change is not a safe default — the API will
+not boot without the key — so here is what changed and what still holds.
+
+**What forced it.** Enrichment writes `note_chunks`, and `search_notes` reads it.
+`note_chunks` has **RLS enabled with no policies**, which makes it invisible to
+`authenticated` *by design*: chunk text and embeddings are derived data no client should
+query directly. A per-request user client therefore reads back exactly zero rows — not an
+error, an empty result — so semantic search returns "no matches" over a fully populated
+corpus. Nothing in the logs says why.
+
+**Why it is safe here.** The key is not a substitute for RLS on the request path; the
+isolation moved rather than disappeared:
+
+- `search_notes` is `SECURITY DEFINER` (`00022_search_notes.sql`) — a single, auditable
+  function over the tables RLS deliberately hides, not a general-purpose bypass.
+- Its `p_user_id` comes **only** from the JWT that `SupabaseAuthGuard` has already verified
+  (`search.controller.ts` passes `user.id`). It is never read from the request body, and
+  `searchInput` is `.strict()`, so a body carrying a `userId` is a **400** rather than a
+  value that gets quietly ignored.
+- Every other route still goes through `createUserClient()` under the caller's own JWT.
+  Service-role is scoped to enrichment and search, not adopted API-wide.
+
+**What would make it unsafe** — treat any of these as a security regression, not a refactor:
+
+1. `p_user_id` sourced from anywhere but the verified JWT — a body field, a query string, a
+   header, a "the caller is an admin" branch. That parameter is the *entire* boundary between
+   two users' corpora once RLS is out of the picture.
+2. Dropping `.strict()` from `searchInput`, which is what converts an injected `userId` from a
+   400 into a silently-ignored field — and one refactor later, into a respected one.
+3. Handing the service-role client to a route that could take a user-controlled table or
+   filter, rather than a fixed `SECURITY DEFINER` function.
+4. Ever exposing the key to a client. It is a **server-side** variable: no `NEXT_PUBLIC_`
+   twin, never in `apps/web` or `apps/mobile`, never in a response body or an error message.
+
+`packages/db`'s cross-user isolation suite covers the RLS half; `search_notes`' own tests
+cover the `p_user_id` half. Both must stay green — they are what makes the sentence this row
+used to contain still true in spirit.
+
+#### `DATABASE_URL` must be the **session** pooler (5432), not the transaction pooler (6543)
+
+New in phase 2 and the first direct Postgres connection in the repo — everything else,
+including `packages/db`'s tests, reaches Postgres through PostgREST. pg-boss (the enrichment
+queue) needs it, and it is fussy about *which* connection string:
+
+```
+postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+                                                                                   ^^^^ not 6543
+```
+
+pg-boss holds session state and takes **advisory locks**, and neither survives a transaction
+pooler. Supabase's dashboard offers the **6543** string by default, so this is the one you get
+by copying the obvious thing. The failure does not name the port: you get
+`prepared statement "..." already exists`, or an advisory-lock error, or jobs that appear to
+queue and never run.
+
+> **Two different "5432" rules live in this document, and they are not the same rule.**
+> PowerSync's replication connection ([§2 of the phase 1b setup](#2-powersync-instance)) needs
+> the **direct** host `db.<project-ref>.supabase.co:5432`, because logical replication cannot
+> run through *any* pooler. pg-boss needs the **session pooler** host
+> `*.pooler.supabase.com:5432`. Both say 5432; the hostnames differ, and swapping them gets you
+> a connection that fails while *resolving the address* rather than authenticating — which
+> reads like a wrong password and is not one.
+
+`apps/api/src/env.ts` cross-checks that `DATABASE_URL` and `SUPABASE_URL` name the **same**
+project: a local `SUPABASE_URL` beside a hosted `DATABASE_URL` boots happily and then reads
+notes from the local stack while creating pg-boss's `pgboss` schema **inside production**,
+sharing one queue between dev and prod. That split was found on 2026-08-10 and is now a boot
+failure. It cannot catch a *hosted* mismatch between two different projects' pooler and API
+URLs beyond the ref comparison, so still paste both from the same dashboard.
+
+To verify the string before anything depends on it, run the hosted probe documented at the top
+of `apps/api/test/boss.integration.test.ts` — it is the only way to learn whether Supavisor
+session mode accepts pg-boss. Drop the `pgboss` schema afterwards.
+
+#### `GEMINI_TIER` must be `paid` in production, and that is enforced, not advised
+
+`assertTierAllowsRealData` (`packages/core/src/enrich/budget.ts`) **throws** for
+`GEMINI_TIER=free` against a hosted `SUPABASE_URL`. Free-tier prompts are used to train
+Google's models and may be read by human reviewers, and this database holds mood, health and
+finance notes (parent spec §15.6 rule 2). `free` is permitted only against a loopback
+`SUPABASE_URL` — local dev and CI, where the data is fake.
+
+So `GEMINI_TIER=free` on Railway is not a cheaper deploy; it is an API that boots and then
+fails every enrichment and every search with a tier error. Set `paid`, and confirm the Google
+Cloud project is actually on a paid plan — the variable asserts your intent, it cannot verify
+Google's billing state.
 
 ### 3. Web deployment environment variables
 
@@ -707,12 +818,18 @@ are in the `supabase_realtime` publication.
 
 **No new env vars.** 1c is pure CRUD on the 1a foundation; it calls no AI provider.
 
-> **Do not add `GEMINI_API_KEY` (or any provider key) yet.** The provider switch in
-> `00012` is a *schema* change only — `EMBEDDING_MODEL` in `@cortex/shared` names the
-> model that phase 2 will call. Adding the key now puts an unused live credential in
-> Railway. Phase 2 introduces it, together with its entry-checklist item: **verify the
-> Gemini project is on the paid tier**, because free-tier prompts are used for training
-> and health/mood/finance content flows through this API (life-domains spec §5).
+> ~~**Do not add `GEMINI_API_KEY` (or any provider key) yet.**~~ **Superseded — phase 2 has
+> shipped.** This note was correct while 1c was the head of the branch: `00012` was a *schema*
+> change only, `EMBEDDING_MODEL` merely named the model phase 2 would call, and adding the key
+> then would have parked an unused live credential in Railway.
+>
+> Phase 2 now requires `GEMINI_API_KEY`, `GEMINI_TIER`, `ENRICH_MONTHLY_BUDGET_USD` and
+> `DATABASE_URL`, and the API **will not boot** without them. It also delivered the
+> paid-tier check this note asked for as an assertion rather than a checklist item —
+> `assertTierAllowsRealData` refuses a free-tier key against hosted data outright. See
+> [the API variable table](#2-railway-environment-variables-api), which is the single
+> authoritative list; this 1c section is kept as the ship log for 1c, not as current
+> configuration advice.
 
 ### 3. Redeploy the API
 
@@ -771,7 +888,7 @@ they are two independent isolation layers over the same rows (parent spec §11).
 
 | Layer | State | Evidence |
 | --- | --- | --- |
-| GitHub Actions | build / typecheck / lint / test only | `.github/workflows/ci.yml` defines exactly two jobs, `checks` and `db-tests`. There is no deploy job and no other workflow file. |
+| GitHub Actions | build / typecheck / lint / test / E2E only | Re-audited 2026-08-11. Five workflow files: `ci.yml` (`checks`, `db-tests`, and the `CI gate` job that branch protection requires), `e2e-web.yml`, `e2e-mobile.yml`, `post-merge.yml` (runs those two E2E suites plus an Android APK build on push to `main`), and `android-apk.yml`. **None of them deploys anything** — no `railway`/`vercel` step, no cloud credential. The original wording here said "exactly two jobs … no other workflow file", which stopped being true as workflows were added; the conclusion did not change, but check all five, not just `ci.yml`. |
 | Railway → GitHub | **not connected** | `railway status --json` reports `source: {"image": null, "repo": null}` for `cortex-api`. With no repo attached there is no push trigger, so Railway never sees a merge. |
 | Database migrations | manual | `supabase db push` is run by a human. Nothing applies migrations automatically. |
 

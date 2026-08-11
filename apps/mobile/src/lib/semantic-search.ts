@@ -1,13 +1,68 @@
-export interface SemanticResult {
-  noteId: string;
-  title: string | null;
-  snippet: string;
-  score: number;
-  matchedBy: string;
-}
+import { searchInput, type SearchResult } from "@cortex/shared";
+
+/**
+ * The shape POST /search returns, from @cortex/shared rather than hand-copied here -- three
+ * independent copies of a response type all typecheck happily while disagreeing with the server.
+ *
+ * Aliased rather than used under its own name because on THIS screen the distinction that
+ * matters is semantic (server, online, costs an embedding call) versus the local FTS5 rows the
+ * list always shows; `SemanticResult` is the vocabulary note-list.tsx is written in. The alias
+ * is a rename of one declaration, not a second one -- a field renamed in shared changes this
+ * type too.
+ */
+export type SemanticResult = SearchResult;
 
 export class OfflineError extends Error {
   override name = "OfflineError";
+}
+
+/**
+ * The request was never made because the input could not be valid. Distinct from OfflineError
+ * (the request could not be made) and from the generic `search failed (400)` a rejected request
+ * produces -- all three are things the user must be told apart.
+ */
+export class SearchInputError extends Error {
+  override name = "SearchInputError";
+}
+
+/**
+ * Validates against the SAME schema the API validates with (`searchInput`, packages/shared),
+ * before the request leaves the device -- exactly what apps/web/src/lib/api.ts's `validated()`
+ * does for the browser, and what this file was missing.
+ *
+ * Without it an over-long query (500 chars is the schema's cap; paste an article into the search
+ * box and Android will happily hand over 800) reaches the server, fails validation there, and
+ * comes back as `search failed (400)`. The screen renders that verbatim, so a VALIDATION problem
+ * arrives wearing a REQUEST FAILURE's clothes -- the user is told the search broke when in fact
+ * their query was simply too long, and there is nothing in the message to act on. That
+ * conflation is the exact one the web round removed, and it survived one task longer here.
+ *
+ * The `q` cap is not restated as a local constant: the number below is read off the schema's own
+ * issue, so raising the server's limit cannot leave this message quoting a stale one.
+ */
+function validate(args: { q: string; limit?: number }): void {
+  const parsed = searchInput.safeParse(
+    args.limit !== undefined ? { q: args.q, limit: args.limit } : { q: args.q },
+  );
+  if (parsed.success) return;
+
+  const tooLong = parsed.error.issues.find(
+    (i): i is Extract<typeof i, { code: "too_big" }> => i.code === "too_big" && i.path[0] === "q",
+  );
+  if (tooLong) {
+    throw new SearchInputError(
+      `That search is too long — ${String(tooLong.maximum)} characters max, ` +
+        `this one is ${args.q.trim().length}.`,
+    );
+  }
+  // Anything else here (an empty query, a non-positive `limit`) is a caller bug rather than
+  // something the user typed, so it names the offending field for a developer instead of
+  // pretending to be user-facing copy. It still must not be silently dropped: passing a bad
+  // `limit` through would turn it into a successful search over the default 20.
+  const first = parsed.error.issues[0];
+  throw new SearchInputError(
+    `Search input is not valid: ${first ? `${first.path.join(".") || "input"} — ${first.message}` : "unknown"}`,
+  );
 }
 
 export const SEARCH_OFFLINE_MESSAGE = "Semantic search needs a connection — showing local results";
@@ -47,6 +102,9 @@ export async function semanticSearch(args: {
   limit?: number;
   fetchFn?: typeof fetch;
 }): Promise<SemanticResult[]> {
+  // Before `doFetch` is even chosen: a query that cannot be valid must cost no request at all.
+  validate(args);
+
   const doFetch = args.fetchFn ?? fetch;
   let res: Response;
   try {

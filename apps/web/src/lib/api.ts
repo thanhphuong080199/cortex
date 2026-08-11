@@ -1,17 +1,16 @@
 import {
   attachTagInput, createCheckinInput, createNoteInput, createTagInput, logMediaInput, searchInput, updateNoteInput,
   type AttachTagInput, type CreateCheckinInput, type CreateNoteInput, type CreateTagInput,
-  type LogMediaInput, type SearchInput, type UpdateNoteInput,
+  type LogMediaInput, type SearchInput, type SearchResult, type UpdateNoteInput,
 } from "@cortex/shared";
 import type { ZodType } from "zod";
 
-export interface SearchResult {
-  noteId: string;
-  title: string | null;
-  snippet: string;
-  score: number;
-  matchedBy: string;
-}
+// Re-exported, not redeclared: SearchResult lives in @cortex/shared beside searchInput, so the
+// server's response type and this client's expectation are one declaration rather than two that
+// typecheck independently while disagreeing. The re-export keeps `import type { SearchResult }
+// from "@/lib/api"` working for search-form.tsx -- api.ts is where this app's callers already
+// look for the shapes these methods return.
+export type { SearchResult };
 
 export class ApiError extends Error {
   constructor(public status: number, public issues?: unknown) { super(`API ${status}`); }

@@ -63,10 +63,19 @@ describe("usage and budget", () => {
     expect(await monthToDateUsd(db, userId)).toBeCloseTo(ROWS * 0.01, 6); // $12.00
   }, 30_000);
 
+  // The anchor is built with Date.UTC and a FIXED day 15, never by subtracting a month from
+  // today. `new Date(); d.setMonth(d.getMonth() - 1)` keeps today's day-of-month, and JS
+  // normalises an out-of-range day forward instead of clamping it: run this on 31 May and
+  // setMonth(3) asks for "April 31", which becomes 1 MAY -- the current month. monthToDateUsd
+  // then sums the row it was supposed to exclude, returns 0.15, and this assertion goes red on
+  // 31 Mar / 31 May / 31 Jul / 31 Oct / 31 Dec and nowhere else. Day 15 exists in every month,
+  // so the construction cannot overflow; noon UTC keeps it clear of the month boundary that
+  // usage_month_to_date_usd compares against (which is UTC, hence getUTC*, not local getters).
+  // Month -1 in January is not a special case -- Date.UTC rolls the year back itself.
   it("ignores rows from a previous month", async () => {
     await recordUsage(db, { userId, kind: "embed", model: "gemini-embedding-001", inputTokens: 1_000_000, outputTokens: 0 });
-    const lastMonth = new Date();
-    lastMonth.setMonth(lastMonth.getMonth() - 1);
+    const now = new Date();
+    const lastMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15, 12));
     await db.from("usage_ledger").update({ created_at: lastMonth.toISOString() }).eq("user_id", userId);
     expect(await monthToDateUsd(db, userId)).toBe(0);
   });

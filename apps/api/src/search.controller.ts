@@ -1,12 +1,21 @@
 import { Body, Controller, Inject, Post, UseGuards } from "@nestjs/common";
 import type { AiClient } from "@cortex/core";
 import { createServiceClient, mapPostgrestError } from "@cortex/core";
-import { searchInput, type SearchInput } from "@cortex/shared";
+import { searchInput, type SearchInput, type SearchResult } from "@cortex/shared";
 import { AI_CLIENT } from "./ai-client.provider";
 import { CurrentUser } from "./auth/current-user.decorator";
 import type { AuthedUser } from "./auth/supabase-auth.guard";
 import { SupabaseAuthGuard } from "./auth/supabase-auth.guard";
 import { ZodValidationPipe } from "./zod-validation.pipe";
+
+/** A row exactly as `search_notes` returns it (supabase/migrations/00022_search_notes.sql). */
+interface SearchRow {
+  note_id: string;
+  title: string | null;
+  snippet: string;
+  score: number;
+  matched_by: string;
+}
 
 @Controller("search")
 @UseGuards(SupabaseAuthGuard)
@@ -26,7 +35,7 @@ export class SearchController {
   async search(
     @CurrentUser() user: AuthedUser,
     @Body(new ZodValidationPipe(searchInput)) body: SearchInput,
-  ) {
+  ): Promise<{ results: SearchResult[] }> {
     const { vectors } = await this.ai.embed([body.q]);
     const embedding = vectors[0];
     // noUncheckedIndexedAccess means `vectors[0]` is `number[] | undefined`. Failing loudly
@@ -57,8 +66,16 @@ export class SearchController {
     // sees (still a generic 500 message -- PostgREST detail is not caller-facing, spec §6).
     if (error) throw mapPostgrestError(error);
 
+    // The one place search_notes' snake_case columns (00022) are mapped to the camelCase DTO.
+    // The Supabase client here is untyped (this repo generates no `Database` types), so `data`
+    // arrives as `any` and the cast below is what gives the mapping something to check against.
+    // Both halves are now pinned: SearchRow names what SQL returns, and the annotated
+    // Promise<{ results: SearchResult[] }> names what @cortex/shared promises the clients --
+    // so renaming a column on either side fails to compile HERE rather than rendering
+    // `undefined` on web and mobile with every other package still green.
+    const rows = (data ?? []) as SearchRow[];
     return {
-      results: (data ?? []).map((r: Record<string, unknown>) => ({
+      results: rows.map((r) => ({
         noteId: r.note_id,
         title: r.title,
         snippet: r.snippet,
