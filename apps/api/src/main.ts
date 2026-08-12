@@ -1,9 +1,9 @@
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
-import { AppModule } from "./app.module";
 import { CoreErrorFilter } from "./core-error.filter";
 import { parseApiEnv } from "./env";
+import { RootModule } from "./root.module";
 
 // Falls back to these when CORS_ORIGINS is unset — covers apps/web's dev server
 // (`next dev --port 3000`) on both hostnames browsers may use for localhost.
@@ -20,7 +20,7 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(RootModule);
 
   // Express defaults the JSON body to 100 kB, and a full sync batch is bigger than that:
   // SYNC_UPLOAD_MAX_OPS is 500, whose envelope alone is ~75 kB before a single note's text.

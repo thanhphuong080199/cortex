@@ -604,18 +604,204 @@ supabase migration list # confirm local == remote (should now show 00001..00011)
 
 ### 2. Railway environment variables (API)
 
+**This table is the whole set the API requires, not just 1a's additions** — deliberately one
+table rather than a per-phase delta in each checklist, because two copies drift and the
+operator reading the wrong one gets a container that will not boot. It mirrors
+`apps/api/src/env.ts`'s `envSchema`; that file is the authority, and if the two ever
+disagree, the file wins and this table is the bug.
+
+Everything marked ✅ is validated at boot by `parseApiEnv`. A missing or malformed one is
+**not** a degraded mode: `main.ts` catches the `ZodError`, logs it, and calls
+`process.exit(1)`. The container never listens, so `/health` never answers and Railway shows
+a crash loop rather than a healthy deploy with a broken feature.
+
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `SUPABASE_URL` | ✅ | Already set in Phase 0. |
-| `SUPABASE_ANON_KEY` | ✅ **new in 1a** | Phase 0 never needed it; every write now does. |
+| `SUPABASE_ANON_KEY` | ✅ **1a** | Phase 0 never needed it; every write now does. |
+| `SUPABASE_SERVICE_ROLE_KEY` | ✅ **2** — *was "do not set"* | **Reversed in phase 2; see below.** |
+| `DATABASE_URL` | ✅ **2** | The **session** pooler, port **5432**. Not 6543 — [see below](#database_url-must-be-the-session-pooler-5432-not-the-transaction-pooler-6543). |
+| `GEMINI_API_KEY` | ✅ **2** | A **paid-tier** key. The 1c note saying "do not add this yet" expired when phase 2 shipped. |
+| `GEMINI_TIER` | ✅ **2** | Literally `free` or `paid`; anything else fails the schema. Must be `paid` in production — enforced, [see below](#gemini_tier-must-be-paid-in-production-and-that-is-enforced-not-advised). |
+| `ENRICH_MONTHLY_BUDGET_USD` | ✅ **2** | A positive number, e.g. `10`. Caps the **enrichment sweep** only — search is metered against the same ledger but never blocked by it, [see below](#the-budget-caps-the-sweep-search-is-metered-but-not-gated). |
+| `CORS_ORIGINS` | ✅ in practice | Optional in the schema (it falls back to localhost dev origins), but a deployed API without the real web origin blocks every browser write. |
 | `SUPABASE_JWT_SECRET` | ❌ must stay **unset** | Setting it forces the HS256 branch, which rejects the project's real ES256 tokens — every request 401s. |
-| `SUPABASE_SERVICE_ROLE_KEY` | ❌ do **not** set | Tests only. No service-role key belongs on a request path; RLS is the enforcement (spec §4.1). |
-| `CORS_ORIGINS` | ✅ | Must list the deployed web origin, or the browser blocks every write. |
+| `PORT` | ❌ leave to Railway | Railway injects it; setting it by hand only creates a way to disagree with the platform. |
 
 > **`SUPABASE_ANON_KEY` is the one that bites.** `createUserClient()` builds each
 > per-request Supabase client from it, so if it is missing the API still boots, `/health`
 > still returns 200, and only *writes* fail. Local dev passes because the key is in
 > `apps/api/.env`. Verify after deploy with an authenticated `POST /notes`, not `/health`.
+>
+> That is the *old* trap and it still applies to `CORS_ORIGINS`. The seven ✅ variables above
+> now fail the opposite way — loudly, at boot — which is the better failure, but it means a
+> phase-2 deploy against a phase-1 variable set does not limp: it never starts.
+
+#### `SUPABASE_SERVICE_ROLE_KEY` — this row used to say "do **not** set"
+
+Until phase 2 this table read *"Tests only. No service-role key belongs on a request path;
+RLS is the enforcement (spec §4.1)."* That was a **security rule**, not a convenience, and
+phase 2 overrides it deliberately. Ignoring the change is not a safe default — the API will
+not boot without the key — so here is what changed and what still holds.
+
+**What forced it.** Enrichment writes `note_chunks`, and `search_notes` reads it.
+`note_chunks` has **RLS enabled with no policies**, which makes it invisible to
+`authenticated` *by design*: chunk text and embeddings are derived data no client should
+query directly. A per-request user client therefore reads back exactly zero rows — not an
+error, an empty result — so semantic search returns "no matches" over a fully populated
+corpus. Nothing in the logs says why.
+
+**Why it is safe here.** The key is not a substitute for RLS on the request path; the
+isolation moved rather than disappeared:
+
+- `search_notes` is `SECURITY DEFINER` (`00022_search_notes.sql`) — a single, auditable
+  function over the tables RLS deliberately hides, not a general-purpose bypass.
+- Its `p_user_id` comes **only** from the JWT that `SupabaseAuthGuard` has already verified
+  (`search.controller.ts` passes `user.id`). It is never read from the request body, and
+  `searchInput` is `.strict()`, so a body carrying a `userId` is a **400** rather than a
+  value that gets quietly ignored.
+- Every other route still goes through `createUserClient()` under the caller's own JWT.
+  Service-role is scoped to enrichment and search, not adopted API-wide.
+
+**What would make it unsafe** — treat any of these as a security regression, not a refactor:
+
+1. `p_user_id` sourced from anywhere but the verified JWT — a body field, a query string, a
+   header, a "the caller is an admin" branch. That parameter is the *entire* boundary between
+   two users' corpora once RLS is out of the picture.
+2. Dropping `.strict()` from `searchInput`, which is what converts an injected `userId` from a
+   400 into a silently-ignored field — and one refactor later, into a respected one.
+3. Handing the service-role client to a route that could take a user-controlled table or
+   filter, rather than a fixed `SECURITY DEFINER` function.
+4. Ever exposing the key to a client. It is a **server-side** variable: no `NEXT_PUBLIC_`
+   twin, never in `apps/web` or `apps/mobile`, never in a response body or an error message.
+
+`packages/db`'s cross-user isolation suite covers the RLS half; `search_notes`' own tests
+cover the `p_user_id` half. Both must stay green — they are what makes the sentence this row
+used to contain still true in spirit.
+
+#### `DATABASE_URL` must be the **session** pooler (5432), not the transaction pooler (6543)
+
+New in phase 2 and the first direct Postgres connection in the repo — everything else,
+including `packages/db`'s tests, reaches Postgres through PostgREST. pg-boss (the enrichment
+queue) needs it, and it is fussy about *which* connection string:
+
+```
+postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+                                                                                   ^^^^ not 6543
+```
+
+pg-boss holds session state and takes **advisory locks**, and neither survives a transaction
+pooler. Supabase's dashboard offers the **6543** string by default, so this is the one you get
+by copying the obvious thing. The failure does not name the port: you get
+`prepared statement "..." already exists`, or an advisory-lock error, or jobs that appear to
+queue and never run.
+
+> **Two different "5432" rules live in this document, and they are not the same rule.**
+> PowerSync's replication connection ([§2 of the phase 1b setup](#2-powersync-instance)) needs
+> the **direct** host `db.<project-ref>.supabase.co:5432`, because logical replication cannot
+> run through *any* pooler. pg-boss needs the **session pooler** host
+> `*.pooler.supabase.com:5432`. Both say 5432; the hostnames differ, and swapping them gets you
+> a connection that fails while *resolving the address* rather than authenticating — which
+> reads like a wrong password and is not one.
+
+`apps/api/src/env.ts` cross-checks that `DATABASE_URL` and `SUPABASE_URL` name the **same**
+project: a local `SUPABASE_URL` beside a hosted `DATABASE_URL` boots happily and then reads
+notes from the local stack while creating pg-boss's `pgboss` schema **inside production**,
+sharing one queue between dev and prod. That split was found on 2026-08-10 and is now a boot
+failure. It cannot catch a *hosted* mismatch between two different projects' pooler and API
+URLs beyond the ref comparison, so still paste both from the same dashboard.
+
+To verify the string before anything depends on it, run the hosted probe documented at the top
+of `apps/api/test/boss.integration.test.ts` — it is the only way to learn whether Supavisor
+session mode accepts pg-boss. Drop the `pgboss` schema afterwards.
+
+#### Two API instances will not double-enrich — but the guarantee is an advisory lock, not a replica count
+
+Worth knowing before you scale the service or read a redeploy log.
+
+`DATABASE_URL` carries a second job besides pg-boss: the enrichment worker takes a **session-level
+advisory lock** on it (`apps/api/src/queue/sweep-lock.ts`) around every sweep. An instance that
+does not win the lock logs
+
+```
+[enrich] sweep skipped: another instance holds the sweep lock
+```
+
+and does nothing until the next 60-second tick. **A few of those lines during a deploy are normal**
+— Railway's default rolling redeploy runs the old and new containers together for roughly 30
+seconds, which is exactly the window this exists for.
+
+**Why it was needed.** pg-boss's `work()` defaults keep *one process* from sweeping twice at once,
+and that is all they do — the queue uses the default `standard` policy, and the `SKIP LOCKED` in
+`claim_notes_for_enrichment` stops releasing its row locks the moment that claim transaction
+commits, long before the Gemini calls return. Two containers would therefore claim *disjoint*
+notes and bill for both. Until 2026-08-12 the only thing preventing that was "there is exactly one
+API instance" — an invariant nothing enforced and the default deploy strategy breaks by design.
+
+**What this does not do.** It bounds *concurrency*, not spend; the budget still does that. And it
+is not a reason to scale the service — one instance is right for this workload. It means a
+redeploy no longer double-bills, and that turning on a second replica is a capacity decision
+rather than a correctness one.
+
+**Two ways to break it**, both worth recognising in a log:
+
+- **Persistent skipping** (every tick, not just during a deploy) means something else holds the
+  lock: a second service pointed at the same database, or a stale connection Postgres has not yet
+  reaped. Check `select * from pg_locks where locktype = 'advisory'`.
+- **Pointing `DATABASE_URL` at the transaction pooler (6543)** silently removes the protection —
+  session-level advisory locks do not survive it. Same port rule as pg-boss, now with a second
+  consequence.
+
+#### `GEMINI_TIER` must be `paid` in production, and that is enforced, not advised
+
+`assertTierAllowsRealData` (`packages/core/src/enrich/budget.ts`) **throws** for
+`GEMINI_TIER=free` against a hosted `SUPABASE_URL`. Free-tier prompts are used to train
+Google's models and may be read by human reviewers, and this database holds mood, health and
+finance notes (parent spec §15.6 rule 2). `free` is permitted only against a loopback
+`SUPABASE_URL` — local dev and CI, where the data is fake.
+
+So `GEMINI_TIER=free` on Railway is not a cheaper deploy; it is an API that boots and then
+fails every enrichment and every search with a tier error. Set `paid`, and confirm the Google
+Cloud project is actually on a paid plan — the variable asserts your intent, it cannot verify
+Google's billing state.
+
+#### The budget caps the sweep; search is **metered but not gated**
+
+Two things spend money on Gemini, and `ENRICH_MONTHLY_BUDGET_USD` stops only one of them.
+
+| Path | Writes `usage_ledger` | Blocked by the budget |
+| --- | --- | --- |
+| Enrichment sweep (embed + extract, per note) | yes | **yes** — `isOverBudget` skips the user for the rest of the UTC month |
+| `POST /search` (one embedding of the query) | yes | **no** — it runs regardless |
+
+**Why search is metered.** Every search embeds its query, so it is a billable path.
+`isOverBudget` is deliberately fail-**closed** (`packages/core/src/enrich/budget.ts`) so that an
+outage in the spend query can never turn into unlimited spend — a guarantee that is worth
+nothing for a path the ledger never records. Until 2026-08-12 search wrote no row at all, so the
+only place that spend appeared was Google's own console. It now writes one `kind = 'embed'` row
+per successful search.
+
+**Why search is not gated.** Refusing to let someone search their own notes because a
+*background* job overspent is the wrong trade: the budget exists to bound what Cortex spends on
+its own initiative, and a search is the user asking. Gating would also put a second round trip
+(`isOverBudget`'s RPC) in front of an interactive request.
+
+**Scale, so the numbers are on the record.** One query embeds to roughly $0.0000045 — about
+200,000 searches per dollar. The reason to meter was never the amount; it was that the amount
+was invisible.
+
+**A failed ledger write does not fail the search.** The `recordUsage` call in
+`search.controller.ts` is wrapped in its own `try/catch` that logs
+`[search] usage_ledger write failed: <code>: <message>` and continues. The accepted cost is a
+silent under-count; the alternative — a ledger problem returning 500 on every search — is worse.
+So **do not treat `usage_ledger` as an audit-grade meter for search**: it is a monitoring
+signal, and its `input_tokens` are a chars/4 estimate (the same caveat `budget.ts` records for
+the sweep's `embed` rows).
+
+**Still open, deliberately:** `POST /search` has **no rate limit**. Metering makes an abusive
+or looping client *visible* in `usage_ledger`; it does not stop one. If you want a ceiling on
+search spend rather than a record of it, that is a rate limit at the edge, not a budget check
+in the controller — a separate piece of work, parked here on purpose.
 
 ### 3. Web deployment environment variables
 
@@ -707,12 +893,18 @@ are in the `supabase_realtime` publication.
 
 **No new env vars.** 1c is pure CRUD on the 1a foundation; it calls no AI provider.
 
-> **Do not add `GEMINI_API_KEY` (or any provider key) yet.** The provider switch in
-> `00012` is a *schema* change only — `EMBEDDING_MODEL` in `@cortex/shared` names the
-> model that phase 2 will call. Adding the key now puts an unused live credential in
-> Railway. Phase 2 introduces it, together with its entry-checklist item: **verify the
-> Gemini project is on the paid tier**, because free-tier prompts are used for training
-> and health/mood/finance content flows through this API (life-domains spec §5).
+> ~~**Do not add `GEMINI_API_KEY` (or any provider key) yet.**~~ **Superseded — phase 2 has
+> shipped.** This note was correct while 1c was the head of the branch: `00012` was a *schema*
+> change only, `EMBEDDING_MODEL` merely named the model phase 2 would call, and adding the key
+> then would have parked an unused live credential in Railway.
+>
+> Phase 2 now requires `GEMINI_API_KEY`, `GEMINI_TIER`, `ENRICH_MONTHLY_BUDGET_USD` and
+> `DATABASE_URL`, and the API **will not boot** without them. It also delivered the
+> paid-tier check this note asked for as an assertion rather than a checklist item —
+> `assertTierAllowsRealData` refuses a free-tier key against hosted data outright. See
+> [the API variable table](#2-railway-environment-variables-api), which is the single
+> authoritative list; this 1c section is kept as the ship log for 1c, not as current
+> configuration advice.
 
 ### 3. Redeploy the API
 
@@ -765,13 +957,197 @@ they are two independent isolation layers over the same rows (parent spec §11).
 
 ---
 
+## Phase 2 — deploy checklist (AI enrichment + semantic search)
+
+**Shipped to production on 2026-08-12.** This section is both the procedure and the ship log.
+
+Phase 2 is the first release where the API does work on its own initiative: a pg-boss cron
+inside the API process sweeps notes every 60 seconds, chunks and embeds them through Gemini,
+and extracts a domain and tags. `POST /search` fuses pgvector and Postgres FTS. Two
+consequences for deploying it:
+
+- The API now needs a **direct Postgres connection** and a **service-role key**, so the
+  variable table gained five entries — see [§2 above](#2-railway-environment-variables-api),
+  which is the authoritative list.
+- **The order matters.** Push migrations *first*, then deploy. The reverse boots an API that
+  looks completely healthy and fails every sweep and every search, because the failure is at
+  runtime, not at boot. See the warning at the end of step 3.
+
+### 1. Push the new migrations
+
+```bash
+pnpm exec supabase db push --dry-run   # confirm exactly 00018..00025, no seeds, no roles
+pnpm exec supabase db push
+pnpm exec supabase migration list      # local == remote, through 00025
+```
+
+| Migration | What it adds |
+| --- | --- |
+| `00018_note_enrichment.sql` | `note_enrichment` bookkeeping + `claim_notes_for_enrichment` |
+| `00019_note_tags_feedback.sql` | tag feedback events |
+| `00020_note_source_types.sql` | note source vocabulary |
+| `00021_usage_month_to_date.sql` | `usage_month_to_date_usd` — the SUM moved into Postgres |
+| `00022_search_notes.sql` | `search_notes`, the RRF fusion function + HNSW index use |
+| `00023_enrichment_attempts_and_fairness.sql` | `attempts_hash`; over-budget users no longer starve the global sweep |
+| `00024_search_recency_clamp.sql` | clamps the recency decay so a future `created_at` cannot amplify a score |
+| `00025_revoke_client_grants_drift.sql` | **hosted-only effect** — see [step 5](#5-the-grant-drift-00025-fixes-was-hosted-only) |
+
+> **Qualify pgvector types.** `00022` and `00024` reference `extensions.vector(...)`, never bare
+> `vector(...)`. Bare works locally and fails only on the hosted push — the trap
+> [`00012` hit](#2-environment-variables--nothing-new-in-1c). Grep any new migration for
+> `vector(` before pushing.
+
+Verify in the catalog rather than trusting the exit code — `db push` reports success per file,
+not per object:
+
+```sql
+select to_regclass('public.note_enrichment') is not null;         -- t
+select proname, prosecdef from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+ where n.nspname='public'
+   and proname in ('search_notes','claim_notes_for_enrichment','usage_month_to_date_usd');
+-- all three present, all prosecdef = true
+```
+
+### 2. Set the Railway variables
+
+Five additions, all boot-validated. `SUPABASE_SERVICE_ROLE_KEY`, `DATABASE_URL`,
+`GEMINI_API_KEY`, `GEMINI_TIER`, `ENRICH_MONTHLY_BUDGET_USD` — the
+[variable table](#2-railway-environment-variables-api) covers each one and the traps.
+
+Two things worth doing rather than assuming:
+
+- **Set secrets through stdin**, so no credential lands in a shell history or a log:
+  `printf '%s' "$VALUE" | railway variable set NAME --stdin --skip-deploys`. `--skip-deploys`
+  lets you stage the whole set and redeploy once instead of once per variable.
+- **Run the app's own validator against the live set** before deploying. This is the only check
+  that tests what actually boots, including the `SUPABASE_URL`/`DATABASE_URL` same-project
+  cross-check:
+
+  ```bash
+  cd apps/api && railway variables --json | node -e "
+    let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+      require('./dist/env.js').parseApiEnv(JSON.parse(s)); console.log('would boot'); })"
+  ```
+
+Take the **legacy** `service_role` key (the ~219-char `eyJ…` JWT under *Legacy API keys*), not
+the newer `sb_secret_…`. The project offers both, but `SUPABASE_ANON_KEY` is the legacy anon
+JWT and every local and CI run exercises legacy keys; mixing generations is an extra variable on
+the one deploy that first puts a service-role key on a request path.
+
+### 3. Redeploy the API
+
+```bash
+railway up --service cortex-api --ci     # --ci streams build logs, then exits
+```
+
+> **`railway up` uploads the working tree**, and `apps/api/Dockerfile` does
+> `COPY apps/api ./apps/api`. The repo root `.dockerignore` is what keeps `apps/api/.env` —
+> hosted `DATABASE_URL` with its password, the service-role key, the Gemini key — out of the
+> build context. Do not delete it. The published image is otherwise clean only by accident of
+> layering: the runtime stage happens to copy just `package.json`, `node_modules` and `dist`.
+
+> ⚠️ **A deploy against a pre-00018 schema is the quiet failure.** Every variable can be
+> correct, `parseApiEnv` passes, Nest maps every route, `/health` returns 200 — and then each
+> sweep and each search fails, because `note_enrichment` and `search_notes` do not exist. The
+> env vars fail *loudly at boot*; this fails *silently at runtime*. Migrations first.
+
+### 4. Verify — with a write, and then with the pipeline
+
+[The write check](#verify-a-deploy-with-a-write-not-with-health) still applies and still comes
+first. `401` on an unauthenticated `POST /notes` also confirms you are not looking at a stale
+container. Phase 2 adds three more checks, in order:
+
+```bash
+railway logs --service cortex-api | grep enrich
+# [enrich] sweep complete: processed=16 failed=0 skippedOverBudget=0
+```
+
+1. **The sweep runs.** That line is the *only* evidence it is alive — per-note output fires only
+   on failure, so a dead cron and a healthy one otherwise look identical. `[enrich] sweep
+   skipped: another instance holds the sweep lock` is normal during a rolling redeploy;
+   *persistent* skipping is not (see
+   [the advisory-lock section](#two-api-instances-will-not-double-enrich--but-the-guarantee-is-an-advisory-lock-not-a-replica-count)).
+2. **A new note gets enriched.** `note_enrichment.embedded_hash` fills in and `note_chunks` gains
+   rows. Allow ~2 minutes: `claim_notes_for_enrichment` has a deliberate **90-second debounce**
+   (`n.updated_at < now() - interval '90 seconds'`) so a note is not enriched mid-edit. A
+   just-created note being skipped is the debounce, not a fault.
+3. **`POST /search` returns it**, with `matchedBy` of `vector` or `both` — that is the whole
+   chain: chunk → embedding → HNSW → RRF → HTTP.
+
+Two queries worth running once, because both answer questions logs cannot:
+
+```sql
+-- Must be 0. A non-zero count is the silent-failure signature: usage was billed and
+-- embedded_hash stamped, but search_notes filters on `embedding is not null`, so those
+-- chunks are invisible forever and the hash predicate guarantees they are never retried.
+select count(*) from note_chunks where embedding is null;
+
+-- Every AI call, including one row per search. Search is METERED but not gated; see
+-- "The budget caps the sweep" above.
+select kind, count(*), round(sum(cost_usd)::numeric, 6) from usage_ledger group by kind;
+```
+
+A note with a `note_enrichment` row and **zero** chunks is not a fault either: an empty
+`content_text` (a media-log row) chunks to nothing. That is why the two counts can differ by a
+few.
+
+### 5. The grant drift `00025` fixes was hosted-only
+
+Found while verifying this deploy, and the reason it is worth reading: **the hosted project and
+a local `supabase db reset` did not agree**, so the local test suite had been proving a stricter
+configuration than production ran.
+
+On the hosted project, `anon` *and* `authenticated` held `INSERT/SELECT/UPDATE/DELETE` on all 23
+tables in `public` — including `note_chunks`, `note_enrichment` and `usage_ledger`, whose own
+grant-block comments say they get no client DML at all. Locally those tables grant nothing.
+
+The cause is not a one-off: `pg_default_acl` for schema `public`, owner `postgres`, granted
+`arwd` to both roles on the hosted project and nothing locally — so *every* table a future
+migration created was born client-writable there. `00009` had already reached this template
+(hosted's `arwd` is exactly `arwdDxtm` minus the `Dxtm` it revoked); it simply never covered the
+DML half. `00025` revokes the grants **and** the template, or the next `create table` would undo
+it.
+
+Nothing was exploitable: RLS is on for all 23 tables and all 15 policies target `authenticated`,
+so every `anon` grant was inert, the eight zero-policy tables blocked `authenticated` too, and
+`digests`/`memory_facts` have `for select` policies only. Every privilege `00025` removes was
+already unusable — which is why it cannot break a working path, and why it was worth fixing
+before something made it reachable. The design (`00007`) describes *two* independent layers,
+"a table-level GRANT before RLS is even evaluated", and production had one.
+
+Visible improvement after the push: a client hitting a server-only table now gets `42501
+permission denied` at the grant layer instead of a silent empty result from RLS.
+
+> One residual, present **identically in local and hosted**, so it is not drift: the
+> `supabase_admin`-owned default ACL still grants `arwdDxtm` to `anon`/`authenticated`. Tables
+> created by these migrations are owned by `postgres`, not `supabase_admin`, so it does not
+> apply to them.
+
+### Ship log — 2026-08-12
+
+- `00018`–`00025` pushed; remote head `00025`, verified in `pg_proc` / `pg_class`, not from the
+  CLI's exit code.
+- All eight required variables set and confirmed by piping `railway variables --json` through
+  the compiled `parseApiEnv`.
+- `railway up` → Nest started, `POST /search` mapped, `EnrichModule` initialised.
+- Unauthenticated `POST /notes` → `401`; authenticated → `201`.
+- First sweep: `processed=16 failed=0 skippedOverBudget=0`. A new note was embedded, given
+  `domain=life`, and returned by `POST /search` with `matchedBy=vector`.
+- `select count(*) from note_chunks where embedding is null` → **0**.
+- `usage_ledger` recorded the search embedding: `gemini-embedding-001`, 6 input tokens,
+  `$0.0000009`.
+- Post-`00025` re-check: `POST /notes`, `/tags`, `/me`, `/search` all still succeed;
+  `note_chunks` / `usage_ledger` / `note_enrichment` return `42501` to `authenticated`.
+
+---
+
 ## Is there CI/CD? (No — deploys are manual)
 
 **Merging to `main` deploys nothing.** Verified 2026-08-01 on both sides:
 
 | Layer | State | Evidence |
 | --- | --- | --- |
-| GitHub Actions | build / typecheck / lint / test only | `.github/workflows/ci.yml` defines exactly two jobs, `checks` and `db-tests`. There is no deploy job and no other workflow file. |
+| GitHub Actions | build / typecheck / lint / test / E2E only | Re-audited 2026-08-11. Five workflow files: `ci.yml` (`checks`, `db-tests`, and the `CI gate` job that branch protection requires), `e2e-web.yml`, `e2e-mobile.yml`, `post-merge.yml` (runs those two E2E suites plus an Android APK build on push to `main`), and `android-apk.yml`. **None of them deploys anything** — no `railway`/`vercel` step, no cloud credential. The original wording here said "exactly two jobs … no other workflow file", which stopped being true as workflows were added; the conclusion did not change, but check all five, not just `ci.yml`. |
 | Railway → GitHub | **not connected** | `railway status --json` reports `source: {"image": null, "repo": null}` for `cortex-api`. With no repo attached there is no push trigger, so Railway never sees a merge. |
 | Database migrations | manual | `supabase db push` is run by a human. Nothing applies migrations automatically. |
 

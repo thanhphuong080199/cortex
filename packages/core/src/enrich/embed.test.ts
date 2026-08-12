@@ -1,0 +1,209 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createFakeAi } from "../ai/fake.js";
+import { createServiceClient } from "../supabase.js";
+import { embedNote } from "./embed.js";
+
+const db = createServiceClient();
+let userId: string;
+
+async function seedNote(content: string): Promise<{ noteId: string; contentText: string; contentHash: string }> {
+  const { data } = await db.from("notes").insert({ user_id: userId, content }).select("id, content_text").single();
+  const { data: hash } = await db.rpc("_test_md5_content_text", { p_note_id: data!.id });
+  return { noteId: data!.id, contentText: data!.content_text, contentHash: hash as string };
+}
+
+describe("embedNote", () => {
+  beforeEach(async () => {
+    // 00008_invite_gate.sql fires on every auth.users insert, including through the admin
+    // API, so createUser fails with "Signup not allowed" unless the email is allow-listed
+    // first -- the same step every other suite's makeUser/clients.ts helper performs.
+    const email = `embed-${Date.now()}@example.com`;
+    const { error: upsertErr } = await db.from("allowed_emails").upsert({ email });
+    if (upsertErr) throw upsertErr;
+    const { data } = await db.auth.admin.createUser({
+      email, password: "x".repeat(16), email_confirm: true,
+    });
+    userId = data.user!.id;
+  });
+
+  it("writes one chunk row per chunk, with the embedding and the model", async () => {
+    const note = await seedNote("first paragraph\n\nsecond paragraph");
+    const out = await embedNote({ db, ai: createFakeAi() }, { ...note, userId });
+
+    expect(out).toEqual({ embedded: 1, reused: 0 });
+    const { data } = await db.from("note_chunks").select("chunk_index, content_hash, embedding, embedding_model, embedded_at")
+      .eq("note_id", note.noteId).order("chunk_index");
+    expect(data).toHaveLength(1);
+    const [only] = data ?? [];
+    expect(only?.embedding).not.toBeNull();
+    expect(only?.embedded_at).not.toBeNull();
+  });
+
+  // THE COST PROPERTY.
+  //
+  // Deliberately NOT three "\n\n"-separated paragraphs: notes.content_text is a GENERATED
+  // column computed by strip_markdown(), and strip_markdown's last step is
+  // regexp_replace(..., '\s+', ' ', 'g') -- it collapses every run of whitespace, blank
+  // lines included, to a single space (confirmed directly: rpc strip_markdown on
+  // "a\n\nb" returns "a b"). So content_text never contains "\n\n", chunkText's paragraph
+  // split never fires on real note content, and the chunker's boundaries are plain
+  // 1800-char (CHUNK_MAX_CHARS) windows over the flattened text. A single unbroken run of
+  // one repeated character sidesteps that collapse entirely (there is no whitespace to
+  // strip), and landing the edit with margin on both sides of the middle window is what
+  // keeps chunk 0 and chunk 2 byte-identical -- which is what the property actually rests
+  // on here, not paragraph boundaries that don't survive to content_text.
+  it("re-embeds only the changed chunk", async () => {
+    const original = "a".repeat(5000);
+    const note = await seedNote(original);
+    const ai = createFakeAi();
+    await embedNote({ db, ai }, { ...note, userId });
+
+    const spy = vi.fn(ai.embed);
+    // Chunk boundaries land at 1800 and 3600; this edit sits at [2500, 2520), entirely
+    // inside chunk index 1's [1800, 3600) window.
+    const mutated = `${original.slice(0, 2500)}${"B".repeat(20)}${original.slice(2520)}`;
+    await db.from("notes").update({ content: mutated }).eq("id", note.noteId);
+    const { data: updated } = await db.from("notes").select("content_text").eq("id", note.noteId).single();
+    const { data: hash } = await db.rpc("_test_md5_content_text", { p_note_id: note.noteId });
+
+    const out = await embedNote(
+      { db, ai: { ...ai, embed: spy } },
+      { noteId: note.noteId, userId, contentText: updated!.content_text, contentHash: hash as string },
+    );
+
+    expect(out).toEqual({ embedded: 1, reused: 2 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[0]).toHaveLength(1);
+  });
+
+  // THE RESYNCHRONISATION PROPERTY, at the embedNote level. The test above uses a same-length
+  // substitution ("B" for "b"), which never moves a chunk boundary -- the common case in real
+  // use is a length-CHANGING edit (typing a word), which shifts every later character. Before
+  // sentence packing (chunk.ts), that shifted every later chunk's fixed-offset window and its
+  // hash, so this edit would have re-embedded the whole tail of the note. It doesn't: only the
+  // chunk the insertion actually lands in goes stale, verified by inspecting what reaches
+  // ai.embed on the second call, not just the final row count (see chunk.test.ts's
+  // "resynchronises after a length-changing edit" for the same numbers pinned at the chunker
+  // level, and the RED evidence in the report for what this test catches).
+  it("re-embeds only the chunk touched by a length-changing edit near the start", async () => {
+    const templates = [
+      "Short note.",
+      "This sentence is a bit longer than the previous one.",
+      "Here is a mid-length sentence for variety.",
+      "This one is noticeably longer, adding several more words to change its length " +
+        "meaningfully and give the packer something to chew on.",
+      "Brief.",
+      "Another sentence of medium length appears here for good measure.",
+    ];
+    const original = Array.from(
+      { length: 150 },
+      (_, i) => `Sentence ${i}: ${templates[i % templates.length]}`,
+    ).join(" ");
+
+    const note = await seedNote(original);
+    const ai = createFakeAi();
+    const first = await embedNote({ db, ai }, { ...note, userId });
+    expect(first).toEqual({ embedded: 6, reused: 0 });
+
+    const spy = vi.fn(ai.embed);
+    const insertAt = original.indexOf(" ", 20) + 1;
+    const edited = `${original.slice(0, insertAt)}extra ${original.slice(insertAt)}`;
+    await db.from("notes").update({ content: edited }).eq("id", note.noteId);
+    const { data: updated } = await db.from("notes").select("content_text").eq("id", note.noteId).single();
+    const { data: hash } = await db.rpc("_test_md5_content_text", { p_note_id: note.noteId });
+
+    const out = await embedNote(
+      { db, ai: { ...ai, embed: spy } },
+      { noteId: note.noteId, userId, contentText: updated!.content_text, contentHash: hash as string },
+    );
+
+    expect(out).toEqual({ embedded: 1, reused: 5 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[0]).toHaveLength(1);
+  });
+
+  it("deletes chunks that fall off the end when a note is shortened", async () => {
+    const long = (c: string) => c.repeat(1500);
+    const note = await seedNote(`${long("a")}\n\n${long("b")}\n\n${long("c")}`);
+    await embedNote({ db, ai: createFakeAi() }, { ...note, userId });
+
+    await db.from("notes").update({ content: long("a") }).eq("id", note.noteId);
+    const { data: updated } = await db.from("notes").select("content_text").eq("id", note.noteId).single();
+    const { data: hash } = await db.rpc("_test_md5_content_text", { p_note_id: note.noteId });
+    await embedNote({ db, ai: createFakeAi() }, { noteId: note.noteId, userId, contentText: updated!.content_text, contentHash: hash as string });
+
+    const { data } = await db.from("note_chunks").select("chunk_index").eq("note_id", note.noteId);
+    expect(data).toHaveLength(1);
+  });
+
+  it("stamps embedded_hash so the sweep stops claiming the note for this step", async () => {
+    const note = await seedNote("body");
+    await embedNote({ db, ai: createFakeAi() }, { ...note, userId });
+    const { data } = await db.from("note_enrichment").select("embedded_hash").eq("note_id", note.noteId).single();
+    expect(data!.embedded_hash).toBe(note.contentHash);
+  });
+
+  it("is a no-op on a second run", async () => {
+    const note = await seedNote("stable text");
+    const ai = createFakeAi();
+    await embedNote({ db, ai }, { ...note, userId });
+    const spy = vi.fn(ai.embed);
+    const out = await embedNote({ db, ai: { ...ai, embed: spy } }, { ...note, userId });
+    expect(out).toEqual({ embedded: 0, reused: 1 });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  // THE SILENT-CORPUS-WIPE GUARD, at the use site.
+  //
+  // gemini.ts's extractVectors now refuses a short response, but embedNote takes an AiClient,
+  // not a Gemini client -- a second implementation, a future cache layer, or a mock that drifts
+  // from the interface can all hand it fewer vectors than chunks. The consequence does not
+  // depend on where the short array came from: `embedding: vectors[i]` is `undefined` on every
+  // row UNIFORMLY, JSON.stringify drops the key, PostgREST accepts the batch, embedded_hash is
+  // stamped at the end of this function, and search_notes' `c.embedding is not null` filter
+  // (00022:40) then hides those chunks forever, because the hash predicate will never claim the
+  // note again. Nothing in the type system catches it: `SupabaseClient` is ungeneric, so
+  // noUncheckedIndexedAccess has no typed destination to complain about.
+  //
+  // What this pins is the DURABLE consequence, not just the throw: no chunk rows, and above all
+  // no embedded_hash -- so the next sweep still claims this note.
+  it("refuses to write rows when embed returns fewer vectors than chunks", async () => {
+    const note = await seedNote("one chunk of text");
+    const short = createFakeAi({
+      embed: async () => ({ vectors: [], inputTokens: 1, model: "fake-embed" }),
+    });
+
+    await expect(embedNote({ db, ai: short }, { ...note, userId })).rejects.toBeTruthy();
+
+    const { data: chunks } = await db.from("note_chunks").select("id, embedding").eq("note_id", note.noteId);
+    expect(chunks).toEqual([]);
+    const { data: mark } = await db.from("note_enrichment")
+      .select("embedded_hash").eq("note_id", note.noteId).maybeSingle();
+    expect(mark).toBeNull();
+  });
+
+  it("refuses a vector-shaped hole in an otherwise correct-length response", async () => {
+    const note = await seedNote("one chunk of text");
+    const holed = createFakeAi({
+      embed: async (texts: string[]) => ({
+        vectors: texts.map(() => undefined) as unknown as number[][],
+        inputTokens: 1, model: "fake-embed",
+      }),
+    });
+
+    await expect(embedNote({ db, ai: holed }, { ...note, userId })).rejects.toBeTruthy();
+    const { data: mark } = await db.from("note_enrichment")
+      .select("embedded_hash").eq("note_id", note.noteId).maybeSingle();
+    expect(mark).toBeNull();
+  });
+
+  it("writes an empty note's hash without calling the model", async () => {
+    const note = await seedNote("");
+    const spy = vi.fn(createFakeAi().embed);
+    const out = await embedNote({ db, ai: { ...createFakeAi(), embed: spy } }, { ...note, userId });
+    expect(out).toEqual({ embedded: 0, reused: 0 });
+    expect(spy).not.toHaveBeenCalled();
+    const { data } = await db.from("note_enrichment").select("embedded_hash").eq("note_id", note.noteId).single();
+    expect(data!.embedded_hash).toBe(note.contentHash);
+  });
+});

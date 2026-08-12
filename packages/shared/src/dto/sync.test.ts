@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SYNC_TABLES, syncUploadInput } from "./sync.js";
+import { SERVER_ONLY_TABLES, SYNC_TABLES, syncUploadInput } from "./sync.js";
 
 const op = {
   op_id: "1", op: "PUT" as const, table: "notes",
@@ -51,5 +51,29 @@ describe("syncUploadInput", () => {
     expect([...SYNC_TABLES].sort()).toEqual(
       ["checkins", "links", "media_items", "note_tags", "notes", "tags"],
     );
+  });
+});
+
+describe("SERVER_ONLY_TABLES", () => {
+  it("names every table deliberately excluded from replication", () => {
+    expect([...SERVER_ONLY_TABLES].sort()).toEqual(
+      [
+        "feedback_events",
+        "flashcards",
+        "ingest_inbox",
+        "integrations",
+        "memory_revisions",
+        "note_chunks",
+        "note_enrichment",
+        "usage_ledger",
+      ].sort(),
+    );
+  });
+
+  it("shares no table with SYNC_TABLES", () => {
+    const synced = new Set<string>(SYNC_TABLES);
+    for (const t of SERVER_ONLY_TABLES) {
+      expect(synced.has(t), `${t} is in both lists`).toBe(false);
+    }
   });
 });

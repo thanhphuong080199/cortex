@@ -3,6 +3,8 @@
 import { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { createClient } from "@supabase/supabase-js";
+import { createFakeAi, type AiClient } from "@cortex/core";
+import { AI_CLIENT } from "../src/ai-client.provider";
 import { AppModule } from "../src/app.module";
 import { CoreErrorFilter } from "../src/core-error.filter";
 
@@ -26,9 +28,31 @@ export async function makeUser(email: string): Promise<TestUser> {
   return { id: data.user!.id, token: data.session!.access_token };
 }
 
-/** Boots the real AppModule with the same global filter main.ts registers. */
-export async function bootstrapTestApp(): Promise<INestApplication> {
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+export interface TestAppOverrides {
+  /**
+   * Overrides AppModule's AI_CLIENT provider before the app boots. Pass @cortex/core's
+   * createFakeAi (optionally scripted) from a suite that needs specific embed/generateJson
+   * behaviour; otherwise omit it entirely.
+   */
+  ai?: AiClient;
+}
+
+/**
+ * Boots the real AppModule with the same global filter main.ts registers.
+ *
+ * AI_CLIENT is ALWAYS overridden with a fake here -- unconditionally, not only when `overrides.ai`
+ * is supplied -- so that "no harness-booted test can reach the real Gemini API" is enforced by
+ * construction rather than by every future suite remembering to opt in. Before this, a suite that
+ * called plain bootstrapTestApp() and then issued a POST /search would silently get the real,
+ * lazily-constructed Gemini client (ai-client.provider.ts) and make a live, billable call with
+ * whatever GEMINI_API_KEY happens to be in the environment -- nothing today does that, but
+ * nothing prevented a future suite from doing it by accident either. Search.e2e.test.ts, which
+ * cares about specific embed() output, still passes its own `ai` via `overrides.ai`.
+ */
+export async function bootstrapTestApp(overrides: TestAppOverrides = {}): Promise<INestApplication> {
+  const builder = Test.createTestingModule({ imports: [AppModule] });
+  builder.overrideProvider(AI_CLIENT).useValue(overrides.ai ?? createFakeAi());
+  const moduleRef = await builder.compile();
   const app = moduleRef.createNestApplication();
   app.useGlobalFilters(new CoreErrorFilter());
   await app.init();

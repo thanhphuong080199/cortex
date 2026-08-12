@@ -6,15 +6,35 @@ import { z } from "zod";
  * still have no service or UI: each table joins this list in the phase that builds its
  * feature, with its sync rule and isolation test in the same PR.
  *
- * `flashcards` is deliberately absent (phase 6). Server-only tables -- note_chunks,
- * ingest_inbox, memory_revisions, feedback_events, usage_ledger, integrations -- must
- * never appear here; integrations in particular holds credentials that never leave the
- * server.
+ * Server-only tables are deliberately absent from here (see `SERVER_ONLY_TABLES` below);
+ * they must never appear here, as integrations in particular holds credentials that never
+ * leave the server.
  */
 export const SYNC_TABLES = [
   "notes", "tags", "note_tags", "links", "media_items", "checkins",
 ] as const;
 export type SyncTable = (typeof SYNC_TABLES)[number];
+
+/**
+ * Tables deliberately absent from the PowerSync sync rules and from the `powersync`
+ * publication. The omission is load-bearing -- `integrations` holds credentials that must
+ * never reach a device, and the rest are server-side machinery -- so it is asserted rather
+ * than trusted: packages/db's sync-rules isolation suite and packages/sync's schema suite
+ * both read this list.
+ *
+ * ONE copy. Two hand-maintained copies existed until 2026-08-10, which is the same
+ * parallel-list trap phase 1b's Task 22 fixed for the media status vocabulary.
+ */
+export const SERVER_ONLY_TABLES = [
+  "note_chunks",
+  "usage_ledger",
+  "integrations",
+  "feedback_events",
+  "memory_revisions",
+  "ingest_inbox",
+  "flashcards",
+  "note_enrichment",
+] as const;
 
 export const syncOpKind = z.enum(["PUT", "PATCH", "DELETE"]);
 

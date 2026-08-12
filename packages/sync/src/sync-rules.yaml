@@ -8,9 +8,10 @@
 # One bucket per user, keyed on the Supabase JWT's subject.
 #
 # Server-only tables are absent by omission, which is load-bearing: integrations holds
-# credentials that must never reach a device, and note_chunks/usage_ledger/feedback_events/
-# memory_revisions/ingest_inbox are server-side machinery. flashcards is deferred to
-# phase 6, which adds its rule, its client schema entry and its isolation test together.
+# credentials that must never reach a device, and note_chunks/note_enrichment/usage_ledger/
+# feedback_events/memory_revisions/ingest_inbox are server-side machinery. flashcards is
+# deferred to phase 6, which adds its rule, its client schema entry and its isolation test
+# together.
 #
 # Sync STREAMS (edition 3), not the older bucket_definitions form: PowerSync's docs class
 # Sync Rules as legacy and recommend Streams for new projects. Edition 3 also enables the

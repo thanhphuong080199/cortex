@@ -1,9 +1,16 @@
 import {
-  attachTagInput, createCheckinInput, createNoteInput, createTagInput, logMediaInput, updateNoteInput,
+  attachTagInput, createCheckinInput, createNoteInput, createTagInput, logMediaInput, searchInput, updateNoteInput,
   type AttachTagInput, type CreateCheckinInput, type CreateNoteInput, type CreateTagInput,
-  type LogMediaInput, type UpdateNoteInput,
+  type LogMediaInput, type SearchInput, type SearchResult, type UpdateNoteInput,
 } from "@cortex/shared";
 import type { ZodType } from "zod";
+
+// Re-exported, not redeclared: SearchResult lives in @cortex/shared beside searchInput, so the
+// server's response type and this client's expectation are one declaration rather than two that
+// typecheck independently while disagreeing. The re-export keeps `import type { SearchResult }
+// from "@/lib/api"` working for search-form.tsx -- api.ts is where this app's callers already
+// look for the shapes these methods return.
+export type { SearchResult };
 
 export class ApiError extends Error {
   constructor(public status: number, public issues?: unknown) { super(`API ${status}`); }
@@ -53,4 +60,6 @@ export const api = {
   deleteCheckin: async (token: string, id: string) => send(`/checkins/${id}`, "DELETE", token),
   logMedia: async (token: string, input: LogMediaInput) =>
     send("/media-log", "POST", token, validated(logMediaInput, input)),
+  search: async (token: string, input: SearchInput) =>
+    (await send("/search", "POST", token, validated(searchInput, input)) as { results: SearchResult[] }).results,
 };

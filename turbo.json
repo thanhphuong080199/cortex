@@ -37,7 +37,11 @@
         "SUPABASE_SERVICE_ROLE_KEY",
         "SUPABASE_JWT_SECRET",
         "CORS_ORIGINS",
-        "PORT"
+        "PORT",
+        "DATABASE_URL",
+        "GEMINI_API_KEY",
+        "GEMINI_TIER",
+        "ENRICH_MONTHLY_BUDGET_USD"
       ]
     }
   }

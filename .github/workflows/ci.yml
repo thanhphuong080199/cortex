@@ -138,13 +138,36 @@ jobs:
       # unset makes apps/api's SupabaseAuthGuard fall through to the JWKS verification
       # path (see apps/api/src/auth/supabase-auth.guard.ts), which is also what
       # production uses — so CI exercises the real code path, not a shortcut.
+      # DATABASE_URL comes from the CLI's `DB_URL` key (NOT `DATABASE_URL` -- the names differ),
+      # and it is the first direct-Postgres connection string this repo needs: apps/api's
+      # test/boss.integration.test.ts calls createBoss(process.env.DATABASE_URL!). Without it
+      # `pg` silently falls back to its own defaults (localhost:5432) while the CLI put Postgres
+      # on 54322, so beforeAll throws and both pg-boss tests fail -- a failure that reads like a
+      # broken queue rather than a missing variable.
+      #
+      # The three GEMINI_*/ENRICH_* values are DUMMIES, and must stay dummies: NO TEST MAY EVER
+      # CALL THE REAL GEMINI API (packages/core/src/ai/fake.ts). Every suite embeds through
+      # createFakeAi; these exist only so apps/api's parseApiEnv (src/env.ts) can complete --
+      # this branch made all four vars REQUIRED, and a ZodError at parse time aborts a test
+      # before it reaches the behaviour it was written to assert. A real key here would buy
+      # nothing and put a live billable credential on a public runner.
+      #
+      # GEMINI_TIER must be `free` next to a local SUPABASE_URL, and that pairing is the only
+      # legitimate one: assertTierAllowsRealData (packages/core/src/enrich/budget.ts, spec §15.6
+      # rule 2) refuses a free-tier key against a HOSTED url, because free-tier prompts are used
+      # for training and this app's text is personal. Local stack + free is the combination the
+      # rule exists to permit.
       - name: Export local Supabase keys as app env vars
         run: |
-          eval "$(pnpm exec supabase status -o env | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY)=')"
+          eval "$(pnpm exec supabase status -o env | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|DB_URL)=')"
           {
             echo "SUPABASE_URL=$API_URL"
             echo "SUPABASE_ANON_KEY=$ANON_KEY"
             echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY"
+            echo "DATABASE_URL=$DB_URL"
+            echo "GEMINI_API_KEY=ci-dummy-key-no-test-may-reach-the-real-api"
+            echo "GEMINI_TIER=free"
+            echo "ENRICH_MONTHLY_BUDGET_USD=5"
           } >> "$GITHUB_ENV"
 
       # Every vitest config sets `setupFiles: ["dotenv/config"]`, so a `.env` sitting in a

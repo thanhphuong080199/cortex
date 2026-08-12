@@ -14,6 +14,7 @@ import { z } from "zod";
 //   noteDomain        <-> notes.domain_check
 //   mediaKind         <-> media_items.kind_check
 //   flashcardStatus   <-> flashcards.status_check
+//   usageLedgerKind   <-> usage_ledger.kind_check
 //
 // links.status ('suggested'|'accepted'|'dismissed') and notes.para_status
 // ('none'|'suggested'|'accepted') are DELIBERATELY distinct vocabularies (design spec
@@ -26,7 +27,16 @@ export const noteLifecycle = z.enum(["inbox", "active", "evergreen", "archived"]
 // local replica, so it needs the union rather than a bare string -- an unchecked value there
 // fails the server's CHECK constraint only after it has synced.
 export type NoteLifecycle = z.infer<typeof noteLifecycle>;
-export const noteSourceType = z.enum(["quick", "web_clip", "voice", "email", "telegram", "import"]);
+// 'chat'      -- a question you typed into the box. Stored as a note so "what was I
+//                researching last month" works through search_notes with no second store.
+// 'assistant' -- an answer you chose to save. Down-weighted in retrieval (see search_notes)
+//                and cited as something you saved, never as your own thinking.
+// 'web_search'-- the same, for an answer carrying web citations. Required by the
+//                life-domains spec §6.3 since 2026-08-01 and never added until now.
+export const noteSourceType = z.enum([
+  "quick", "web_clip", "voice", "email", "telegram", "import",
+  "chat", "assistant", "web_search",
+]);
 export const paraCategory = z.enum(["project", "area", "resource", "archive"]);
 export const suggestionStatus = z.enum(["suggested", "accepted", "rejected"]);
 export const taskStatus = z.enum(["suggested", "todo", "doing", "done", "dropped"]);
@@ -55,7 +65,31 @@ export type MediaStatus = z.infer<typeof mediaStatus>;
 // scheduling it), which is not the same act as rejecting a suggestion.
 export const flashcardStatus = z.enum(["suggested", "active", "suspended"]);
 
+// usage_ledger.kind's full SQL vocabulary (00007_integrations_ops.sql), for the enum-parity
+// pair only. This is deliberately WIDER than any TS call site: only 'embed' and 'tag' are
+// written today (packages/core/src/enrich/budget.ts's recordUsage narrows its own `kind`
+// parameter to that pair), while 'chat', 'digest', 'memory' and 'transcribe' anticipate
+// workloads later phases add. A narrow union assigning into this wider vocabulary is fine;
+// what must not happen again is a TS union value the SQL CHECK constraint does not accept --
+// recordUsage briefly had "extract" here, which does not appear in the constraint below, and
+// nothing caught it before the first real insert. Existing to close exactly that gap.
+export const usageLedgerKind = z.enum(["embed", "chat", "tag", "digest", "memory", "transcribe"]);
+
 // Pinned by 00012_embedding_dims_gemini.sql and asserted against the live column width
 // by packages/db's embedding-dims test. Changing either side alone breaks that test.
 export const EMBEDDING_DIM = 1536;
 export const EMBEDDING_MODEL = "gemini-embedding-001";
+
+// The life-domains spec §1 assigns workloads by model FAMILY ("Gemini 3 Flash"), which is not
+// an API id. These are the ids, verified against ai.google.dev/gemini-api/docs/models on
+// 2026-08-10. Prices are USD per million tokens; usage_ledger records the model with every
+// row, so changing a price here never rewrites history.
+export const CLASSIFY_MODEL = "gemini-3.5-flash-lite";
+// Prices reverified directly against ai.google.dev/gemini-api/docs/pricing on 2026-08-10.
+// The flash-lite figures the brief drafted ($0.10/$0.40) are stale -- they match the
+// deprecated gemini-2.5-flash-lite tier. Current standard (non-batch) pricing: embedding is
+// input-only (no output charge); flash-lite is $0.30 input / $2.50 output per 1M tokens.
+export const MODEL_PRICES_USD_PER_MTOK: Record<string, { input: number; output: number }> = {
+  "gemini-embedding-001": { input: 0.15, output: 0 },
+  "gemini-3.5-flash-lite": { input: 0.3, output: 2.5 },
+};

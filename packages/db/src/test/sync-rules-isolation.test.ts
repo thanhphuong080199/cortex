@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { SYNC_TABLES } from "@cortex/shared";
+import { SERVER_ONLY_TABLES, SYNC_TABLES } from "@cortex/shared";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 
@@ -194,15 +194,7 @@ describe("sync rules — static shape", () => {
   });
 
   it("names no server-only table anywhere", () => {
-    for (const t of [
-      "note_chunks",
-      "usage_ledger",
-      "integrations",
-      "feedback_events",
-      "memory_revisions",
-      "ingest_inbox",
-      "flashcards",
-    ]) {
+    for (const t of SERVER_ONLY_TABLES) {
       expect(directives, `server-only table in a sync rule: ${t}`).not.toContain(t);
     }
   });
