@@ -1525,3 +1525,151 @@ A **development** build carries no JS: Metro serves it from your machine at runt
 (`EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, `EXPO_PUBLIC_POWERSYNC_URL`,
 `EXPO_PUBLIC_API_URL`) **must** be configured on EAS before that build, or the app ships
 pointing at `undefined`.
+
+---
+
+# Web — Vercel deploy checklist
+
+Issue-log **E3** says the search UI "is not live until web redeploys". That is exactly right,
+and narrower than it sounds. **Web is already deployed** — this section was first written
+claiming otherwise, and every claim below is now what the CLI and the live site actually
+report, not what the repo implied.
+
+## 0. What is actually true right now (verified 2026-08-12)
+
+| | |
+|---|---|
+| Project | `phillip7/web`, `prj_s4LpM7…`, created 2026-08-04 |
+| Live production deploy | `web-2u0kmce12-phillip7.vercel.app`, **● Ready**, built **2026-08-04** |
+| Stable aliases | `web-tan-nu-96.vercel.app`, `web-phillip7.vercel.app` |
+| Root Directory | `apps/web` ✅ already set |
+| Env vars (Production) | all three `NEXT_PUBLIC_*` ✅ already set |
+| Railway `CORS_ORIGINS` | ✅ already includes `https://web-tan-nu-96.vercel.app` |
+
+**The live build predates stage B.** It was built eight days before phase 2 merged, so it has
+no `/search` route, no search UI, and none of phase 1c. A redeploy from current `main` is the
+whole content of "make search live".
+
+## 1. The actual blocker: Deployment Protection is ON
+
+Every path on the live site answers `302` to `https://vercel.com/sso-api?url=…`:
+
+```
+$ curl -s -o /dev/null -D - https://web-phillip7.vercel.app/login | grep -i '^location'
+Location: https://vercel.com/sso-api?url=https%3A%2F%2Fweb-phillip7.vercel.app%2Flogin&nonce=…
+```
+
+`/`, `/login` and `/search` all do it, which is the tell: `/login` has no auth requirement of
+its own, so a redirect there is not the app's middleware — it is Vercel Authentication in front
+of the whole deployment.
+
+**Consequence: the site is usable only by someone signed in to the Vercel account.** Cortex has
+two users; unless the second is on the team, the app is invisible to them no matter how many
+times it is redeployed. This is the first thing to change, and it is a dashboard setting, not
+code:
+
+> Vercel → Project `web` → Settings → **Deployment Protection** → Vercel Authentication → set
+> Production to **Disabled** (leave preview protection on if you like — previews cannot write
+> anyway, see §4).
+
+Nothing else in this checklist matters until this is off, because every verification in §5 would
+otherwise be measuring the SSO page.
+
+## 2. Build Command — pin it, even though it currently works
+
+Project settings show the **default** build command (`next build`), and the 2026-08-04 deploy
+succeeded with it from a clean checkout. But a bare `next build` does not work on its own:
+
+```
+$ rm -rf packages/shared/dist && npx next build
+Module not found: Can't resolve '@cortex/shared'
+```
+
+`@cortex/shared`'s `package.json` `main` is `./dist/index.js`, and there is no `prepare` or
+`postinstall` script to produce it — so something on Vercel's side is building the workspace
+first, almost certainly its Turborepo detection picking up `turbo.json`.
+
+**Set it explicitly anyway:**
+
+```
+cd ../.. && pnpm turbo run build --filter=@cortex/web
+```
+
+The current arrangement works by inference from a file we do not control the meaning of. Naming
+the command costs nothing and removes the dependency on that detection continuing to behave the
+same way after any Vercel or turbo upgrade. This is a judgement call, not a fix for a live
+failure — recorded as such so nobody later "simplifies" it back.
+
+While here: `next.config.ts`'s comment claims `@cortex/shared` ships raw TypeScript with `main`
+at `src/index.ts`. That has been false since `5162b2b`; `transpilePackages` is now doing nothing
+for it. Stale, harmless, worth correcting the next time that file is opened.
+
+## 3. Supabase Auth — the redirect allowlist (OUTSIDE VERCEL)
+
+Phase 0 set **Site URL = `http://localhost:3000`**, and it is still that.
+
+The app needs no code change: `login/page.tsx:9` uses `${location.origin}/auth/callback` and
+`auth/callback/route.ts:5` reads the origin off the request, so it works on any domain Supabase
+is willing to redirect to.
+
+Supabase → Authentication → URL Configuration:
+
+- **Site URL** → `https://web-tan-nu-96.vercel.app` (match whatever `CORS_ORIGINS` names — §4)
+- **Redirect URLs** → add `https://web-tan-nu-96.vercel.app/auth/callback`
+
+**Failure mode:** Google sign-in completes and then bounces to localhost or
+`redirect_uri_mismatch`. The deployment is green and the home page renders; it just cannot be
+signed into.
+
+## 4. `CORS_ORIGINS` — already set, verify the alias matches
+
+```
+CORS_ORIGINS = https://web-tan-nu-96.vercel.app,http://localhost:3000,http://127.0.0.1:3000
+```
+
+Already correct, and worth understanding rather than trusting: `env.ts:19` makes this
+**optional** and `main.ts:10` defaults to localhost only. So had it been unset, the API would
+boot clean, `/health` would answer, every server-side read through Supabase would work, and the
+site would look entirely functional — while every browser *write* was blocked before leaving the
+browser, visible only in the console. Since stage C1's box opens with a `POST /notes`, that
+failure presents as the assistant doing nothing at all.
+
+**The one thing to check:** the value names `web-tan-nu-96`, and the site is also aliased as
+`web-phillip7`. Whichever alias is used in the browser must be the one listed here — an origin
+is an exact string match. Use one alias consistently, or list both.
+
+### Preview deployments cannot write
+
+Vercel mints a fresh URL per preview and `app.enableCors({ origin: origins })` takes exact
+strings, so previews render and then fail every write.
+
+**Ruled: production alias only.** Making previews fully functional means matching origins by
+pattern in `main.ts`, which widens the CORS surface for a benefit two users do not need. If that
+changes it is a small separate PR, not a config tweak.
+
+## 5. Deploy, and verify in this order
+
+Git integration deploys `main` to production, and needs no new CI. Note that Vercel deploys
+**independently of** `ci.yml` — a red CI does not block a deploy. Acceptable at this size.
+
+Manually instead:
+
+```bash
+vercel pull --yes --environment=production
+vercel build --prod        # on Windows this fails at EPERM: symlink — a local
+                           # limitation, not a project one; Linux builders are fine
+vercel deploy --prebuilt --prod
+```
+
+Order matters here, because each failure mimics the next:
+
+| Check | Expect | If it fails |
+|---|---|---|
+| `GET /login` | `200`, not a `vercel.com/sso-api` redirect | §1 — protection still on |
+| `GET /` unauthenticated | `307 → /login` | build or env, not wiring |
+| Google sign-in | returns signed in | §3 |
+| Notes list renders | rows | Supabase read path — RLS or anon key |
+| **Create a note** | `201`, row appears | §4 — check the console for CORS first |
+| `/search` exists at all | not a 404 | the deploy is still the 2026-08-04 build |
+| Search a phrase from a known note | results with `matchedBy` | `NEXT_PUBLIC_API_URL`, then §4 |
+| Search Vietnamese without diacritics | matches | needs `00026` pushed to hosted |
