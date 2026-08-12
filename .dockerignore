@@ -1,0 +1,26 @@
+# apps/api/Dockerfile does `COPY apps/api ./apps/api`, which would otherwise pull
+# apps/api/.env -- the hosted DATABASE_URL (with its password), the hosted service-role key
+# and the paid Gemini key -- into the build context and the build stage's filesystem.
+#
+# The published image happens to be clean anyway: the runtime stage copies only
+# package.json, node_modules and dist from the build stage. This file exists so that stays a
+# fact rather than a coincidence -- one `COPY --from=build /repo/apps/api` in a future
+# refactor would bake real credentials into a layer, and nothing else in the repo would
+# notice. Every one of these values is supplied by Railway at runtime; none belongs in an
+# image.
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+
+# Never needed by the build, and the largest thing in the upload.
+.git
+**/node_modules
+
+# Build output is produced inside the image; shipping a host-built copy in risks a stale
+# dist/ shadowing the one `nest build` creates.
+**/dist
+**/.turbo
+**/.next
+**/.expo
