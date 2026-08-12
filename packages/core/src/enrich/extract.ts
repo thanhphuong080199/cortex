@@ -5,6 +5,8 @@ import type { EnrichTarget } from "./embed.js";
 import { recordUsage } from "./budget.js";
 
 interface Extraction {
+  intent?: "question" | "statement";
+  complexity?: "simple" | "complex";
   domain: string | null;
   domain_meta: Record<string, unknown>;
   tags: { name: string; confidence: number }[];
@@ -13,6 +15,12 @@ interface Extraction {
 const RESPONSE_SCHEMA = {
   type: "object",
   properties: {
+    // The box branches on this. The sweep ignores it -- a few output tokens, against two
+    // prompts that would have to be kept in step by discipline alone.
+    intent: { type: "string", enum: ["question", "statement"] },
+    // RECORDED, NOT ACTED ON. It costs a couple of output tokens and produces the dataset a
+    // future model-routing decision needs: complexity x real cost x model. Nothing reads it.
+    complexity: { type: "string", enum: ["simple", "complex"] },
     domain: { type: "string", nullable: true, enum: [...noteDomain.options] },
     domain_meta: { type: "object" },
     tags: {
@@ -24,7 +32,7 @@ const RESPONSE_SCHEMA = {
       },
     },
   },
-  required: ["domain", "domain_meta", "tags"],
+  required: ["intent", "complexity", "domain", "domain_meta", "tags"],
 };
 
 /**
@@ -68,6 +76,12 @@ function buildPrompt(contentText: string, vocabulary: string[]): string {
     "- domain must be one of: " + noteDomain.options.join(", ") + ", or null when none fits.",
     "- domain_meta holds only what the text actually states. Omit anything you are guessing.",
     "",
+    "Write tags in the SAME LANGUAGE the note is written in. Do not translate: a note in",
+    "Vietnamese gets Vietnamese tags. Tag vocabularies that mix languages split one idea across two",
+    "tags and stop being reusable. The `domain` value is the exception -- it is a fixed English",
+    "identifier stored in the database, so return it exactly as listed above whatever the note's",
+    "language.",
+    "",
     "The note:",
     contentText,
   ].join("\n");
@@ -81,7 +95,13 @@ function buildPrompt(contentText: string, vocabulary: string[]): string {
 export async function extractNote(
   deps: { db: SupabaseClient; ai: AiClient },
   note: EnrichTarget,
-): Promise<{ tags: number; domain: string | null }> {
+): Promise<{
+  tags: number;
+  tagNames: string[];
+  domain: string | null;
+  intent: "question" | "statement";
+  complexity: "simple" | "complex";
+}> {
   const { db, ai } = deps;
 
   const { data: tagRows, error: tagErr } = await db.from("tags")
@@ -130,7 +150,10 @@ export async function extractNote(
     .sort((a, b) => b.confidence - a.confidence)
     .slice(0, 1); // at most one new tag per run
 
-  let attached = 0;
+  // Names, not just a count: the caller has to be able to say WHICH tags were attached, and
+  // reading them back out of note_tags afterwards would be a second round trip for data this
+  // loop already holds. The count below is derived from it rather than tracked separately.
+  const accepted: string[] = [];
   for (const candidate of [...existingHits, ...novel]) {
     const name = candidate.name.trim().toLowerCase();
     let tagId = byLowerName.get(name)?.id;
@@ -173,7 +196,9 @@ export async function extractNote(
       source: "ai", status: "suggested", confidence: candidate.confidence,
     });
     if (error) throw error;
-    attached += 1;
+    // The tag's STORED name, not the normalized lookup key: "pricing" resolves to a tag the
+    // user created as "Pricing", and that is the spelling they should see back.
+    accepted.push(byLowerName.get(name)?.name ?? name);
   }
 
   // ---- domain + meta ----
@@ -209,5 +234,14 @@ export async function extractNote(
   );
   if (markErr) throw markErr;
 
-  return { tags: attached, domain };
+  // intent and complexity are DEFAULTED rather than trusted. `required` in a responseSchema is a
+  // request, not a guarantee, and an absent intent must not throw away an otherwise good
+  // extraction: "statement" is the safe branch, because it never spends the reasoning model.
+  return {
+    tags: accepted.length,
+    tagNames: accepted,
+    domain,
+    intent: value.intent === "question" ? "question" : "statement",
+    complexity: value.complexity === "complex" ? "complex" : "simple",
+  };
 }

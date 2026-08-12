@@ -61,19 +61,23 @@ const tagsOn = async (noteId: string) => {
   return (data ?? []) as unknown as { status: string; source: string; confidence: number; tags: { name: string } }[];
 };
 
-describe("extractNote", () => {
-  beforeEach(async () => {
-    // 00008_invite_gate.sql fires on every auth.users insert, including through the admin
-    // API, so createUser fails with "Signup not allowed" unless the email is allow-listed
-    // first -- the same step every other suite's harness performs.
-    const email = `extract-${Date.now()}@example.com`;
-    const { error: upsertErr } = await db.from("allowed_emails").upsert({ email });
-    if (upsertErr) throw upsertErr;
-    const { data } = await db.auth.admin.createUser({
-      email, password: "x".repeat(16), email_confirm: true,
-    });
-    userId = data.user!.id;
+/**
+ * 00008_invite_gate.sql fires on every auth.users insert, including through the admin
+ * API, so createUser fails with "Signup not allowed" unless the email is allow-listed
+ * first -- the same step every other suite's harness performs.
+ */
+async function createTestUser() {
+  const email = `extract-${Date.now()}@example.com`;
+  const { error: upsertErr } = await db.from("allowed_emails").upsert({ email });
+  if (upsertErr) throw upsertErr;
+  const { data } = await db.auth.admin.createUser({
+    email, password: "x".repeat(16), email_confirm: true,
   });
+  userId = data.user!.id;
+}
+
+describe("extractNote", () => {
+  beforeEach(createTestUser);
 
   it("attaches suggested tags with source 'ai' and the model's confidence", async () => {
     const note = await seedNote("thoughts on pricing psychology");
@@ -289,5 +293,75 @@ describe("extractNote", () => {
 
     const { data } = await db.from("note_enrichment").select("extracted_hash").eq("note_id", note.noteId).maybeSingle();
     expect(data).toBeNull();
+  });
+});
+
+describe("extractNote — intent, complexity and language", () => {
+  beforeEach(createTestUser);
+
+  it("returns the intent the model classified", async () => {
+    const note = await seedNote("bao giờ tôi viết về chuyện này?");
+    const ai = aiReturning({
+      intent: "question", complexity: "simple", domain: null, domain_meta: {}, tags: [],
+    });
+    const out = await extractNote({ db, ai }, note);
+
+    expect(out.intent).toBe("question");
+    expect(out.complexity).toBe("simple");
+  });
+
+  it("asks for one JSON object carrying all four decisions, not four calls", async () => {
+    const schemas: Record<string, unknown>[] = [];
+    const ai = createFakeAi({
+      generateJson: async (args) => {
+        schemas.push(args.schema);
+        return {
+          value: { intent: "statement", complexity: "simple", domain: null, domain_meta: {}, tags: [] },
+          inputTokens: 1, outputTokens: 1, model: "fake-classify",
+        };
+      },
+    });
+    await extractNote({ db, ai }, await seedNote("hôm nay tôi chạy bộ"));
+
+    expect(schemas).toHaveLength(1);
+    const props = (schemas[0]!.properties ?? {}) as Record<string, unknown>;
+    expect(Object.keys(props).sort())
+      .toEqual(["complexity", "domain", "domain_meta", "intent", "tags"]);
+  });
+
+  // Cortex's users write Vietnamese. A prompt that says nothing about language gets tags back
+  // in whichever language the model felt like, which fragments the vocabulary that
+  // TAG_VOCABULARY_LIMIT exists to keep stable.
+  it("instructs the model to work in the language the note was written in", async () => {
+    const note = await seedNote("tôi ngủ không đủ giấc");
+    const { seen, ai } = aiCapturingPrompt({
+      intent: "statement", complexity: "simple", domain: null, domain_meta: {}, tags: [],
+    });
+    await extractNote({ db, ai }, note);
+
+    expect(seen[0]!).toMatch(/same language/i);
+  });
+
+  it("defaults to statement when the model omits intent, rather than throwing", async () => {
+    const note = await seedNote("ghi chú");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [] });
+    const out = await extractNote({ db, ai }, note);
+
+    expect(out.intent).toBe("statement");
+    expect(out.complexity).toBe("simple");
+  });
+
+  // The names, not just the count: the box has to say which tags it attached, and reading them
+  // back out of note_tags would be a second round trip for data this call already held.
+  it("names the tags it attached, not only how many", async () => {
+    const note = await seedNote("thoughts on pricing psychology");
+    const ai = aiReturning({
+      intent: "statement", complexity: "simple", domain: null, domain_meta: {},
+      tags: [{ name: "pricing", confidence: 0.8 }],
+    });
+    const out = await extractNote({ db, ai }, note);
+
+    expect(out.tags).toBe(1);
+    expect(out.tagNames).toEqual(["pricing"]);
   });
 });
