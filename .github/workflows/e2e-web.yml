@@ -66,12 +66,28 @@ jobs:
       # secret, but `supabase start` issues asymmetric ES256 access tokens (verified -- the
       # seeded token's header is {"alg":"ES256"}), so that secret verifies nothing. Leaving it
       # unset makes apps/api's guard take the JWKS path, which is what production uses.
+      # DATABASE_URL and the GEMINI_*/ENRICH_* trio are what apps/api's parseApiEnv (src/env.ts)
+      # made REQUIRED in the phase 2 branch. main.ts parses them BEFORE NestFactory.create, so a
+      # missing one exits(1) at boot -- the API never binds :3001 and the seed's first /notes
+      # call dies with a bare `fetch failed`. ci.yml grew the same block; this file and
+      # e2e-mobile.yml were missed, which is what broke the first post-merge run of that branch.
+      #
+      # The GEMINI_*/ENRICH_* values are DUMMIES and must stay dummies -- NO E2E RUN MAY REACH
+      # THE REAL GEMINI API. GEMINI_TIER must be `free` beside a local SUPABASE_URL:
+      # assertTierAllowsRealData (packages/core/src/enrich/budget.ts) refuses a free-tier key
+      # against a HOSTED url, and local+free is the pairing that rule exists to permit.
+      #
+      # DB_URL is the CLI's key name; the app reads DATABASE_URL. The names differ.
       - name: Export Supabase keys as app env vars
         run: |
-          eval "$(pnpm exec supabase status -o env | tr -d '"' | grep -E '^(ANON_KEY|SERVICE_ROLE_KEY)=')"
+          eval "$(pnpm exec supabase status -o env | tr -d '"' | grep -E '^(ANON_KEY|SERVICE_ROLE_KEY|DB_URL)=')"
           {
             echo "SUPABASE_ANON_KEY=$ANON_KEY"
             echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY"
+            echo "DATABASE_URL=$DB_URL"
+            echo "GEMINI_API_KEY=ci-dummy-key-no-e2e-run-may-reach-the-real-api"
+            echo "GEMINI_TIER=free"
+            echo "ENRICH_MONTHLY_BUDGET_USD=5"
             echo "NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321"
             echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$ANON_KEY"
             echo "NEXT_PUBLIC_API_URL=http://127.0.0.1:3001"
@@ -81,13 +97,19 @@ jobs:
       - name: Build web and api
         run: pnpm turbo run build --filter=@cortex/web --filter=@cortex/api
 
+      # The `exit 1` is load-bearing. The old loop ended on `sleep 2`, so the step's exit status
+      # was the sleep's -- zero -- and a boot that never happened was reported as a GREEN
+      # "Start the API" that merely took the full 60s. The failure then surfaced two steps later
+      # as `[seed] fetch failed`, pointing at the seed script instead of at the API.
       - name: Start the API
         run: |
           node apps/api/dist/main.js &
           for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:3001/health && break
+            curl -fsS http://127.0.0.1:3001/health && exit 0
             sleep 2
           done
+          echo "::error::the API never answered /health -- see the boot output above"
+          exit 1
         env:
           PORT: 3001
           CORS_ORIGINS: http://127.0.0.1:3000,http://localhost:3000

@@ -1125,6 +1125,11 @@ permission denied` at the grant layer instead of a silent empty result from RLS.
 
 ### Ship log — 2026-08-12
 
+Everything that went wrong getting here — including the two defects this deploy itself
+surfaced (`00025`'s grant drift and the missing `.dockerignore`) — is in
+[`docs/phase-2-issue-log.md`](./phase-2-issue-log.md), same format as the 1c log. Read it
+before the next deploy: most of its entries produce no error anywhere.
+
 - `00018`–`00025` pushed; remote head `00025`, verified in `pg_proc` / `pg_class`, not from the
   CLI's exit code.
 - All eight required variables set and confirmed by piping `railway variables --json` through
