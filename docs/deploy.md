@@ -623,7 +623,7 @@ a crash loop rather than a healthy deploy with a broken feature.
 | `DATABASE_URL` | ✅ **2** | The **session** pooler, port **5432**. Not 6543 — [see below](#database_url-must-be-the-session-pooler-5432-not-the-transaction-pooler-6543). |
 | `GEMINI_API_KEY` | ✅ **2** | A **paid-tier** key. The 1c note saying "do not add this yet" expired when phase 2 shipped. |
 | `GEMINI_TIER` | ✅ **2** | Literally `free` or `paid`; anything else fails the schema. Must be `paid` in production — enforced, [see below](#gemini_tier-must-be-paid-in-production-and-that-is-enforced-not-advised). |
-| `ENRICH_MONTHLY_BUDGET_USD` | ✅ **2** | A positive number, e.g. `10`. The enrichment sweep stops for a user once their month-to-date spend passes it. |
+| `ENRICH_MONTHLY_BUDGET_USD` | ✅ **2** | A positive number, e.g. `10`. Caps the **enrichment sweep** only — search is metered against the same ledger but never blocked by it, [see below](#the-budget-caps-the-sweep-search-is-metered-but-not-gated). |
 | `CORS_ORIGINS` | ✅ in practice | Optional in the schema (it falls back to localhost dev origins), but a deployed API without the real web origin blocks every browser write. |
 | `SUPABASE_JWT_SECRET` | ❌ must stay **unset** | Setting it forces the HS256 branch, which rejects the project's real ES256 tokens — every request 401s. |
 | `PORT` | ❌ leave to Railway | Railway injects it; setting it by hand only creates a way to disagree with the platform. |
@@ -727,6 +727,44 @@ So `GEMINI_TIER=free` on Railway is not a cheaper deploy; it is an API that boot
 fails every enrichment and every search with a tier error. Set `paid`, and confirm the Google
 Cloud project is actually on a paid plan — the variable asserts your intent, it cannot verify
 Google's billing state.
+
+#### The budget caps the sweep; search is **metered but not gated**
+
+Two things spend money on Gemini, and `ENRICH_MONTHLY_BUDGET_USD` stops only one of them.
+
+| Path | Writes `usage_ledger` | Blocked by the budget |
+| --- | --- | --- |
+| Enrichment sweep (embed + extract, per note) | yes | **yes** — `isOverBudget` skips the user for the rest of the UTC month |
+| `POST /search` (one embedding of the query) | yes | **no** — it runs regardless |
+
+**Why search is metered.** Every search embeds its query, so it is a billable path.
+`isOverBudget` is deliberately fail-**closed** (`packages/core/src/enrich/budget.ts`) so that an
+outage in the spend query can never turn into unlimited spend — a guarantee that is worth
+nothing for a path the ledger never records. Until 2026-08-12 search wrote no row at all, so the
+only place that spend appeared was Google's own console. It now writes one `kind = 'embed'` row
+per successful search.
+
+**Why search is not gated.** Refusing to let someone search their own notes because a
+*background* job overspent is the wrong trade: the budget exists to bound what Cortex spends on
+its own initiative, and a search is the user asking. Gating would also put a second round trip
+(`isOverBudget`'s RPC) in front of an interactive request.
+
+**Scale, so the numbers are on the record.** One query embeds to roughly $0.0000045 — about
+200,000 searches per dollar. The reason to meter was never the amount; it was that the amount
+was invisible.
+
+**A failed ledger write does not fail the search.** The `recordUsage` call in
+`search.controller.ts` is wrapped in its own `try/catch` that logs
+`[search] usage_ledger write failed: <code>: <message>` and continues. The accepted cost is a
+silent under-count; the alternative — a ledger problem returning 500 on every search — is worse.
+So **do not treat `usage_ledger` as an audit-grade meter for search**: it is a monitoring
+signal, and its `input_tokens` are a chars/4 estimate (the same caveat `budget.ts` records for
+the sweep's `embed` rows).
+
+**Still open, deliberately:** `POST /search` has **no rate limit**. Metering makes an abusive
+or looping client *visible* in `usage_ledger`; it does not stop one. If you want a ceiling on
+search spend rather than a record of it, that is a rate limit at the edge, not a budget check
+in the controller — a separate piece of work, parked here on purpose.
 
 ### 3. Web deployment environment variables
 

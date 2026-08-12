@@ -107,3 +107,100 @@ describe("POST /search", () => {
     expect(noteIds).not.toContain(bobNote!.id);
   });
 });
+
+// Search spends money on every request (one Gemini embedding of the query) and, until this
+// suite, spent it invisibly: usage_ledger held nothing, so isOverBudget -- the query the whole
+// spend cap is built on, and which fails CLOSED precisely so a broken read cannot become
+// unlimited spend -- was blind to an entire billable path. The only place it showed up was
+// Google's console. AppModule does not import EnrichModule (see its comment), so nothing else
+// writes usage_ledger during these tests: every row a fixture user gains here is a search.
+//
+// Every assertion below is a DELTA, never an absolute count. makeUser tolerates "already been
+// registered" and signs the existing user back in, so these fixtures are the SAME auth users on
+// every run and their usage_ledger rows accumulate across runs -- an absolute `toHaveLength(1)`
+// passes exactly once and then fails forever on a developer's machine while staying green on a
+// fresh CI database. Same lesson the enrichment suites' backdating fix taught: never assume the
+// local database starts empty.
+describe("POST /search usage metering", () => {
+  /** Newest first, so `[0]` is the row the request under test just wrote. */
+  const ledgerRowsFor = async (userId: string) => {
+    const { data, error } = await admin
+      .from("usage_ledger")
+      .select("kind, model, input_tokens, output_tokens, cost_usd, created_at")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    return data ?? [];
+  };
+
+  it("writes one 'embed' row per search, attributed to the caller from the JWT", async () => {
+    const carol = await makeUser("api-search-carol@test.local");
+    const before = (await ledgerRowsFor(carol.id)).length;
+
+    await request(app.getHttpServer()).post("/search")
+      .set(auth(carol.token)).send({ q: "how much did metering cost" }).expect(201);
+
+    const rows = await ledgerRowsFor(carol.id);
+    expect(rows).toHaveLength(before + 1);
+    // 'embed' is the kind usage_ledger's CHECK permits for an embedding call, and
+    // monthToDateUsd sums cost_usd across kinds -- so a row written under the wrong kind would
+    // still total correctly but stop being attributable to search. Pinning it here is what makes
+    // "which path spent this" answerable later.
+    expect(rows[0]!.kind).toBe("embed");
+    expect(rows[0]!.output_tokens).toBe(0);
+    expect(rows[0]!.input_tokens).toBeGreaterThan(0);
+
+    // A second search must ADD a row, not overwrite or dedupe one. The failure this rules out is
+    // an under-count that looks identical to correct metering on any single-request test.
+    await request(app.getHttpServer()).post("/search")
+      .set(auth(carol.token)).send({ q: "and again" }).expect(201);
+    expect(await ledgerRowsFor(carol.id)).toHaveLength(before + 2);
+  });
+
+  // A request that never reaches the model must never be billed. The 400 below is rejected by
+  // ZodValidationPipe before the controller body runs at all, which is exactly why it is worth
+  // pinning: move the recordUsage call above the validation boundary (or into a filter) and this
+  // is the test that notices.
+  it("bills nothing for a request that never reached the model", async () => {
+    const dave = await makeUser("api-search-dave@test.local");
+    const before = (await ledgerRowsFor(dave.id)).length;
+    await request(app.getHttpServer()).post("/search")
+      .set(auth(dave.token)).send({ q: "" }).expect(400);
+    expect(await ledgerRowsFor(dave.id)).toHaveLength(before);
+  });
+
+  // Metering must never be able to break the thing it meters. `input_tokens` is `int`
+  // (00007_integrations_ops.sql:35), so a fractional value is rejected by Postgres -- a real
+  // insert failure arriving as a PostgREST error object, the same shape a lost grant or a
+  // constraint change would produce. The search still has to succeed: the alternative is a
+  // ledger outage taking search down with it, which trades a silent under-count for an outage.
+  describe("when the ledger write fails", () => {
+    let brokenApp: INestApplication;
+
+    beforeAll(async () => {
+      const base = createFakeAi();
+      brokenApp = await bootstrapTestApp({
+        ai: createFakeAi({
+          embed: async (texts) => ({ ...(await base.embed(texts)), inputTokens: 1.5 }),
+        }),
+      });
+    });
+    afterAll(async () => { await brokenApp.close(); });
+
+    it("still returns the results instead of a 500", async () => {
+      const erin = await makeUser("api-search-erin@test.local");
+      const marker = "quarrelsome-abacus-ledger-marker";
+      await request(brokenApp.getHttpServer()).post("/notes")
+        .set(auth(erin.token)).send({ content: `${marker} still searchable` }).expect(201);
+      const before = (await ledgerRowsFor(erin.id)).length;
+
+      const res = await request(brokenApp.getHttpServer()).post("/search")
+        .set(auth(erin.token)).send({ q: marker }).expect(201);
+      expect(res.body.results.length).toBeGreaterThan(0);
+
+      // ...and the write really did fail, so the assertion above is not passing vacuously
+      // against a ledger that quietly accepted 1.5.
+      expect(await ledgerRowsFor(erin.id)).toHaveLength(before);
+    });
+  });
+});
