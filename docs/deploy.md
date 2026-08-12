@@ -715,6 +715,43 @@ To verify the string before anything depends on it, run the hosted probe documen
 of `apps/api/test/boss.integration.test.ts` — it is the only way to learn whether Supavisor
 session mode accepts pg-boss. Drop the `pgboss` schema afterwards.
 
+#### Two API instances will not double-enrich — but the guarantee is an advisory lock, not a replica count
+
+Worth knowing before you scale the service or read a redeploy log.
+
+`DATABASE_URL` carries a second job besides pg-boss: the enrichment worker takes a **session-level
+advisory lock** on it (`apps/api/src/queue/sweep-lock.ts`) around every sweep. An instance that
+does not win the lock logs
+
+```
+[enrich] sweep skipped: another instance holds the sweep lock
+```
+
+and does nothing until the next 60-second tick. **A few of those lines during a deploy are normal**
+— Railway's default rolling redeploy runs the old and new containers together for roughly 30
+seconds, which is exactly the window this exists for.
+
+**Why it was needed.** pg-boss's `work()` defaults keep *one process* from sweeping twice at once,
+and that is all they do — the queue uses the default `standard` policy, and the `SKIP LOCKED` in
+`claim_notes_for_enrichment` stops releasing its row locks the moment that claim transaction
+commits, long before the Gemini calls return. Two containers would therefore claim *disjoint*
+notes and bill for both. Until 2026-08-12 the only thing preventing that was "there is exactly one
+API instance" — an invariant nothing enforced and the default deploy strategy breaks by design.
+
+**What this does not do.** It bounds *concurrency*, not spend; the budget still does that. And it
+is not a reason to scale the service — one instance is right for this workload. It means a
+redeploy no longer double-bills, and that turning on a second replica is a capacity decision
+rather than a correctness one.
+
+**Two ways to break it**, both worth recognising in a log:
+
+- **Persistent skipping** (every tick, not just during a deploy) means something else holds the
+  lock: a second service pointed at the same database, or a stale connection Postgres has not yet
+  reaped. Check `select * from pg_locks where locktype = 'advisory'`.
+- **Pointing `DATABASE_URL` at the transaction pooler (6543)** silently removes the protection —
+  session-level advisory locks do not survive it. Same port rule as pg-boss, now with a second
+  consequence.
+
 #### `GEMINI_TIER` must be `paid` in production, and that is enforced, not advised
 
 `assertTierAllowsRealData` (`packages/core/src/enrich/budget.ts`) **throws** for

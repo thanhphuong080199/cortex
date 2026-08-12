@@ -2,6 +2,7 @@ import { Module, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/c
 import type { PgBoss } from "pg-boss";
 import { assertTierAllowsRealData, createGeminiAi, createServiceClient } from "@cortex/core";
 import { createBoss, startBoss, stopBoss } from "../queue/boss";
+import { createPgLockSession, withSweepLock } from "../queue/sweep-lock";
 import { parseApiEnv } from "../env";
 import { runSweep } from "./enrich.service";
 
@@ -26,29 +27,35 @@ export class EnrichModule implements OnModuleInit, OnApplicationShutdown {
       budgetUsd: env.ENRICH_MONTHLY_BUDGET_USD,
       limit: 20,
     };
-    // Every 60s. `work()`'s defaults (localConcurrency: 1, batchSize: 1 -- see
-    // node_modules/pg-boss/dist/manager.js) mean this ONE process never runs two sweep jobs
-    // at once: Worker.run() (dist/worker.js) awaits the handler in full before its next
-    // fetch, so a job that arrives while runSweep is still going simply waits in the queue
-    // and runs after, not concurrently.
+    // Every 60s, and serialized across PROCESSES by an advisory lock -- Task 4's parked
+    // finding, closed 2026-08-12.
     //
-    // That is NOT the same claim as "singleton by queue name" -- createQueue above uses
-    // pg-boss's default 'standard' policy, not 'singleton' (dist/manager.js's
-    // QUEUE_POLICIES), so nothing here stops a SECOND process's worker from picking up a
-    // different queued job at the same time this one is still working (SKIP LOCKED, per
-    // Task 4's parked review finding, only keeps two workers off the SAME job row -- the
-    // claim transaction inside claim_notes_for_enrichment commits, and its lock releases,
-    // long before embedNote/extractNote's AI calls return). What makes today's deployment
-    // safe is simpler and narrower than a pg-boss guarantee: there is exactly one API
-    // instance, so there is only ever one process's worker to race against in the first
-    // place. A second instance existing at the same time (a rolling redeploy overlap, or
-    // horizontal scaling) is the one case this does not cover; see Task 13's report for the
-    // full three-question trace through node_modules/pg-boss and why a fix (e.g.
-    // `policy: 'singleton'` on createQueue, which trades "queues behind" for "a slow sweep
-    // silently drops the next tick") is left as a decision for the human rather than added
-    // here.
+    // Within one process, `work()`'s defaults (localConcurrency: 1, batchSize: 1 -- see
+    // node_modules/pg-boss/dist/manager.js) already mean two sweep jobs never overlap:
+    // Worker.run() (dist/worker.js) awaits the handler in full before its next fetch, so a job
+    // arriving mid-sweep waits in the queue. That is NOT a singleton guarantee -- createQueue
+    // above uses pg-boss's default 'standard' policy (dist/manager.js's QUEUE_POLICIES) -- and
+    // `SKIP LOCKED` inside claim_notes_for_enrichment does not extend it, because that claim
+    // transaction commits, releasing its row locks, long before embedNote/extractNote's AI
+    // calls return. Two instances would therefore claim disjoint notes and bill for both.
+    //
+    // Until now the only thing preventing that was "there is exactly one API instance", which
+    // Railway's default rolling redeploy violates for the ~30s two containers overlap.
+    // withSweepLock makes the invariant hold in code instead of in the deploy settings; see
+    // queue/sweep-lock.ts for why a lock rather than `policy: 'singleton'` (which would
+    // silently drop a tick whenever a sweep runs long).
     await this.boss.work(QUEUE, async () => {
-      const result = await runSweep(deps);
+      const outcome = await withSweepLock(await createPgLockSession(env.DATABASE_URL), () =>
+        runSweep(deps),
+      );
+      if (!outcome.ran) {
+        // Expected during a rolling redeploy, and it must be visible: a permanently-skipping
+        // instance (a lock leaked by an earlier crash, a second service left running) otherwise
+        // looks exactly like a healthy one that simply has nothing to do.
+        console.log("[enrich] sweep skipped: another instance holds the sweep lock");
+        return;
+      }
+      const result = outcome.result;
       // The only evidence a sweep ran at all, otherwise: per-note error output only fires on
       // failure, so a healthy deployment and a dead cron look identical in the logs.
       console.log(
