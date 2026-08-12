@@ -957,6 +957,190 @@ they are two independent isolation layers over the same rows (parent spec §11).
 
 ---
 
+## Phase 2 — deploy checklist (AI enrichment + semantic search)
+
+**Shipped to production on 2026-08-12.** This section is both the procedure and the ship log.
+
+Phase 2 is the first release where the API does work on its own initiative: a pg-boss cron
+inside the API process sweeps notes every 60 seconds, chunks and embeds them through Gemini,
+and extracts a domain and tags. `POST /search` fuses pgvector and Postgres FTS. Two
+consequences for deploying it:
+
+- The API now needs a **direct Postgres connection** and a **service-role key**, so the
+  variable table gained five entries — see [§2 above](#2-railway-environment-variables-api),
+  which is the authoritative list.
+- **The order matters.** Push migrations *first*, then deploy. The reverse boots an API that
+  looks completely healthy and fails every sweep and every search, because the failure is at
+  runtime, not at boot. See the warning at the end of step 3.
+
+### 1. Push the new migrations
+
+```bash
+pnpm exec supabase db push --dry-run   # confirm exactly 00018..00025, no seeds, no roles
+pnpm exec supabase db push
+pnpm exec supabase migration list      # local == remote, through 00025
+```
+
+| Migration | What it adds |
+| --- | --- |
+| `00018_note_enrichment.sql` | `note_enrichment` bookkeeping + `claim_notes_for_enrichment` |
+| `00019_note_tags_feedback.sql` | tag feedback events |
+| `00020_note_source_types.sql` | note source vocabulary |
+| `00021_usage_month_to_date.sql` | `usage_month_to_date_usd` — the SUM moved into Postgres |
+| `00022_search_notes.sql` | `search_notes`, the RRF fusion function + HNSW index use |
+| `00023_enrichment_attempts_and_fairness.sql` | `attempts_hash`; over-budget users no longer starve the global sweep |
+| `00024_search_recency_clamp.sql` | clamps the recency decay so a future `created_at` cannot amplify a score |
+| `00025_revoke_client_grants_drift.sql` | **hosted-only effect** — see [step 5](#5-the-grant-drift-00025-fixes-was-hosted-only) |
+
+> **Qualify pgvector types.** `00022` and `00024` reference `extensions.vector(...)`, never bare
+> `vector(...)`. Bare works locally and fails only on the hosted push — the trap
+> [`00012` hit](#2-environment-variables--nothing-new-in-1c). Grep any new migration for
+> `vector(` before pushing.
+
+Verify in the catalog rather than trusting the exit code — `db push` reports success per file,
+not per object:
+
+```sql
+select to_regclass('public.note_enrichment') is not null;         -- t
+select proname, prosecdef from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+ where n.nspname='public'
+   and proname in ('search_notes','claim_notes_for_enrichment','usage_month_to_date_usd');
+-- all three present, all prosecdef = true
+```
+
+### 2. Set the Railway variables
+
+Five additions, all boot-validated. `SUPABASE_SERVICE_ROLE_KEY`, `DATABASE_URL`,
+`GEMINI_API_KEY`, `GEMINI_TIER`, `ENRICH_MONTHLY_BUDGET_USD` — the
+[variable table](#2-railway-environment-variables-api) covers each one and the traps.
+
+Two things worth doing rather than assuming:
+
+- **Set secrets through stdin**, so no credential lands in a shell history or a log:
+  `printf '%s' "$VALUE" | railway variable set NAME --stdin --skip-deploys`. `--skip-deploys`
+  lets you stage the whole set and redeploy once instead of once per variable.
+- **Run the app's own validator against the live set** before deploying. This is the only check
+  that tests what actually boots, including the `SUPABASE_URL`/`DATABASE_URL` same-project
+  cross-check:
+
+  ```bash
+  cd apps/api && railway variables --json | node -e "
+    let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+      require('./dist/env.js').parseApiEnv(JSON.parse(s)); console.log('would boot'); })"
+  ```
+
+Take the **legacy** `service_role` key (the ~219-char `eyJ…` JWT under *Legacy API keys*), not
+the newer `sb_secret_…`. The project offers both, but `SUPABASE_ANON_KEY` is the legacy anon
+JWT and every local and CI run exercises legacy keys; mixing generations is an extra variable on
+the one deploy that first puts a service-role key on a request path.
+
+### 3. Redeploy the API
+
+```bash
+railway up --service cortex-api --ci     # --ci streams build logs, then exits
+```
+
+> **`railway up` uploads the working tree**, and `apps/api/Dockerfile` does
+> `COPY apps/api ./apps/api`. The repo root `.dockerignore` is what keeps `apps/api/.env` —
+> hosted `DATABASE_URL` with its password, the service-role key, the Gemini key — out of the
+> build context. Do not delete it. The published image is otherwise clean only by accident of
+> layering: the runtime stage happens to copy just `package.json`, `node_modules` and `dist`.
+
+> ⚠️ **A deploy against a pre-00018 schema is the quiet failure.** Every variable can be
+> correct, `parseApiEnv` passes, Nest maps every route, `/health` returns 200 — and then each
+> sweep and each search fails, because `note_enrichment` and `search_notes` do not exist. The
+> env vars fail *loudly at boot*; this fails *silently at runtime*. Migrations first.
+
+### 4. Verify — with a write, and then with the pipeline
+
+[The write check](#verify-a-deploy-with-a-write-not-with-health) still applies and still comes
+first. `401` on an unauthenticated `POST /notes` also confirms you are not looking at a stale
+container. Phase 2 adds three more checks, in order:
+
+```bash
+railway logs --service cortex-api | grep enrich
+# [enrich] sweep complete: processed=16 failed=0 skippedOverBudget=0
+```
+
+1. **The sweep runs.** That line is the *only* evidence it is alive — per-note output fires only
+   on failure, so a dead cron and a healthy one otherwise look identical. `[enrich] sweep
+   skipped: another instance holds the sweep lock` is normal during a rolling redeploy;
+   *persistent* skipping is not (see
+   [the advisory-lock section](#two-api-instances-will-not-double-enrich--but-the-guarantee-is-an-advisory-lock-not-a-replica-count)).
+2. **A new note gets enriched.** `note_enrichment.embedded_hash` fills in and `note_chunks` gains
+   rows. Allow ~2 minutes: `claim_notes_for_enrichment` has a deliberate **90-second debounce**
+   (`n.updated_at < now() - interval '90 seconds'`) so a note is not enriched mid-edit. A
+   just-created note being skipped is the debounce, not a fault.
+3. **`POST /search` returns it**, with `matchedBy` of `vector` or `both` — that is the whole
+   chain: chunk → embedding → HNSW → RRF → HTTP.
+
+Two queries worth running once, because both answer questions logs cannot:
+
+```sql
+-- Must be 0. A non-zero count is the silent-failure signature: usage was billed and
+-- embedded_hash stamped, but search_notes filters on `embedding is not null`, so those
+-- chunks are invisible forever and the hash predicate guarantees they are never retried.
+select count(*) from note_chunks where embedding is null;
+
+-- Every AI call, including one row per search. Search is METERED but not gated; see
+-- "The budget caps the sweep" above.
+select kind, count(*), round(sum(cost_usd)::numeric, 6) from usage_ledger group by kind;
+```
+
+A note with a `note_enrichment` row and **zero** chunks is not a fault either: an empty
+`content_text` (a media-log row) chunks to nothing. That is why the two counts can differ by a
+few.
+
+### 5. The grant drift `00025` fixes was hosted-only
+
+Found while verifying this deploy, and the reason it is worth reading: **the hosted project and
+a local `supabase db reset` did not agree**, so the local test suite had been proving a stricter
+configuration than production ran.
+
+On the hosted project, `anon` *and* `authenticated` held `INSERT/SELECT/UPDATE/DELETE` on all 23
+tables in `public` — including `note_chunks`, `note_enrichment` and `usage_ledger`, whose own
+grant-block comments say they get no client DML at all. Locally those tables grant nothing.
+
+The cause is not a one-off: `pg_default_acl` for schema `public`, owner `postgres`, granted
+`arwd` to both roles on the hosted project and nothing locally — so *every* table a future
+migration created was born client-writable there. `00009` had already reached this template
+(hosted's `arwd` is exactly `arwdDxtm` minus the `Dxtm` it revoked); it simply never covered the
+DML half. `00025` revokes the grants **and** the template, or the next `create table` would undo
+it.
+
+Nothing was exploitable: RLS is on for all 23 tables and all 15 policies target `authenticated`,
+so every `anon` grant was inert, the eight zero-policy tables blocked `authenticated` too, and
+`digests`/`memory_facts` have `for select` policies only. Every privilege `00025` removes was
+already unusable — which is why it cannot break a working path, and why it was worth fixing
+before something made it reachable. The design (`00007`) describes *two* independent layers,
+"a table-level GRANT before RLS is even evaluated", and production had one.
+
+Visible improvement after the push: a client hitting a server-only table now gets `42501
+permission denied` at the grant layer instead of a silent empty result from RLS.
+
+> One residual, present **identically in local and hosted**, so it is not drift: the
+> `supabase_admin`-owned default ACL still grants `arwdDxtm` to `anon`/`authenticated`. Tables
+> created by these migrations are owned by `postgres`, not `supabase_admin`, so it does not
+> apply to them.
+
+### Ship log — 2026-08-12
+
+- `00018`–`00025` pushed; remote head `00025`, verified in `pg_proc` / `pg_class`, not from the
+  CLI's exit code.
+- All eight required variables set and confirmed by piping `railway variables --json` through
+  the compiled `parseApiEnv`.
+- `railway up` → Nest started, `POST /search` mapped, `EnrichModule` initialised.
+- Unauthenticated `POST /notes` → `401`; authenticated → `201`.
+- First sweep: `processed=16 failed=0 skippedOverBudget=0`. A new note was embedded, given
+  `domain=life`, and returned by `POST /search` with `matchedBy=vector`.
+- `select count(*) from note_chunks where embedding is null` → **0**.
+- `usage_ledger` recorded the search embedding: `gemini-embedding-001`, 6 input tokens,
+  `$0.0000009`.
+- Post-`00025` re-check: `POST /notes`, `/tags`, `/me`, `/search` all still succeed;
+  `note_chunks` / `usage_ledger` / `note_enrichment` return `42501` to `authenticated`.
+
+---
+
 ## Is there CI/CD? (No — deploys are manual)
 
 **Merging to `main` deploys nothing.** Verified 2026-08-01 on both sides:
