@@ -7,3 +7,4 @@ export * from "./checkins/index.js";
 export * from "./media/index.js";
 export * from "./organize/index.js";
 export * from "./export/index.js";
+export * from "./assistant/context.js";
