@@ -145,4 +145,125 @@ describe("createGeminiAi.generateStream", () => {
     await expect(ai.generateStream({ prompt: "p", model: "m" }))
       .rejects.toMatchObject({ status: 429 });
   });
+
+  // THE TAIL-BUFFER GUARD. `new Response(aWholeString)` delivers the whole SSE body in one
+  // `read()`, so every test above sees complete events on the first pass and can never exercise
+  // a chunk boundary landing mid-event or a stream that ends without a trailing blank line. Both
+  // happen on the real network, and the second one is exactly how usageMetadata -- which only
+  // ever arrives on the LAST event -- gets silently dropped if the reader loop discards its tail
+  // buffer at `done`. A real ReadableStream, fed one enqueue() at a time, is required to prove it.
+  it("assembles an event split across a chunk boundary and flushes a final event with no trailing blank line", async () => {
+    const event1 = JSON.stringify({ candidates: [{ content: { parts: [{ text: "chunk1" }] } }] });
+    const event2 = JSON.stringify({ candidates: [{ content: { parts: [{ text: "chunk2" }] } }] });
+    const event3 = JSON.stringify({
+      candidates: [{ content: { parts: [] } }],
+      usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 3 },
+    });
+
+    const stream = new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        // event1's `data:` line arrives, but the blank line that terminates it lands in the
+        // NEXT network chunk -- a chunk boundary landing mid-event.
+        controller.enqueue(enc.encode(`data: ${event1}\n`));
+        // Completes event1's blank line, then delivers event2 whole, with its own trailing
+        // blank line.
+        controller.enqueue(enc.encode(`\ndata: ${event2}\n\n`));
+        // event3 -- the one carrying usageMetadata -- arrives with NO trailing blank line at
+        // all; the stream just ends. Only a post-loop flush can recover it.
+        controller.enqueue(enc.encode(`data: ${event3}`));
+        controller.close();
+      },
+    });
+
+    globalThis.fetch = (async () => new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    })) as typeof fetch;
+
+    const ai = createGeminiAi("key");
+    const res = await ai.generateStream({ prompt: "p", model: "m" });
+    let out = "";
+    for await (const c of res.chunks) out += c.text;
+
+    expect(out).toBe("chunk1chunk2");
+    expect(res.usage()).toEqual({ inputTokens: 9, outputTokens: 3, model: "m" });
+  });
+
+  // The whole justification for usage() being a function rather than a promise: a caller can
+  // abandon mid-stream (break out of `for await`, no AbortSignal even involved) and still read
+  // synchronously whatever was captured before it left -- not gated behind the rest of the
+  // stream, which an abandoning caller may never await.
+  it("keeps whatever usage was captured even when the caller abandons the stream mid-read", async () => {
+    const withUsage = JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "first" }] } }],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 },
+    });
+    const later = JSON.stringify({ candidates: [{ content: { parts: [{ text: "second" }] } }] });
+
+    globalThis.fetch = (async () => new Response(
+      `data: ${withUsage}\n\ndata: ${later}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    const ai = createGeminiAi("key");
+    const res = await ai.generateStream({ prompt: "p", model: "m" });
+
+    for await (const c of res.chunks) {
+      expect(c.text).toBe("first");
+      break; // abandon before "second" is ever read
+    }
+    expect(res.usage()).toEqual({ inputTokens: 5, outputTokens: 1, model: "m" });
+  });
+
+  // The non-streaming path (parseModelJson, above) already pins this rule; the streaming path
+  // parses model-derived JSON too and must follow it identically -- spec §15.6 rule 1.
+  it("does not quote the payload in the error when a stream chunk is not valid JSON", async () => {
+    const payload = "{not valid json, and this text must never reach a log";
+    globalThis.fetch = (async () => new Response(
+      `data: ${payload}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    const ai = createGeminiAi("key");
+    const res = await ai.generateStream({ prompt: "p", model: "m" });
+
+    let thrown = "";
+    try {
+      for await (const _ of res.chunks) { /* drain */ }
+    } catch (e) {
+      thrown = String(e);
+    }
+    expect(thrown).toContain(`(${payload.length} chars)`);
+    expect(thrown).not.toContain("this text must never reach a log");
+  });
+
+  // The stubs elsewhere in this describe block ignore everything about the request except the
+  // response body. This pins the request side: the streaming endpoint and its `alt=sse` query
+  // param, the API key header (the only auth this client sends), and -- separately from the
+  // fetch-level `AbortSignal` unit -- that a caller's signal is actually forwarded rather than
+  // silently dropped, which would break abort/cancellation for a real caller with no visible
+  // symptom in any other test here.
+  it("requests streamGenerateContent with alt=sse, the API key header, and the caller's signal", async () => {
+    let capturedUrl = "";
+    let capturedInit: RequestInit | undefined;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = String(url);
+      capturedInit = init;
+      return new Response(sseBody(["hi"], null), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    const controller = new AbortController();
+    const ai = createGeminiAi("secret-key");
+    const res = await ai.generateStream({ prompt: "p", model: "m", signal: controller.signal });
+    for await (const _ of res.chunks) { /* drain */ }
+
+    expect(capturedUrl).toContain("streamGenerateContent");
+    expect(capturedUrl).toContain("alt=sse");
+    expect((capturedInit?.headers as Record<string, string>)["x-goog-api-key"]).toBe("secret-key");
+    expect(capturedInit?.signal).toBe(controller.signal);
+  });
 });

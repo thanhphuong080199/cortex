@@ -33,6 +33,11 @@ export interface StreamUsage {
 }
 
 export interface StreamResult {
+  /**
+   * SINGLE-CONSUMPTION. Backed by the underlying HTTP response body, which can only be read
+   * once -- a second `for await (const c of res.chunks)` yields nothing at all, silently,
+   * rather than replaying or throwing. Consume it exactly once.
+   */
   chunks: AsyncIterable<StreamChunk>;
   /**
    * The token counts, or null if the stream never reported them.
