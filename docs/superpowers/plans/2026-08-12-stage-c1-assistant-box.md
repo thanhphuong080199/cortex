@@ -653,47 +653,71 @@ async function openStream(
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+
+    // One parser, used by both the loop and the final flush. Duplicating it is how the two
+    // paths drift.
+    function handleEvent(event: string): string {
+      const payload = event
+        .split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+      if (payload === "" || payload === "[DONE]") return "";
+      let obj: Record<string, unknown>;
+      try {
+        obj = JSON.parse(payload) as Record<string, unknown>;
+      } catch {
+        // Never quote the payload: it is model output, and §15.6 rule 1 forbids user content
+        // reaching a log. Length is enough to diagnose a truncation.
+        throw new Error(`gemini: stream chunk was not valid JSON (${payload.length} chars)`);
+      }
+      const meta = obj.usageMetadata as Record<string, number> | undefined;
+      if (meta) {
+        usage = {
+          inputTokens: meta.promptTokenCount ?? 0,
+          outputTokens: meta.candidatesTokenCount ?? 0,
+          model: args.model,
+        };
+      }
+      const candidates = obj.candidates as
+        | { content?: { parts?: { text?: string }[] } }[]
+        | undefined;
+      return candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+    }
+
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        // CRLF is normalised before splitting. If the endpoint ever emits \r\n\r\n, a
+        // "\n\n"-only split matches nothing, the buffer grows for the whole response, and the
+        // stream silently yields zero chunks and null usage.
+        buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
         // SSE events are separated by a blank line. Hold the tail: a chunk boundary can land
         // mid-event, and parsing half a JSON object throws.
         const events = buffer.split("\n\n");
         buffer = events.pop() ?? "";
         for (const event of events) {
-          const line = event.split("\n").find((l) => l.startsWith("data:"));
-          if (!line) continue;
-          const payload = line.slice(5).trim();
-          if (payload === "" || payload === "[DONE]") continue;
-          let obj: Record<string, unknown>;
-          try {
-            obj = JSON.parse(payload) as Record<string, unknown>;
-          } catch {
-            // Never quote the payload: it is model output, and §15.6 rule 1 forbids user
-            // content reaching a log. Length is enough to diagnose a truncation.
-            throw new Error(`gemini: stream chunk was not valid JSON (${payload.length} chars)`);
-          }
-          const meta = obj.usageMetadata as Record<string, number> | undefined;
-          if (meta) {
-            usage = {
-              inputTokens: meta.promptTokenCount ?? 0,
-              outputTokens: meta.candidatesTokenCount ?? 0,
-              model: args.model,
-            };
-          }
-          const candidates = obj.candidates as
-            | { content?: { parts?: { text?: string }[] } }[]
-            | undefined;
-          const text = candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+          const text = handleEvent(event);
           if (text !== "") yield { text };
         }
       }
+
+      // THE TAIL MUST BE FLUSHED, and this is the whole point of the task. A final event that
+      // is not terminated by a blank line sits in `buffer` when the loop exits -- and it is the
+      // one carrying usageMetadata. Dropping it means usage() returns null, no ledger row is
+      // written, and the largest line item in this system's spend disappears silently.
+      //
+      // decoder.decode() with no argument flushes bytes held back for an incomplete multi-byte
+      // sequence. Vietnamese is multi-byte throughout, so this is not hypothetical.
+      buffer = (buffer + decoder.decode()).replace(/\r\n/g, "\n");
+      for (const event of buffer.split("\n\n")) {
+        const text = handleEvent(event);
+        if (text !== "") yield { text };
+      }
     } finally {
-      // Releasing the lock lets an aborted request tear its socket down promptly instead of
-      // leaving it pinned until GC.
-      reader.releaseLock();
+      // cancel(), not releaseLock(). releaseLock merely detaches the reader and leaves the body
+      // unconsumed and un-errored, so a caller that breaks out of the for-await without an
+      // AbortSignal leaves the connection open rather than returning it to the pool. cancel()
+      // tears it down and releases the lock as a side effect.
+      await reader.cancel().catch(() => {});
     }
   }
 
@@ -2204,21 +2228,38 @@ async function* readEvents(body: ReadableStream<Uint8Array>) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+
+  const parse = (raw: string) => {
+    const type = raw.split("\n").find((l) => l.startsWith("event:"))?.slice(6).trim();
+    const data = raw.split("\n").find((l) => l.startsWith("data:"))?.slice(5).trim();
+    return type && data ? { type, data: JSON.parse(data) as Record<string, unknown> } : null;
+  };
+
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
       const events = buffer.split("\n\n");
       buffer = events.pop() ?? "";
       for (const raw of events) {
-        const type = raw.split("\n").find((l) => l.startsWith("event:"))?.slice(6).trim();
-        const data = raw.split("\n").find((l) => l.startsWith("data:"))?.slice(5).trim();
-        if (type && data) yield { type, data: JSON.parse(data) as Record<string, unknown> };
+        const ev = parse(raw);
+        if (ev) yield ev;
       }
     }
+    // Flush the tail. A `done` event that arrives without a trailing blank line would
+    // otherwise be dropped, and the box would sit there looking like it was still thinking.
+    // decoder.decode() with no argument releases held multi-byte bytes -- the answers are
+    // Vietnamese.
+    buffer = (buffer + decoder.decode()).replace(/\r\n/g, "\n");
+    for (const raw of buffer.split("\n\n")) {
+      const ev = parse(raw);
+      if (ev) yield ev;
+    }
   } finally {
-    reader.releaseLock();
+    // cancel(), not releaseLock(): releaseLock leaves the body unconsumed, so navigating away
+    // mid-answer would leave the connection open instead of tearing it down.
+    await reader.cancel().catch(() => {});
   }
 }
 ```
