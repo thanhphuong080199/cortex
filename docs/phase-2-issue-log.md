@@ -33,7 +33,7 @@ entire argument for having a whole-branch pass at all.
 | **Cause** | This branch made `DATABASE_URL`, `GEMINI_API_KEY`, `GEMINI_TIER` and `ENRICH_MONTHLY_BUDGET_USD` required in `apps/api/src/env.ts`. All four were declared in `turbo.json`'s `test.env` — but that only lets turbo *pass a var through*. `ci.yml`'s "Export local Supabase keys as app env vars" step must actually *set* it, and was never touched. |
 | **Why local stayed green** | Every vitest config sets `setupFiles: ["dotenv/config"]`, so `apps/api/.env` backfills anything missing on a developer machine. The `db-tests` job deliberately asserts **no `.env` exists on the runner**, precisely so it cannot. The local gate was green for exactly the reason CI would be red. |
 | **Fix** | Commit `36b670a` — export `DB_URL`→`DATABASE_URL` (the names differ) plus dummy Gemini/budget vars. |
-| **Status** | **Resolved and proven.** CI green on PR #10, all three jobs. The `Assert no .env files` step passing alongside the tests is what proves the vars came from CI's export and not a backfill. Same family as 1c's E8. Saved to project memory. |
+| **Status** | **Resolved, but the fix was narrower than this entry claimed — see G1.** CI green on PR #10, all three jobs; the `Assert no .env files` step passing alongside the tests is what proves the vars came from CI's export and not a backfill. What that did *not* prove is the other two workflows that boot the same API: `e2e-web.yml` and `e2e-mobile.yml` were missed here and took the post-merge run red. Same family as 1c's E8. Saved to project memory. |
 
 ### A2. `docs/deploy.md` documented the opposite of what the code requires — CRITICAL
 
@@ -349,3 +349,25 @@ Working today.
 | Post-`00025` production re-smoke | `/notes` 201, `/tags` 201, `/me` 200, `/search` 201; server-only tables `42501` to `authenticated` |
 | Server-only tables in a replication publication | **none** — `note_chunks`/`note_enrichment` absent from both `powersync` and `supabase_realtime` |
 | Browser and device click-through | **open** (E3) |
+| Post-merge E2E on `main` | **red on the first run** — see G1 |
+
+---
+
+## G. Found by the first post-merge run (2026-08-12)
+
+A discovery channel of its own, and the reason this section exists rather than folding into A:
+**PR #10 was merged green and the suites that caught this had not run yet.** PR #9 moved E2E
+behind the merge, so `post-merge.yml` is the first thing on this branch's path that ever booted
+the API outside a vitest process.
+
+### G1. A1's fix covered one of the three workflows that boot the API
+
+| | |
+|---|---|
+| **Symptom** | Nothing on the PR — all 3 CI jobs green, merged clean. The post-merge run then failed **both** E2E Web and E2E Mobile at the same step, `Seed the E2E user and corpus`, with two lines and no stack: `[seed] allow-listed e2e@cortex.test` / `[seed] fetch failed`. It reads like a broken seed script or a dead Supabase auth container. Neither is involved. |
+| **Cause** | The same four required vars as A1. A1 fixed `ci.yml` — but `e2e-web.yml` and `e2e-mobile.yml` each run `node apps/api/dist/main.js` too, and their "Export Supabase keys as app env vars" step set only `ANON_KEY`/`SERVICE_ROLE_KEY`. `main.ts` calls `parseApiEnv` **before** `NestFactory.create`, so the API `exit(1)`s at boot and never binds `:3001`. |
+| **Why the error named the wrong file** | `createUser` and `signIn` log nothing on success, so the next output after "allow-listed" came from `seedCorpus`'s first `POST /notes` — undici's bare `fetch failed` on ECONNREFUSED. Every fetch in `seed.mjs` before that one goes to Supabase and succeeded, which is what makes the message point at auth. |
+| **Why nothing went red at the actual failure** | `Start the API` reported **green**. Its wait loop was `for i in $(seq 1 30); do curl … && break; sleep 2; done` — the loop's exit status is the last command's, i.e. the `sleep`. A boot that never happened is indistinguishable from a healthy one except by duration: the step took exactly 60s (30 × 2s) instead of ~2s. |
+| **Fix** | Export `DB_URL`→`DATABASE_URL` plus the dummy Gemini/budget vars in both E2E workflows, and end the wait loop with `exit 1` so a dead API fails at `Start the API` instead of two steps later. |
+| **Status** | **Resolved.** Verified locally rather than by inference: the built API run with exactly the E2E job's environment prints a `ZodError` naming all four vars and exits 1; with the patched environment it answers `/health`, and `seed.mjs --reset` completes with the full corpus, exit 0. |
+| **What A1 should have said** | A1's status — "Resolved and proven, CI green on PR #10, all three jobs" — was true and insufficient. Green CI proved the `ci.yml` half. The generalisation to check is **every workflow that boots the API**, not "the workflow that runs the tests"; grep `.github/` for a newly-required var and expect three hits. Project memory updated accordingly. |
