@@ -56,6 +56,69 @@ describe("chunkText", () => {
     expect(chunks.map((c) => c.content).join(" ")).toBe(prose);
   });
 
+  // The lookahead used to be `[A-Z0-9"'(]`, which is a claim that a sentence starts with an
+  // ASCII capital. Vietnamese capitals mostly are not ASCII -- Đ, Ă, Ô, Ư and every toned vowel
+  // sit outside A-Z -- so a Vietnamese note contained no boundaries at all and fell through to
+  // the fixed-offset hard split, which never resynchronises and therefore re-embeds the whole
+  // note on every edit. This is the user's first language; it is not an exotic input.
+  it("packs Vietnamese prose at sentence boundaries — its capitals are not ASCII", () => {
+    const sentences = [
+      "Đây là một ghi chú bằng tiếng Việt.",
+      "Ăn sáng lúc bảy giờ mỗi ngày.",
+      "Ông ấy nói rằng việc này rất quan trọng.",
+      "Ước gì tôi đã bắt đầu sớm hơn.",
+    ];
+    const prose = Array.from({ length: 40 }, (_, i) => sentences[i % sentences.length]).join(" ");
+    const maxChars = 300;
+    expect(prose.length).toBeGreaterThan(maxChars * 2);
+
+    const chunks = chunkText(prose, { maxChars });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.content.length).toBeLessThanOrEqual(maxChars);
+    // Every chunk -- the last one included, because the text ends on a period -- ends at a
+    // sentence. Under the ASCII-only lookahead these end mid-word instead.
+    for (const c of chunks) expect(c.content.endsWith(".")).toBe(true);
+    expect(chunks.map((c) => c.content).join(" ")).toBe(prose);
+  });
+
+  // CJK breaks the other half of the old pattern: its sentence enders are the full-width 。！？,
+  // and nothing separates one sentence from the next, so a rule requiring `\s+` between them can
+  // never fire however the lookahead is widened. Chunks are still joined with a space, so a CJK
+  // chunk gains separators the source did not have -- accepted, because chunk text is only ever
+  // fed to the embedding model, never rendered back to the user.
+  it("packs CJK prose at full-width enders, which have no whitespace after them", () => {
+    const sentences = [
+      "今天我读了一本关于记忆的书。",
+      "这个想法值得记录下来。",
+      "明天要去见一位老朋友。",
+    ];
+    const prose = Array.from({ length: 40 }, (_, i) => sentences[i % sentences.length]).join("");
+    const maxChars = 120;
+    expect(prose.length).toBeGreaterThan(maxChars * 2);
+
+    const chunks = chunkText(prose, { maxChars });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.content.length).toBeLessThanOrEqual(maxChars);
+    for (const c of chunks) expect(c.content.endsWith("。")).toBe(true);
+    // No sentence dropped or duplicated at a boundary; the only difference from the source is
+    // the inserted joiner.
+    expect(chunks.map((c) => c.content).join(" ").replace(/ /g, "")).toBe(prose);
+  });
+
+  // Guards the choice of `\p{Lu}`/`\p{Lo}` over a blanket `\p{L}`. A period followed by a
+  // lowercase word is an abbreviation far more often than a sentence end, so it stays a
+  // non-boundary -- the same call the ASCII pattern made, now merely spelled in Unicode.
+  it("does not treat a period before a lowercase word as a sentence boundary", () => {
+    const prose = Array.from({ length: 60 }, () => "xong roi. tiep tuc lam viec khac.").join(" ");
+    const maxChars = 300;
+    const chunks = chunkText(prose, { maxChars });
+    expect(chunks.length).toBeGreaterThan(1);
+    // No boundary anywhere, so this is the fixed-offset fallback: chunks are exactly maxChars
+    // wide and cut mid-word.
+    expect(chunks[0]?.content.length).toBe(maxChars);
+    expect(chunks[0]?.content.endsWith(".")).toBe(false);
+  });
+
   it("numbers chunks from zero without gaps — note_chunks has unique(note_id, chunk_index)", () => {
     const chunks = chunkText(Array.from({ length: 12 }, () => "p".repeat(500)).join("\n\n"));
     expect(chunks.map((c) => c.index)).toEqual(chunks.map((_, i) => i));
