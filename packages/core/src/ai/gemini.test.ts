@@ -135,7 +135,7 @@ describe("createGeminiAi.generateStream", () => {
 
     const ai = createGeminiAi("key");
     const res = await ai.generateStream({ prompt: "p", model: "m" });
-    for await (const _ of res.chunks) { /* drain */ }
+    for await (const chunk of res.chunks) void chunk; // drain
     expect(res.usage()).toBeNull();
   });
 
@@ -230,7 +230,7 @@ describe("createGeminiAi.generateStream", () => {
 
     let thrown = "";
     try {
-      for await (const _ of res.chunks) { /* drain */ }
+      for await (const chunk of res.chunks) void chunk; // drain
     } catch (e) {
       thrown = String(e);
     }
@@ -259,7 +259,7 @@ describe("createGeminiAi.generateStream", () => {
     const controller = new AbortController();
     const ai = createGeminiAi("secret-key");
     const res = await ai.generateStream({ prompt: "p", model: "m", signal: controller.signal });
-    for await (const _ of res.chunks) { /* drain */ }
+    for await (const chunk of res.chunks) void chunk; // drain
 
     expect(capturedUrl).toContain("streamGenerateContent");
     expect(capturedUrl).toContain("alt=sse");
