@@ -1,5 +1,5 @@
 import { CLASSIFY_MODEL, EMBEDDING_DIM, EMBEDDING_MODEL } from "@cortex/shared";
-import type { AiClient, EmbedResult, JsonResult } from "./client.js";
+import type { AiClient, EmbedResult, JsonResult, StreamChunk, StreamResult, StreamUsage } from "./client.js";
 
 const BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -96,6 +96,84 @@ export function parseModelJson<T>(text: string): T {
   }
 }
 
+/**
+ * `streamGenerateContent?alt=sse` returns Server-Sent Events. Each `data:` line is a full
+ * GenerateContentResponse; text arrives incrementally and `usageMetadata` arrives on the LAST
+ * one. Answer generation is the largest line item in this system's spend, so dropping that
+ * final object means the ledger cannot see ~75% of the money.
+ */
+async function openStream(
+  apiKey: string,
+  args: { prompt: string; model: string; signal?: AbortSignal },
+): Promise<StreamResult> {
+  const res = await fetch(
+    `${BASE}/models/${args.model}:streamGenerateContent?alt=sse`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({ contents: [{ parts: [{ text: args.prompt }] }] }),
+      signal: args.signal,
+    },
+  );
+  if (!res.ok || !res.body) {
+    // Same shape as the non-streaming path: status in the message for logs, and attached as a
+    // property so a caller can branch on 429/5xx (retry) vs 400 (a bug in our request).
+    throw Object.assign(new Error(`gemini ${res.status}`), { status: res.status });
+  }
+
+  let usage: StreamUsage | null = null;
+
+  async function* iterate(): AsyncIterable<StreamChunk> {
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE events are separated by a blank line. Hold the tail: a chunk boundary can land
+        // mid-event, and parsing half a JSON object throws.
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+        for (const event of events) {
+          const line = event.split("\n").find((l) => l.startsWith("data:"));
+          if (!line) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "" || payload === "[DONE]") continue;
+          let obj: Record<string, unknown>;
+          try {
+            obj = JSON.parse(payload) as Record<string, unknown>;
+          } catch {
+            // Never quote the payload: it is model output, and spec §15.6 rule 1 forbids user
+            // content reaching a log. Length is enough to diagnose a truncation.
+            throw new Error(`gemini: stream chunk was not valid JSON (${payload.length} chars)`);
+          }
+          const meta = obj.usageMetadata as Record<string, number> | undefined;
+          if (meta) {
+            usage = {
+              inputTokens: meta.promptTokenCount ?? 0,
+              outputTokens: meta.candidatesTokenCount ?? 0,
+              model: args.model,
+            };
+          }
+          const candidates = obj.candidates as
+            | { content?: { parts?: { text?: string }[] } }[]
+            | undefined;
+          const text = candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+          if (text !== "") yield { text };
+        }
+      }
+    } finally {
+      // Releasing the lock lets an aborted request tear its socket down promptly instead of
+      // leaving it pinned until GC.
+      reader.releaseLock();
+    }
+  }
+
+  return { chunks: iterate(), usage: () => usage };
+}
+
 export function createGeminiAi(apiKey: string): AiClient {
   async function post(path: string, body: unknown): Promise<Record<string, unknown>> {
     const res = await fetch(`${BASE}/${path}`, {
@@ -160,5 +238,7 @@ export function createGeminiAi(apiKey: string): AiClient {
         model: CLASSIFY_MODEL,
       };
     },
+
+    generateStream: (args) => openStream(apiKey, args),
   };
 }

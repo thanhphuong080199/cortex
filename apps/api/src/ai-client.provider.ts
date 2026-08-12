@@ -1,4 +1,4 @@
-import type { AiClient, JsonResult } from "@cortex/core";
+import type { AiClient, JsonResult, StreamResult } from "@cortex/core";
 import { assertTierAllowsRealData, createGeminiAi } from "@cortex/core";
 import { parseApiEnv } from "./env";
 
@@ -55,5 +55,7 @@ export function createLazyGeminiAi(): AiClient {
     embed: async (texts: string[]) => get().embed(texts),
     generateJson: async <T>(args: { prompt: string; schema: Record<string, unknown> }): Promise<JsonResult<T>> =>
       get().generateJson<T>(args),
+    generateStream: async (args: { prompt: string; model: string; signal?: AbortSignal }): Promise<StreamResult> =>
+      get().generateStream(args),
   };
 }

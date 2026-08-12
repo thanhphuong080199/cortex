@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { extractVectors, normalizeEmbedding, parseModelJson } from "./gemini.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { createGeminiAi, extractVectors, normalizeEmbedding, parseModelJson } from "./gemini.js";
 
 // Pins the normalization math in isolation, with no fetch and no network -- gemini.ts's HTTP
 // shape stays untested per the brief (a mocked-fetch test would only assert the mock), but this
@@ -84,5 +84,65 @@ describe("parseModelJson", () => {
     try { parseModelJson(leaky); } catch (e) { thrown = String(e); }
     expect(thrown).not.toContain("biopsy");
     expect(thrown).not.toContain("malignant");
+  });
+});
+
+// createGeminiAi().generateStream is real HTTP-shape logic (the SSE tail-buffer, the
+// last-chunk-only usageMetadata), unlike embed/generateJson above which stay untested per the
+// brief. NO TEST MAY EVER CALL THE REAL GEMINI API (packages/core/src/ai/fake.ts) -- every case
+// here stubs globalThis.fetch and restores the original afterwards so a stubbed fetch never
+// leaks into another test file.
+describe("createGeminiAi.generateStream", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const sseBody = (parts: string[], usage: Record<string, number> | null) => {
+    const lines = parts.map((t) =>
+      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: t }] } }] })}\n\n`);
+    if (usage) {
+      lines.push(`data: ${JSON.stringify({
+        candidates: [{ content: { parts: [] } }],
+        usageMetadata: usage,
+      })}\n\n`);
+    }
+    return lines.join("");
+  };
+
+  it("yields text chunks and captures usage from the final chunk", async () => {
+    globalThis.fetch = (async () => new Response(
+      sseBody(["Xin ", "chào"], { promptTokenCount: 12, candidatesTokenCount: 4 }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    const ai = createGeminiAi("key");
+    const res = await ai.generateStream({ prompt: "p", model: "m" });
+    let out = "";
+    for await (const c of res.chunks) out += c.text;
+
+    expect(out).toBe("Xin chào");
+    expect(res.usage()).toEqual({ inputTokens: 12, outputTokens: 4, model: "m" });
+  });
+
+  // An abandoned answer is still billed, so whatever was counted must remain readable.
+  it("reports null usage when the stream ends without usageMetadata", async () => {
+    globalThis.fetch = (async () => new Response(
+      sseBody(["partial"], null),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    const ai = createGeminiAi("key");
+    const res = await ai.generateStream({ prompt: "p", model: "m" });
+    for await (const _ of res.chunks) { /* drain */ }
+    expect(res.usage()).toBeNull();
+  });
+
+  it("attaches the HTTP status so a caller can tell a 429 from a 400", async () => {
+    globalThis.fetch = (async () => new Response("nope", { status: 429 })) as typeof fetch;
+    const ai = createGeminiAi("key");
+    await expect(ai.generateStream({ prompt: "p", model: "m" }))
+      .rejects.toMatchObject({ status: 429 });
   });
 });

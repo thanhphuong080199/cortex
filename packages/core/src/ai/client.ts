@@ -19,4 +19,27 @@ export interface JsonResult<T> {
 export interface AiClient {
   embed(texts: string[]): Promise<EmbedResult>;
   generateJson<T>(args: { prompt: string; schema: Record<string, unknown> }): Promise<JsonResult<T>>;
+  generateStream(args: { prompt: string; model: string; signal?: AbortSignal }): Promise<StreamResult>;
+}
+
+export interface StreamChunk {
+  text: string;
+}
+
+export interface StreamUsage {
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+}
+
+export interface StreamResult {
+  chunks: AsyncIterable<StreamChunk>;
+  /**
+   * The token counts, or null if the stream never reported them.
+   *
+   * A FUNCTION, not a promise, and readable at any time. Streaming APIs report usage in the
+   * FINAL chunk, so a caller that aborts mid-stream would never see a promise resolve -- and
+   * an aborted answer is still money spent. Reading whatever was counted is the point.
+   */
+  usage: () => StreamUsage | null;
 }
