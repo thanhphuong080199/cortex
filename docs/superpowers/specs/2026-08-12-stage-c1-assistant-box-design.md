@@ -12,8 +12,31 @@ Stages A and B are merged (PR #10, #11) and live in production. This is what goe
 
 | | |
 |---|---|
-| **In** | `POST /assistant` as SSE; intent routing; RAG answers with citations; save-as-note; the box replacing quick capture on web; a ledger that can attribute every cent |
+| **In** | **Deploying web to Vercel at all** (see §1.1); `POST /assistant` as SSE; intent routing; RAG answers with citations; save-as-note; the box replacing quick capture on web; a ledger that can attribute every cent |
 | **Out of C1** | Mobile (→ C2). Web grounding + the Search-Suggestions UI Google's terms require (→ C3). Review/accept-reject chips (→ stage D) |
+
+### 1.1 The deploy comes first, and it is not a formality
+
+**Web has never been deployed** (issue-log E3). Everything stage B shipped — semantic search on
+web — is in `main` and reachable by nobody. Building an SSE endpoint for a client that is not
+hosted would mean debugging streaming and hosting at the same time, so the deploy lands **before**
+any of §4.
+
+The full checklist is `docs/deploy.md` § "Web — Vercel deploy checklist". Two items there bear on
+this design directly:
+
+- **`CORS_ORIGINS` on Railway must name the Vercel origin.** It is `.optional()` in `env.ts`, so
+  the API boots clean and every server-side read works while every browser *write* is blocked —
+  `POST /notes`, `POST /search`, and `POST /assistant`. The evidence appears only in the browser
+  console. Since §4 step 1 makes the box's first action a `POST /notes`, this is the failure that
+  would present as "the assistant does nothing".
+- **Preview deployments cannot write.** Vercel mints a fresh URL per preview and
+  `enableCors({ origin })` takes exact strings. Ruled: production domain only for now; matching
+  origins by pattern is a separate PR against `main.ts` if it is ever wanted.
+
+The build itself is verified, not assumed: `pnpm turbo run build --filter=@cortex/web --force`
+→ 2/2, `0 cached`, all 7 routes. The risk is entirely in the wiring, which is why the checklist
+orders its verification steps so that each failure is distinguishable from the next.
 
 **Why web first.** A web redeploy is free; mobile needs a new APK for every fix round
 (issue-log E3). Chat is not in the sync rules, so mobile gains nothing from being early — the

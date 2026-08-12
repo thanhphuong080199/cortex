@@ -1525,3 +1525,117 @@ A **development** build carries no JS: Metro serves it from your machine at runt
 (`EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, `EXPO_PUBLIC_POWERSYNC_URL`,
 `EXPO_PUBLIC_API_URL`) **must** be configured on EAS before that build, or the app ships
 pointing at `undefined`.
+
+---
+
+# Web — Vercel deploy checklist
+
+Closes issue-log **E3**. Until this is done, everything stage B shipped — semantic search on
+web — exists in `main` and is reachable by nobody. The API has been serving `/search` since
+2026-08-12; the UI is not live until this runs.
+
+**Read this before clicking anything: two of the four steps are outside Vercel**, and both fail
+in a way that looks like a working deploy.
+
+## 0. Verified before writing this
+
+`pnpm turbo run build --filter=@cortex/web --force` → **2/2, `0 cached`**, all 7 routes built
+including `/search`. The build is not the risk; the wiring is.
+
+## 1. Vercel project settings
+
+`apps/web/.vercel/project.json` shows the project is already linked (`projectName: "web"`), so
+this is settings plus a first deploy, not a `vercel link`.
+
+| Setting | Value | Why |
+|---|---|---|
+| Root Directory | `apps/web` | |
+| Build Command | `cd ../.. && pnpm turbo run build --filter=@cortex/web` | **The default `next build` will fail.** `@cortex/shared`'s `package.json` `main` is `./dist/index.js`, so it must be compiled first; turbo's `build → ^build` edge is the only thing that does that. |
+| Install Command | leave default | Vercel detects the pnpm workspace and installs from the repo root. |
+| Output Directory | leave default (`.next`) | Resolved relative to the root directory. |
+
+`next.config.ts` still carries a comment claiming `@cortex/shared` ships raw TypeScript with
+`main` pointing at `src/index.ts`. **That is stale** — it moved to `dist/` in phase 2, which is
+exactly why the build command above is required. `transpilePackages` is now a no-op for it.
+
+## 2. Environment variables (Vercel → Settings → Environment Variables)
+
+Three, all public, same values as `apps/web/.env.local` but pointed at hosted:
+
+```
+NEXT_PUBLIC_SUPABASE_URL       = https://<project-ref>.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY  = <hosted anon key>
+NEXT_PUBLIC_API_URL            = https://<railway-app>.up.railway.app
+```
+
+No service-role key, no Gemini key, no `DATABASE_URL`. If you are about to paste one of those
+into Vercel, stop — nothing in `apps/web` reads them, and `NEXT_PUBLIC_*` is compiled into the
+browser bundle.
+
+## 3. Supabase Auth — the redirect allowlist (OUTSIDE VERCEL)
+
+`docs/deploy.md`'s phase 0 step set **Site URL = `http://localhost:3000`**, and it is still that.
+
+The web code is origin-relative and needs no change — `login/page.tsx:9` uses
+`${location.origin}/auth/callback` and `auth/callback/route.ts:5` reads the origin off the
+request — so it works on any domain **that Supabase is willing to redirect to**.
+
+In Supabase → Authentication → URL Configuration:
+
+- **Site URL** → `https://<production-domain>`
+- **Redirect URLs** → add `https://<production-domain>/auth/callback`
+
+**Failure mode if skipped:** Google sign-in completes, then bounces to localhost or to an
+`error=redirect_uri_mismatch` page. The deployment itself is green and the home page renders —
+it just cannot be signed into.
+
+## 4. Railway `CORS_ORIGINS` — the one that looks healthiest while broken (OUTSIDE VERCEL)
+
+`main.ts:10` defaults to `["http://localhost:3000", "http://127.0.0.1:3000"]`, and `env.ts:19`
+makes `CORS_ORIGINS` **optional**. So the API boots clean, `/health` answers, every server-side
+read through Supabase works, and the site looks entirely functional — while every *write* from
+the browser (`POST /notes`, `POST /search`, and `POST /assistant` in stage C) is blocked by the
+browser before it ever reaches Railway. The only evidence is in the browser console.
+
+```bash
+railway variables --set "CORS_ORIGINS=https://<production-domain>"
+```
+
+Then redeploy the API so it re-reads the variable.
+
+### Preview deployments will NOT be able to write
+
+Vercel mints a fresh URL per preview, and `app.enableCors({ origin: origins })` takes exact
+strings — no wildcard. So a preview deploy renders, signs in (if you add a wildcard redirect URL
+in Supabase, which Supabase does support), and then fails every write.
+
+**Ruling: accepted, production domain only, for now.** Making previews fully functional means
+changing the API to match origins by pattern, which widens the CORS surface for a benefit two
+users do not need yet. If that changes, it is a small, separate PR against `main.ts` — not a
+config tweak.
+
+## 5. Deploy
+
+Git integration is the recommendation: push to `main` deploys production, and no new CI is
+needed. Note that Vercel deploys **independently of** `ci.yml` — a red CI does not block a
+deploy. Acceptable at this size; revisit if it bites.
+
+The CLI is not installed on this machine. To drive it manually instead:
+
+```bash
+npm i -g vercel
+vercel pull --yes --environment=production
+vercel build --prod
+vercel deploy --prebuilt --prod
+```
+
+## 6. Verify — in this order, because each step's failure mimics the next
+
+| Check | Expect | If it fails |
+|---|---|---|
+| `GET /` unauthenticated | `307 → /login` | build/env problem, not wiring |
+| Google sign-in | lands back on `/` signed in | step 3 |
+| A note appears in the list | rows render | Supabase read path — RLS or the anon key |
+| **Create a note from the box** | `201`, row appears | **step 4** — check the browser console for CORS before anything else |
+| Search a phrase from a known note | results, `matchedBy` populated | `NEXT_PUBLIC_API_URL`, then step 4 |
+| Search a Vietnamese phrase without diacritics | matches | needs `00026` pushed to hosted (`supabase db push`) |
