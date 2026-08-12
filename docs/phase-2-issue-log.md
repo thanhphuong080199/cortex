@@ -323,10 +323,19 @@ Working today.
 
 ### E6. Deferred, ruled fine to leave
 
-- **The ASCII-only sentence-boundary regex** degrades to fixed-offset splitting for Vietnamese
-  and CJK. The one worth doing first — it is much cheaper before there is a corpus to re-embed.
+- ~~**The ASCII-only sentence-boundary regex**~~ — **fixed 2026-08-12**, taken first for the
+  reason given here: it is much cheaper before there is a corpus to re-embed. `\p{Lu}` replaces
+  `A-Z` and a second arm handles the full-width `。！？`, which have no whitespace after them.
+  `\p{Lu}` is a strict superset of `A-Z`, so ASCII notes chunk byte-identically and **nothing
+  already embedded needs re-embedding** — the pre-existing resynchronisation test, which pins
+  exact chunk counts, is unchanged and still green.
 - Surrogate-pair slicing in `hardSplit`; raw error strings reaching the mobile UI; result
   elements unvalidated past `Array.isArray`; ~15 cosmetic items the review listed individually.
+
+  `hardSplit` is worth a second look now rather than later: with sentence boundaries fixed it
+  fires less often for CJK, but a wall of emoji or ideographs with no punctuation still reaches
+  it, and a fixed-offset slice can cut a surrogate pair in half. Still deferred — it is a
+  separate defect from the one above, not a loose end of it.
 
 ---
 
