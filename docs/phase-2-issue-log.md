@@ -371,3 +371,56 @@ the API outside a vitest process.
 | **Fix** | Export `DB_URL`→`DATABASE_URL` plus the dummy Gemini/budget vars in both E2E workflows, and end the wait loop with `exit 1` so a dead API fails at `Start the API` instead of two steps later. |
 | **Status** | **Resolved.** Verified locally rather than by inference: the built API run with exactly the E2E job's environment prints a `ZodError` naming all four vars and exits 1; with the patched environment it answers `/health`, and `seed.mjs --reset` completes with the full corpus, exit 0. |
 | **What A1 should have said** | A1's status — "Resolved and proven, CI green on PR #10, all three jobs" — was true and insufficient. Green CI proved the `ci.yml` half. The generalisation to check is **every workflow that boots the API**, not "the workflow that runs the tests"; grep `.github/` for a newly-required var and expect three hits. Project memory updated accordingly. |
+
+---
+
+## H. Found while designing stage C (2026-08-12)
+
+A third discovery channel, and the cheapest one yet: **nothing ran, nothing failed.** These came
+from stating a product fact out loud — *both users write Vietnamese* — and then checking what
+the shipped code assumes. Every entry here was green in CI, green in the whole-branch review,
+and wrong in production.
+
+### H1. The keyword arm was configured for a language nobody writes in
+
+| | |
+|---|---|
+| **Symptom** | None available. Search returns results, they are simply the wrong ones, and no arm reports which words it dropped. |
+| **Cause** | `to_tsvector('english', …)` in `00002`'s `notes_fts_idx` and in all three text-search calls in `00024`'s `search_notes`. Measured against the local stack, that breaks Vietnamese three independent ways. **Stopwords delete words**: `to_tsvector('english','an toàn do ta la no be')` → `'la' 'ta' 'toàn'` — four of seven gone. The drop is symmetric so recall survives; **precision** does not, because `"an toàn"` degrades to a one-word search for `toàn` and matches every note containing it. **The snowball stemmer conflates**: `'bảy'` and `'bải'` both → `'bải'`, so searching `bải` returned a note about seven o'clock — a confirmed false positive. **Diacritics were load-bearing**: typing Vietnamese without them is ordinary, and it is precisely where the vector arm is weakest, so the keyword arm had to carry it and did not. |
+| **Fix** | Migration `00026` — `simple` plus an unaccent fold on both sides, and four tests in `search-notes.test.ts`, one per failure. Unaccenting is not stemming, so it does not reintroduce the conflation: `bảy`→`bay`, `bải`→`bai`. |
+| **Accepted cost** | `simple` has no stopword list, so `của`/`và`/`là` are indexed and contribute to `ts_rank` — mild ranking noise, bought deliberately over silently deleting words. Words differing only by tone mark now fold together (`bay`/`bày`/`bảy`), which is one arm of two losing precision while RRF and the vector arm still supply the other signal. |
+| **What made it invisible** | Every test in `search-notes.test.ts` was written in English, where `english` is the correct configuration. The suite was not weak — it was monolingual, which is a different defect and one no coverage metric reports. |
+
+### H2. Revoking EXECUTE on an index expression's function breaks every write
+
+Not a shipped defect — a defect in the first draft of `00026`, recorded because the mechanism is
+not obvious and the error message points somewhere else.
+
+`revoke execute on function public.immutable_unaccent(text) from public` took **17 db tests red at
+once**, most of them with `42501` on a plain `insert into notes` and no mention of an index. An
+index expression is evaluated with the privileges of the role **writing the row** — not the index
+owner's, and not a `SECURITY DEFINER`'s. `authenticated` writes a note on every capture, so it
+must hold EXECUTE or the capture fails. The function keeps its default PUBLIC EXECUTE, and the
+migration says why so nobody tidies it away again.
+
+### H3. `chars/4` under-counts Vietnamese tokens
+
+`gemini.ts` and `embed.ts` both estimate `ceil(len/4)`, which is an English ratio. Vietnamese runs
+nearer 2–3 characters per token, so `usage_ledger` under-reports embedding spend for the primary
+corpus language by roughly 40–60%.
+
+Bounded, and not urgent: only `kind='embed'` rows are estimates — `extract` reads real
+`usageMetadata`, and it is the call that costs ~36× more. The dollar error is a fraction of ~2.5%
+of spend. **Open**, with the fix scheduled into stage C's ledger migration: store the character
+count beside the token estimate, so the ratio can be recalibrated later from data rather than
+being lost. Deferred deliberately over "guess a better divisor", which would replace a known-wrong
+number with an unknown-wrong one.
+
+### H4. No prompt in the pipeline says anything about language
+
+`extract.ts`'s `buildPrompt` carries no language instruction, so tag names may come back in
+English for a Vietnamese note — and inconsistently, which fragments the very vocabulary
+`TAG_VOCABULARY_LIMIT` exists to keep stable. **Open**, folded into stage C, which is already
+editing that prompt to add `intent`: the rule is *answer and tag in the language the user wrote
+in*. `notes.domain` stays an English enum — it is a stored CHECK value, not model output; only its
+label is localised.

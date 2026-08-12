@@ -285,4 +285,64 @@ describe("search_notes", () => {
   it("honours the limit", async () => {
     expect((await search(alice, "the", vec(81), 3)).length).toBe(3);
   });
+
+  // THE KEYWORD ARM IN THE LANGUAGE THE CORPUS IS ACTUALLY WRITTEN IN.
+  //
+  // Both of Cortex's real users write Vietnamese, and `to_tsvector('english', ...)` -- what
+  // 00002's notes_fts_idx and 00024's search_notes both used -- breaks it three separate ways.
+  // Every note below is seeded WITHOUT an embedding, so it owns no note_chunks row and the
+  // vector arm cannot return it: whatever these assertions see came from the FTS arm alone.
+  describe("Vietnamese", () => {
+    let viet: string;
+    beforeAll(async () => {
+      ({ id: viet } = await makeUser("search-viet@example.com"));
+      await admin.from("notes").delete().eq("user_id", viet);
+    });
+
+    // English STOPWORDS silently delete Vietnamese words. Measured against the old config:
+    //   to_tsvector('english', 'an toàn do ta la no be') -> 'la' 'ta' 'toàn'
+    // "an", "do", "no" and "be" are gone -- four of seven words.
+    //
+    // The damage is PRECISION, not recall, and the first version of this test missed that by
+    // asserting only recall: the drop is applied symmetrically to the query too, so
+    // "an toàn" still finds "an toàn lao động" -- both sides reduce to 'toàn' and match. What
+    // is actually lost is the word "an" as a constraint, so the query silently degrades to a
+    // one-word search and every note merely containing "toàn" becomes a hit. Hence the
+    // negative half below, which is the half that was red.
+    it("does not drop a word that happens to spell an English stopword", async () => {
+      const wanted = await seed(viet, "an toàn lao động là ưu tiên số một");
+      const unrelated = await seed(viet, "toàn bộ tài liệu đã được lưu lại");
+      const rows = await search(viet, "an toàn", vec(41));
+      expect(rows.map((r) => r.note_id)).toContain(wanted);
+      expect(rows.map((r) => r.note_id)).not.toContain(unrelated);
+    });
+
+    // The English SNOWBALL STEMMER mangles Vietnamese tokens and collides distinct words:
+    //   to_tsvector('english', 'bảy') -> 'bải'
+    //   to_tsvector('english', 'bải') -> 'bải'
+    // so searching "bải" returned a note about seven o'clock. Unaccenting is not stemming --
+    // "bảy" folds to `bay` and "bải" to `bai`, which stay distinct -- so this is a false
+    // positive the fix removes rather than one it has to tolerate.
+    it("does not match a different word that only an English stemmer conflates", async () => {
+      const id = await seed(viet, "tôi dậy lúc bảy giờ sáng");
+      const rows = await search(viet, "bải", vec(42));
+      expect(rows.map((r) => r.note_id)).not.toContain(id);
+    });
+
+    // Typing Vietnamese without diacritics is ordinary, not sloppy, and it is exactly where
+    // the vector arm is weakest -- so the keyword arm has to carry it.
+    it("finds a note typed with diacritics from a query typed without them", async () => {
+      const id = await seed(viet, "hôm nay tôi chạy bộ ở công viên");
+      const rows = await search(viet, "chay bo cong vien", vec(43));
+      expect(rows.map((r) => r.note_id)).toContain(id);
+    });
+
+    // The reverse direction, because the fold has to be applied to BOTH sides of the match.
+    // Applying it only to the indexed column leaves this one red.
+    it("finds a note typed without diacritics from a query typed with them", async () => {
+      const id = await seed(viet, "mua ca phe va banh mi buoi sang");
+      const rows = await search(viet, "cà phê", vec(44));
+      expect(rows.map((r) => r.note_id)).toContain(id);
+    });
+  });
 });
