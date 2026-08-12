@@ -66,9 +66,9 @@ export type MediaStatus = z.infer<typeof mediaStatus>;
 export const flashcardStatus = z.enum(["suggested", "active", "suspended"]);
 
 // usage_ledger.kind's full SQL vocabulary (00007_integrations_ops.sql), for the enum-parity
-// pair only. This is deliberately WIDER than any TS call site: only 'embed' and 'tag' are
-// written today (packages/core/src/enrich/budget.ts's recordUsage narrows its own `kind`
-// parameter to that pair), while 'chat', 'digest', 'memory' and 'transcribe' anticipate
+// pair only. This is deliberately WIDER than any TS call site: only 'embed', 'tag' and 'chat'
+// are written today (packages/core/src/enrich/budget.ts's recordUsage narrows its own `kind`
+// parameter to that trio), while 'digest', 'memory' and 'transcribe' anticipate
 // workloads later phases add. A narrow union assigning into this wider vocabulary is fine;
 // what must not happen again is a TS union value the SQL CHECK constraint does not accept --
 // recordUsage briefly had "extract" here, which does not appear in the constraint below, and

@@ -81,7 +81,11 @@ export async function embedNote(
     });
     const { error } = await db.from("note_chunks").upsert(rows, { onConflict: "note_id,chunk_index" });
     if (error) throw error;
-    await recordUsage(db, { userId: note.userId, kind: "embed", model, inputTokens, outputTokens: 0 });
+    await recordUsage(db, {
+      userId: note.userId, kind: "embed", model, inputTokens, outputTokens: 0,
+      source: "sweep", noteId: note.noteId,
+      contentChars: stale.reduce((n, c) => n + c.content.length, 0),
+    });
   }
 
   // A shortened note leaves orphans behind, and an orphan chunk keeps matching searches by

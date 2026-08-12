@@ -70,11 +70,8 @@ export class SearchController {
     // enrich/budget.ts's note. One row per search, one per note batch, summed alike.
     try {
       await recordUsage(this.db, {
-        userId: user.id,
-        kind: "embed",
-        model,
-        inputTokens,
-        outputTokens: 0,
+        userId: user.id, kind: "embed", model, inputTokens, outputTokens: 0,
+        source: "search", contentChars: body.q.length,
       });
     } catch (err) {
       console.error(`[search] usage_ledger write failed: ${errorMessage(err)}`);

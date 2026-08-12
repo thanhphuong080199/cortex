@@ -108,7 +108,10 @@ export async function extractNote(
   // vocabulary -- 'embed','chat','tag','digest','memory','transcribe' -- with no 'extract'
   // option. 'tag' is the closest fit even though this call also writes domain and domain_meta
   // from the same model output, not only tags.
-  await recordUsage(db, { userId: note.userId, kind: "tag", model, inputTokens, outputTokens });
+  await recordUsage(db, {
+    userId: note.userId, kind: "tag", model, inputTokens, outputTokens,
+    source: "sweep", noteId: note.noteId, contentChars: note.contentText.length,
+  });
 
   // ---- tags ----
   const { data: linkedRows, error: linkedErr } = await db.from("note_tags").select("tag_id").eq("note_id", note.noteId);
