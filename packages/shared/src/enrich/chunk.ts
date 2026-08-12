@@ -9,17 +9,34 @@
  */
 export const CHUNK_MAX_CHARS = 1800;
 
-// Deliberately blunt: split after a ".", "!" or "?" that is followed by whitespace and then
-// what looks like the start of a new sentence (an uppercase letter, a digit, or an opening
-// quote/paren). What this gets right: ordinary prose ("One thing. Another thing.") and
-// decimals/URLs, because nothing here ever matches without whitespace after the punctuation --
-// "3.14" and "example.com/a.b" never split, since there is no space after their periods. What
-// this gets wrong: an abbreviation followed by a capitalized word ("Mr. Smith", "U.S. Government",
+// Deliberately blunt, and two rules rather than one because scripts do not agree on how a
+// sentence ends.
+//
+// Rule 1 -- space-separated scripts. Split after a ".", "!" or "?" that is followed by
+// whitespace and then what looks like the start of a new sentence. "Looks like" is
+// `\p{Lu}` (an uppercase letter in ANY script, not `A-Z`), `\p{Lo}` (a caseless letter --
+// Han, kana, Hangul, Thai; how a CJK sentence looks when its author did use ASCII
+// punctuation), a digit, or an opening quote/paren. `A-Z` was a claim that sentences begin
+// with an ASCII capital, and Vietnamese quietly falsified it: Đ, Ă, Ô, Ư and every toned
+// vowel are outside that range, so a Vietnamese note held no boundaries at all and fell
+// through to the fixed-offset hard split -- which never resynchronises, so every edit
+// re-embedded the whole note. `\p{Lu}` is a strict superset of `A-Z`, so ASCII notes chunk
+// byte-identically to before and nothing already embedded needs re-embedding.
+//
+// Rule 2 -- CJK. The enders are the full-width 。！？, and nothing separates one sentence from
+// the next, so rule 1's required `\s+` can never fire however far its lookahead is widened.
+// This arm matches zero-width when there is no space. Chunks are still joined with " ", so a
+// CJK chunk gains separators its source lacked; accepted, because chunk text is only ever fed
+// to the embedding model and never rendered back to the user.
+//
+// What both get right: decimals and URLs, because neither arm matches ASCII punctuation
+// without whitespace after it -- "3.14" and "example.com/a.b" never split. What rule 1 gets
+// wrong: an abbreviation followed by a capitalized word ("Mr. Smith", "U.S. Government",
 // "e.g. The point is") reads as two sentences, and a quoted sentence-ender ('"Stop!" Then')
 // doesn't split at all because the quote sits between the punctuation and the whitespace. Both
 // are accepted: an extra boundary only adds a harmless split point, not wrong data, and perfect
 // segmentation is not the goal here -- see chunkText's own comment for why.
-const SENTENCE_BOUNDARY = /(?<=[.!?])\s+(?=[A-Z0-9"'(])/;
+const SENTENCE_BOUNDARY = /(?<=[.!?])\s+(?=[\p{Lu}\p{Lo}\p{Nd}"'(])|(?<=[。！？])\s*(?=\S)/u;
 
 function hardSplit(text: string, maxChars: number): string[] {
   const out: string[] = [];
