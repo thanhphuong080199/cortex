@@ -25,9 +25,18 @@ const aiCapturingPrompt = (value: unknown) => {
   };
 };
 
-/** The comma-separated vocabulary line buildPrompt writes, split back into names. */
+/**
+ * The comma-separated vocabulary line buildPrompt writes, split back into names.
+ *
+ * Anchored on the header rather than an absolute line index. An index constrains where every
+ * later paragraph of the prompt may go, and it fails SILENTLY -- it returns some other line and
+ * splits that on ", ", so a cap test would assert against the wrong text instead of erroring.
+ */
 const vocabularyIn = (prompt: string): string[] => {
-  const line = prompt.split("\n")[3] ?? "";
+  const lines = prompt.split("\n");
+  const header = lines.findIndex((l) => l.startsWith("Their existing tags"));
+  if (header === -1) throw new Error(`prompt has no "Their existing tags" header:\n${prompt}`);
+  const line = lines[header + 1] ?? "";
   return line === "(none yet)" ? [] : line.split(", ");
 };
 
@@ -299,15 +308,18 @@ describe("extractNote", () => {
 describe("extractNote — intent, complexity and language", () => {
   beforeEach(createTestUser);
 
+  // Both fixtures are the NON-default value on purpose: "statement"/"simple" are what the
+  // defaults below produce, so feeding them here would pass against a hardcoded return and pin
+  // nothing. The omitted-field defaults are covered separately.
   it("returns the intent the model classified", async () => {
     const note = await seedNote("bao giờ tôi viết về chuyện này?");
     const ai = aiReturning({
-      intent: "question", complexity: "simple", domain: null, domain_meta: {}, tags: [],
+      intent: "question", complexity: "complex", domain: null, domain_meta: {}, tags: [],
     });
     const out = await extractNote({ db, ai }, note);
 
     expect(out.intent).toBe("question");
-    expect(out.complexity).toBe("simple");
+    expect(out.complexity).toBe("complex");
   });
 
   it("asks for one JSON object carrying all four decisions, not four calls", async () => {
@@ -363,5 +375,33 @@ describe("extractNote — intent, complexity and language", () => {
 
     expect(out.tags).toBe(1);
     expect(out.tagNames).toEqual(["pricing"]);
+  });
+
+  // The spelling the box shows must not depend on where a tag sits relative to
+  // TAG_VOCABULARY_LIMIT. A tag stored as "Pricing" resolves through the capped vocabulary when
+  // it is recent and through the ilike fallback when it is not -- and the fallback used to store
+  // the lowercased LOOKUP KEY, so the same tag rendered "Pricing" or "pricing" by cap position.
+  it("reports the stored spelling of a tag resolved outside the capped vocabulary", async () => {
+    // Older than every tag seedTags writes (base 2020-01-01), so `created_at desc` cuts it from
+    // the vocabulary the model is shown and resolution has to take the fallback path.
+    const { error } = await db.from("tags")
+      .insert({ user_id: userId, name: "Pricing", created_at: "2019-01-01T00:00:00.000Z" });
+    if (error) throw error;
+    await seedTags(TAG_VOCABULARY_LIMIT, "cap");
+
+    const note = await seedNote("more on pricing");
+    const { seen, ai } = aiCapturingPrompt({
+      intent: "statement", complexity: "simple", domain: null, domain_meta: {},
+      tags: [{ name: "pricing", confidence: 0.9 }],
+    });
+    const out = await extractNote({ db, ai }, note);
+
+    // The test is worthless unless the tag really did fall outside the cap.
+    expect(vocabularyIn(seen[0]!)).not.toContain("Pricing");
+    expect(out.tagNames).toEqual(["Pricing"]);
+    // ...and it resolved rather than duplicated: one tag, not "Pricing" plus a new "pricing".
+    const { data: sameName } = await db.from("tags")
+      .select("id").eq("user_id", userId).ilike("name", "pricing");
+    expect(sameName).toHaveLength(1);
   });
 });

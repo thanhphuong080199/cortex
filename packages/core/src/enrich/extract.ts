@@ -156,7 +156,13 @@ export async function extractNote(
   const accepted: string[] = [];
   for (const candidate of [...existingHits, ...novel]) {
     const name = candidate.name.trim().toLowerCase();
-    let tagId = byLowerName.get(name)?.id;
+    const known = byLowerName.get(name);
+    let tagId = known?.id;
+    // The tag's STORED name, tracked alongside the id rather than read back off `byLowerName`:
+    // "pricing" resolves to a tag the user created as "Pricing", and that is the spelling the box
+    // should show. Carried through BOTH resolution paths below, because the spelling a user sees
+    // must not depend on whether their tag happened to fall inside TAG_VOCABULARY_LIMIT.
+    let storedName = known?.name ?? name;
     if (!tagId) {
       // `byLowerName` is built from the CAPPED vocabulary, so "absent from it" means "not among
       // the tags we showed the model", NOT "does not exist". Inserting on that basis is wrong in
@@ -181,13 +187,17 @@ export async function extractNote(
 
       if (hit) {
         tagId = hit.id as string;
+        // hit.name, not `name`: the row's real spelling is right here, and storing the lowercased
+        // lookup key instead is what made one tag render two different ways.
+        storedName = hit.name as string;
       } else {
         const { data: created, error } = await db.from("tags")
           .insert({ user_id: note.userId, name }).select("id").single();
         if (error) throw error;
         tagId = created!.id as string;
+        storedName = name; // a tag this call created is stored lowercased, by construction
       }
-      byLowerName.set(name, { id: tagId, name });
+      byLowerName.set(name, { id: tagId, name: storedName });
     }
     if (alreadyLinked.has(tagId)) continue;
 
@@ -196,9 +206,7 @@ export async function extractNote(
       source: "ai", status: "suggested", confidence: candidate.confidence,
     });
     if (error) throw error;
-    // The tag's STORED name, not the normalized lookup key: "pricing" resolves to a tag the
-    // user created as "Pricing", and that is the spelling they should see back.
-    accepted.push(byLowerName.get(name)?.name ?? name);
+    accepted.push(storedName);
   }
 
   // ---- domain + meta ----
