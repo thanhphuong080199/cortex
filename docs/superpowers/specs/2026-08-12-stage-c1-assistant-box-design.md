@@ -12,31 +12,40 @@ Stages A and B are merged (PR #10, #11) and live in production. This is what goe
 
 | | |
 |---|---|
-| **In** | **Deploying web to Vercel at all** (see §1.1); `POST /assistant` as SSE; intent routing; RAG answers with citations; save-as-note; the box replacing quick capture on web; a ledger that can attribute every cent |
+| **In** | **Getting the deployed web app reachable and current** (see §1.1); `POST /assistant` as SSE; intent routing; RAG answers with citations; save-as-note; the box replacing quick capture on web; a ledger that can attribute every cent |
 | **Out of C1** | Mobile (→ C2). Web grounding + the Search-Suggestions UI Google's terms require (→ C3). Review/accept-reject chips (→ stage D) |
 
 ### 1.1 The deploy comes first, and it is not a formality
 
-**Web has never been deployed** (issue-log E3). Everything stage B shipped — semantic search on
-web — is in `main` and reachable by nobody. Building an SSE endpoint for a client that is not
-hosted would mean debugging streaming and hosting at the same time, so the deploy lands **before**
-any of §4.
+Web **is** deployed — the first draft of this section said it never had been, which was wrong.
+What is true is narrower and more awkward:
 
-The full checklist is `docs/deploy.md` § "Web — Vercel deploy checklist". Two items there bear on
-this design directly:
+1. **The live build is from 2026-08-04**, eight days before phase 2 merged. It has no `/search`
+   route at all. Everything stage B shipped is in `main` and reachable by nobody.
+2. **Vercel Deployment Protection is on.** Every path, `/login` included, answers `302` to
+   `vercel.com/sso-api`, so the site is usable only by someone signed in to the Vercel account.
+   Cortex has two users; unless the second is on that team, no amount of redeploying makes the
+   app visible to them. This is a dashboard setting, and it is the first thing to change.
 
-- **`CORS_ORIGINS` on Railway must name the Vercel origin.** It is `.optional()` in `env.ts`, so
-  the API boots clean and every server-side read works while every browser *write* is blocked —
-  `POST /notes`, `POST /search`, and `POST /assistant`. The evidence appears only in the browser
-  console. Since §4 step 1 makes the box's first action a `POST /notes`, this is the failure that
-  would present as "the assistant does nothing".
-- **Preview deployments cannot write.** Vercel mints a fresh URL per preview and
-  `enableCors({ origin })` takes exact strings. Ruled: production domain only for now; matching
-  origins by pattern is a separate PR against `main.ts` if it is ever wanted.
+Building an SSE endpoint for a client in that state would mean debugging streaming, hosting and
+access control at once, so this lands **before** any of §4.
 
-The build itself is verified, not assumed: `pnpm turbo run build --filter=@cortex/web --force`
-→ 2/2, `0 cached`, all 7 routes. The risk is entirely in the wiring, which is why the checklist
-orders its verification steps so that each failure is distinguishable from the next.
+Verified rather than assumed, and the full checklist with the evidence is `docs/deploy.md`
+§ "Web — Vercel deploy checklist". Three findings bear on this design directly:
+
+- **`CORS_ORIGINS` is already correct** on Railway, naming `web-tan-nu-96.vercel.app`. Worth
+  understanding anyway: it is `.optional()` in `env.ts` and defaults to localhost, so had it been
+  unset the API would boot clean and every server-side read would work while every browser
+  *write* was blocked. Since §4 step 1 makes the box's first action a `POST /notes`, that failure
+  presents as the assistant doing nothing at all. The live check is that the alias in the value
+  matches the alias actually used in the browser — origins are exact strings.
+- **Preview deployments cannot write**, for the same exact-string reason. Ruled: production alias
+  only; matching by pattern is a separate PR against `main.ts` if it is ever wanted.
+- **The Vercel build command should be pinned** to `cd ../.. && pnpm turbo run build
+  --filter=@cortex/web`. It currently runs on the default and works, but a bare `next build`
+  fails without `packages/shared/dist` (`Module not found: Can't resolve '@cortex/shared'`) and
+  nothing in the repo produces that — so the working deploy depends on Vercel's Turborepo
+  detection. Naming the command removes that inference.
 
 **Why web first.** A web redeploy is free; mobile needs a new APK for every fix round
 (issue-log E3). Chat is not in the sync rules, so mobile gains nothing from being early — the
