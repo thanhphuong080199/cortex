@@ -5,6 +5,7 @@ import type { AiClient } from "../ai/client.js";
 import { isOverBudget, recordUsage } from "../enrich/budget.js";
 import { extractNote } from "../enrich/extract.js";
 import { errorMessage } from "../errors.js";
+import { CheckinService } from "../checkins/service.js";
 import { NoteService } from "../notes/service.js";
 import { isStale, selectContext, type ThreadTurn } from "./context.js";
 import { buildAcknowledgePrompt, buildAnswerPrompt } from "./prompts.js";
@@ -14,6 +15,7 @@ export type AssistantEvent =
   | { type: "attached"; domain: string | null; domainMeta: Record<string, unknown>;
       tags: string[]; degraded?: boolean }
   | { type: "citations"; citations: Citation[]; degraded?: boolean }
+  | { type: "mood"; checkinId: string; mood: number }
   | { type: "token"; text: string }
   | { type: "declined"; reason: "budget" }
   | { type: "done"; messageId: string; sessionId: string }
@@ -87,7 +89,6 @@ export async function* runTurn(
   }
   const text = note.content_text;
   const noteCreatedAt = note.created_at;
-  void noteCreatedAt; // bound for Task 7's check-in, not read yet
 
   // A client-supplied sessionId is UNVERIFIED input. Without this read the history query below
   // is scoped by session alone, so a guessed id would select another user's conversation into
@@ -168,6 +169,25 @@ export async function* runTurn(
     ? { type: "attached", domain: extracted.domain, domainMeta: extracted.domainMeta,
         tags: extracted.tagNames }
     : { type: "attached", domain: null, domainMeta: {}, tags: [], degraded: true };
+
+  // Written by the TURN, not by extractNote, and the distinction matters: the 60-second sweep
+  // runs extractNote too, and a sweep that wrote check-ins would manufacture mood history for
+  // old notes at arbitrary times, with no screen to undo it on.
+  if (extracted?.mood != null) {
+    const checkinId = randomUUID();
+    try {
+      await new CheckinService(userDb, args.userId).createWithId(checkinId, {
+        mood: extracted.mood,
+        // The note's timestamp, not now(): offline, the thought can be hours older than
+        // the turn that finally reached the server.
+        createdAt: noteCreatedAt,
+      });
+      yield { type: "mood", checkinId, mood: extracted.mood };
+    } catch (err) {
+      // A failed check-in must not cost the user their answer. Logged, not raised.
+      console.error(`[assistant] check-in write failed (request ${requestId}): ${errorMessage(err)}`);
+    }
+  }
 
   // A rejected retrieval must not be reported to the model as an empty corpus (see prompts.ts's
   // renderCitations): "no notes matched" and "the search failed" are different facts, and only

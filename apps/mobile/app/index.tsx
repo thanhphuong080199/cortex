@@ -4,7 +4,6 @@ import { ActivityIndicator, Button, Text, View } from "react-native";
 import { signInWithGoogle, signOut } from "@/lib/auth";
 import { createInFlightGuard } from "@/lib/in-flight";
 import { supabase } from "@/lib/supabase";
-import { CheckinWidget } from "@/screens/checkin-widget";
 import { ExportButton } from "@/screens/export-button";
 import { MediaLogForm } from "@/screens/media-log-form";
 import { NoteList } from "@/screens/note-list";
@@ -73,7 +72,6 @@ export default function Home() {
             header={
               <>
                 <AssistantBox />
-                <CheckinWidget />
                 <MediaLogForm />
               </>
             }

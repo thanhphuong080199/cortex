@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 import { ActivityIndicator, Pressable, Text, TextInput, View } from "react-native";
 
 import { captureNote } from "../lib/capture";
+import { logCheckinWithId, undoCheckin } from "../lib/checkins";
 import { createInFlightGuard } from "../lib/in-flight";
 import { offlineAnswer, type OfflineMatch } from "../lib/assistant/offline-answer";
 import { streamAssistantTurn, StreamUnavailableError, type BoxEvent } from "../lib/assistant/stream";
@@ -25,6 +26,7 @@ export function AssistantBox() {
   const [saveFailed, setSaveFailed] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [attached, setAttached] = useState<Extract<BoxEvent, { type: "attached" }> | null>(null);
+  const [mood, setMood] = useState<{ checkinId: string; mood: number } | null>(null);
   const [answer, setAnswer] = useState("");
   const [matches, setMatches] = useState<OfflineMatch[]>([]);
   const run = useRef(createInFlightGuard()).current;
@@ -35,6 +37,7 @@ export function AssistantBox() {
       setSaveFailed(false);
       setStatus(null);
       setAttached(null);
+      setMood(null);
       setAnswer("");
       setMatches([]);
 
@@ -72,6 +75,12 @@ export function AssistantBox() {
           })) {
             if (ev.type === "attached") setAttached(ev);
             else if (ev.type === "token") setAnswer((a) => a + ev.text);
+            else if (ev.type === "mood") {
+              // Mirrored locally under the server's id so undo has a row to delete before
+              // replication catches up. See lib/checkins.ts.
+              await logCheckinWithId(db, ev.checkinId, ev.mood).catch(() => {});
+              setMood({ checkinId: ev.checkinId, mood: ev.mood });
+            }
             else if (ev.type === "declined") setStatus("Đã lưu. Chưa trả lời được (đã chạm giới hạn chi tiêu).");
             else if (ev.type === "error") setStatus("Đã lưu. Chưa trả lời được.");
           }
@@ -129,6 +138,23 @@ export function AssistantBox() {
           {attached.domain ? `Đã xếp vào: ${attached.domain}` : "Chưa xếp vào nhóm nào"}
           {attached.tags.length > 0 ? ` — thẻ ${attached.tags.join(", ")}` : ""}
         </Text>
+      ) : null}
+
+      {mood ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+          <Text testID="box-mood">{`Đã ghi tâm trạng ${mood.mood}/5`}</Text>
+          <Pressable
+            testID="box-mood-undo"
+            accessibilityRole="button"
+            onPress={() => {
+              const id = mood.checkinId;
+              setMood(null);
+              void undoCheckin(db, id);
+            }}
+          >
+            <Text style={{ textDecorationLine: "underline" }}>Hoàn tác</Text>
+          </Pressable>
+        </View>
       ) : null}
 
       {answer ? <Text testID="box-answer">{answer}</Text> : null}

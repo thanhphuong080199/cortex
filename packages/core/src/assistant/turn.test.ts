@@ -34,7 +34,12 @@ interface HistoryRow {
  * anything looser (e.g. table name alone) would let a fixture written for one chain silently
  * satisfy the other -- exactly the failure mode this double exists to avoid.
  */
-function dbs(opts: { over?: boolean; history?: HistoryRow[]; note?: typeof NOTE | null } = {}) {
+function dbs(
+  opts: {
+    over?: boolean; history?: HistoryRow[]; note?: typeof NOTE | null;
+    failInsertOn?: string;
+  } = {},
+) {
   const inserted: Record<string, Record<string, unknown>[]> = {};
 
   function chain(resolve: () => { data: unknown; error: unknown }) {
@@ -61,7 +66,11 @@ function dbs(opts: { over?: boolean; history?: HistoryRow[]; note?: typeof NOTE 
     // `.content`/`.created_at` off what insert().select().single() resolves to, and a
     // bare `{ id }` would leave those undefined, crashing the md5 hash a few lines later
     // in runTurn instead of failing the assertion the test actually wrote.
-    return chain(() => ({ data: { id: `${name}-1`, ...row }, error: null }));
+    return chain(() =>
+      opts.failInsertOn === name
+        ? { data: null, error: { code: "23514", message: "check constraint" } }
+        : { data: { id: `${name}-1`, ...row }, error: null },
+    );
   };
 
   const table = (name: string) => ({
@@ -386,5 +395,63 @@ describe("runTurn", () => {
 
     const attached = events.find((e) => e.type === "attached");
     expect(attached).toMatchObject({ domainMeta: { rating: 4 } });
+  });
+
+  /**
+   * Red when turn.ts reads the mood but never calls createWithId: the model has already been
+   * paid for the token and nothing is written.
+   */
+  it("writes a check-in when the extraction reports a mood", async () => {
+    const { client, inserted } = dbs();
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai({ mood: 4 }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(inserted.checkins?.[0]).toMatchObject({ user_id: "u1", mood: 4 });
+    const mood = events.find((e) => e.type === "mood");
+    expect(mood).toMatchObject({ mood: 4 });
+    // The id the client will mirror the row under. Without it, undo has nothing to name.
+    expect((mood as { checkinId: string }).checkinId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("writes no check-in and emits no mood event when the extraction reports none", async () => {
+    const { client, inserted } = dbs();
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai({ mood: null }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(inserted.checkins).toBeUndefined();
+    expect(events.map((e) => e.type)).not.toContain("mood");
+  });
+
+  /**
+   * The check-in belongs to the moment the thought was captured, which offline can be hours
+   * before the turn runs. Red when createdAt is omitted and the row lands at now().
+   */
+  it("dates the check-in from the note, not from the turn", async () => {
+    const { client, inserted } = dbs();
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai({ mood: 3 }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    // NOTE.created_at, set in Task 5's fixture.
+    expect(inserted.checkins?.[0]).toMatchObject({ created_at: "2026-08-14T01:02:03.000Z" });
+  });
+
+  /**
+   * A failed check-in must not cost the user their answer. Red if the try/catch is removed:
+   * the generator throws and the token stream never arrives.
+   */
+  it("still answers when the check-in write fails", async () => {
+    const { client } = dbs({ failInsertOn: "checkins" });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai({ mood: 4 }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(events.map((e) => e.type)).toContain("token");
   });
 });

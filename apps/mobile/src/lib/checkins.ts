@@ -42,13 +42,31 @@ export const LOG_CHECKIN_SQL = `INSERT INTO checkins (id, mood, energy, label, c
  */
 export const UNDO_CHECKIN_SQL = `DELETE FROM checkins WHERE id = ?`;
 
+/**
+ * The local mirror of a check-in the SERVER created, under the server's id.
+ *
+ * The assistant writes the row when it reads a mood out of the note, and replication is a beat
+ * slower than a thumb: undo against a database that has not received the row yet matches
+ * nothing, PowerSync queues no op, and the check-in the user undid reappears moments later.
+ * Writing it locally under the same id makes undo work immediately; the PUT that follows lands
+ * in CheckinService.createWithId's 23505 branch and is a no-op, so the two writers converge on
+ * one row by construction.
+ */
+export async function logCheckinWithId(
+  db: CheckinTarget,
+  id: string,
+  mood: number,
+): Promise<void> {
+  await db.execute(LOG_CHECKIN_SQL, [id, mood]);
+}
+
 /** Returns the new row's id so the caller can offer an undo for it. */
 export async function logCheckin(db: CheckinTarget, mood: number): Promise<string> {
   // React Native has no global `crypto.randomUUID`. The id is generated here rather than by
   // SQL's `uuid()` because the caller needs it back, and it is the same id the server row gets
   // -- the local optimistic row and the server row are one row, so a resend patches.
   const id = randomUUID();
-  await db.execute(LOG_CHECKIN_SQL, [id, mood]);
+  await logCheckinWithId(db, id, mood);
   return id;
 }
 
