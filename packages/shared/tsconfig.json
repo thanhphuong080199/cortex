@@ -1,5 +1,8 @@
 {
   "extends": "@cortex/config/tsconfig.base.json",
-  "compilerOptions": { "noEmit": true },
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2022", "dom", "dom.iterable"]
+  },
   "include": ["src"]
 }
