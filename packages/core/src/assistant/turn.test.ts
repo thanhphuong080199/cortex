@@ -3,7 +3,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
 
-const NOTE = { id: "n1", user_id: "u1", content_text: "hôm nay tôi chạy bộ ở công viên" };
+const NOTE = {
+  id: "n1", user_id: "u1",
+  content_text: "hôm nay tôi chạy bộ ở công viên",
+  created_at: "2026-08-14T01:02:03.000Z",
+};
 
 interface HistoryRow {
   role: string;
@@ -30,7 +34,7 @@ interface HistoryRow {
  * anything looser (e.g. table name alone) would let a fixture written for one chain silently
  * satisfy the other -- exactly the failure mode this double exists to avoid.
  */
-function dbs(opts: { over?: boolean; history?: HistoryRow[] } = {}) {
+function dbs(opts: { over?: boolean; history?: HistoryRow[]; note?: typeof NOTE | null } = {}) {
   const inserted: Record<string, Record<string, unknown>[]> = {};
 
   function chain(resolve: () => { data: unknown; error: unknown }) {
@@ -53,13 +57,17 @@ function dbs(opts: { over?: boolean; history?: HistoryRow[] } = {}) {
 
   const insertChain = (name: string, row: Record<string, unknown>) => {
     (inserted[name] ??= []).push(row);
-    return chain(() => ({ data: { id: `${name}-1` }, error: null }));
+    // Spread the row back, not just a placeholder id: NoteService.createWithId reads
+    // `.content`/`.created_at` off what insert().select().single() resolves to, and a
+    // bare `{ id }` would leave those undefined, crashing the md5 hash a few lines later
+    // in runTurn instead of failing the assertion the test actually wrote.
+    return chain(() => ({ data: { id: `${name}-1`, ...row }, error: null }));
   };
 
   const table = (name: string) => ({
     select: (cols?: string) => {
-      if (name === "notes" && cols === "id, content_text") {
-        return chain(() => ({ data: NOTE, error: null }));
+      if (name === "notes" && cols === "id, content_text, created_at") {
+        return chain(() => ({ data: opts.note === undefined ? NOTE : opts.note, error: null }));
       }
       if (name === "notes" && cols === "domain") {
         return chain(() => ({ data: { domain: null }, error: null }));
@@ -116,11 +124,12 @@ const collect = async (gen: AsyncGenerator<AssistantEvent>) => {
   return out;
 };
 
-const ai = () =>
+const ai = (value: Record<string, unknown> = {}) =>
   createFakeAi({
     generateJson: async () => ({
-      value: { intent: "statement", complexity: "simple", domain: "health", domain_meta: {}, tags: [] },
-      inputTokens: 5, outputTokens: 2, model: "fake-classify",
+      value: { intent: "statement", complexity: "simple", domain: null,
+               domain_meta: {}, tags: [], mood: null, ...value },
+      inputTokens: 10, outputTokens: 5, model: "fake-classify",
     }),
     generateStream: async () => ({
       chunks: (async function* () { yield { text: "Đã " }; yield { text: "lưu." }; })(),
@@ -328,5 +337,54 @@ describe("runTurn", () => {
     await collect(runTurn({ userDb: client, serviceDb: client, ai: capturing },
       { userId: "u1", noteId: "n1", budgetUsd: 100 }));
     expect(seen).not.toContain("TRUNCATED-EARLIER-ANSWER");
+  });
+
+  /**
+   * The mobile case. The device wrote the note into its own SQLite and PowerSync has not
+   * uploaded it, so the server has never seen the id. Red the moment the create branch is
+   * removed: the first event becomes `error: note not found`.
+   */
+  it("creates the note when it is missing and content was supplied", async () => {
+    const { client, inserted } = dbs({ note: null });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", content: "ghi chú chưa từng lên server", budgetUsd: 100 },
+    ));
+
+    expect(events.map((e) => e.type)).not.toContain("error");
+    expect(inserted.notes?.[0]).toMatchObject({
+      id: "n1", user_id: "u1", content: "ghi chú chưa từng lên server",
+    });
+  });
+
+  it("still reports note not found when the id is unknown and no content was sent", async () => {
+    const { client } = dbs({ note: null });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(events[0]).toEqual({ type: "error", message: "note not found" });
+  });
+
+  /**
+   * Red when the hardcoded `domainMeta: {}` comes back: the box loses the ability to say what
+   * it filed, which Task 8 depends on entirely.
+   */
+  it("puts the extraction's real domain_meta on the attached event", async () => {
+    const { client } = dbs();
+    // rating: 4, not 8.5 -- domainMetaSchemas.media (packages/shared/src/dto/domains.ts)
+    // caps rating at an integer 1-5. A value outside that range would fail
+    // validateDomainMeta's safeParse and get dropped to `{}` by extractNote, which would
+    // make this test pass for the wrong reason (silently exercising the "invalid meta
+    // dropped" branch instead of the "real meta carried through" one it is meant to pin).
+    const scripted = ai({ domain: "media", domain_meta: { rating: 4 } });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: scripted },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    const attached = events.find((e) => e.type === "attached");
+    expect(attached).toMatchObject({ domainMeta: { rating: 4 } });
   });
 });

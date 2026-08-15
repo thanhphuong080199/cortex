@@ -1,4 +1,4 @@
-import { Body, Controller, Inject, Post, Req, Res, UseGuards } from "@nestjs/common";
+import { Body, Controller, HttpCode, Inject, Post, Req, Res, UseGuards } from "@nestjs/common";
 import type { Request, Response } from "express";
 import type { AiClient } from "@cortex/core";
 import { createServiceClient, createUserClient, errorMessage, runTurn } from "@cortex/core";
@@ -37,7 +37,13 @@ export class AssistantController {
     return parseApiEnv(process.env);
   }
 
+  // NestJS's RouterExecutionContext sets the response status to 201 (POST's default) BEFORE
+  // the handler runs, independent of @Res() -- so without this override, a stream that never
+  // calls res.status() itself gets flushed with 201 on its very first header write, and every
+  // client of this SSE endpoint would see "Created" on what is actually a stream, not a
+  // resource creation confirmation.
   @Post()
+  @HttpCode(200)
   async assist(
     @CurrentUser() user: AuthedUser,
     @Body(new ZodValidationPipe(assistantInput)) body: AssistantInput,
@@ -63,6 +69,8 @@ export class AssistantController {
           userId: user.id,
           noteId: body.noteId,
           sessionId: body.sessionId,
+          content: body.content,
+          createdAt: body.createdAt,
           budgetUsd,
           signal: abort.signal,
         },

@@ -99,6 +99,7 @@ export async function extractNote(
   tags: number;
   tagNames: string[];
   domain: string | null;
+  domainMeta: Record<string, unknown>;
   intent: "question" | "statement";
   complexity: "simple" | "complex";
 }> {
@@ -253,6 +254,10 @@ export async function extractNote(
     tags: accepted.length,
     tagNames: accepted,
     domain,
+    // The meta that was just written to the row. Returned rather than re-read: the box has to
+    // be able to say WHAT it filed ("Inception (2010) · 8.5/10"), and turn.ts hardcoded `{}`
+    // here, which made that impossible.
+    domainMeta: meta,
     intent: value.intent === "question" ? "question" : "statement",
     complexity: value.complexity === "complex" ? "complex" : "simple",
   };
