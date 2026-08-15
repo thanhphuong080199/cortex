@@ -58,7 +58,7 @@ last, so the stage has a shippable subset at every point after task 4.
 
 ```
 apps/mobile/src/screens/assistant-box.tsx        render only
-apps/mobile/src/lib/assistant/turn.ts            the decisions of one turn
+apps/mobile/src/lib/assistant/stream.ts          the decisions of one turn
 apps/mobile/src/lib/assistant/offline-answer.ts  the FTS5 branch
 packages/shared/src/sse.ts                       readEvents, shared with web
 ```
