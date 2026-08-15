@@ -1,5 +1,5 @@
 import { CLASSIFY_MODEL, EMBEDDING_DIM, EMBEDDING_MODEL } from "@cortex/shared";
-import type { AiClient, EmbedResult, JsonResult } from "./client.js";
+import type { AiClient, EmbedResult, JsonResult, StreamChunk, StreamResult, StreamUsage } from "./client.js";
 
 const BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -96,6 +96,121 @@ export function parseModelJson<T>(text: string): T {
   }
 }
 
+/**
+ * `streamGenerateContent?alt=sse` returns Server-Sent Events. Each `data:` line is a full
+ * GenerateContentResponse; text arrives incrementally and `usageMetadata` arrives on the LAST
+ * one. Answer generation is the largest line item in this system's spend, so dropping that
+ * final object means the ledger cannot see ~75% of the money.
+ */
+async function openStream(
+  apiKey: string,
+  args: { prompt: string; model: string; signal?: AbortSignal },
+): Promise<StreamResult> {
+  const res = await fetch(
+    `${BASE}/models/${args.model}:streamGenerateContent?alt=sse`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({ contents: [{ parts: [{ text: args.prompt }] }] }),
+      signal: args.signal,
+    },
+  );
+  if (!res.ok) {
+    // Same shape as the non-streaming path: status in the message for logs, and attached as a
+    // property so a caller can branch on 429/5xx (retry) vs 400 (a bug in our request).
+    throw Object.assign(new Error(`gemini ${res.status}`), { status: res.status });
+  }
+  if (!res.body) {
+    // Distinct from the branch above: this is a 2xx with no body to read, which is not a status
+    // a caller's 429/5xx-vs-400 retry logic can classify. `!res.ok || !res.body` used to fold
+    // this into `throw ... gemini 200 ... { status: 200 }`, which looks retryable and is not.
+    throw new Error("gemini: streaming response had no body");
+  }
+
+  let usage: StreamUsage | null = null;
+
+  /**
+   * Parses one SSE event's `data:` line and yields a chunk if it carried text, capturing
+   * `usage` (the outer closure variable) if it carried usageMetadata. A plain (non-async)
+   * generator so both the read loop and the post-loop flush below can delegate into it with
+   * `yield*` instead of duplicating this block.
+   */
+  function* handleEvent(event: string): Generator<StreamChunk> {
+    const line = event.split("\n").find((l) => l.startsWith("data:"));
+    if (!line) return;
+    const payload = line.slice(5).trim();
+    if (payload === "" || payload === "[DONE]") return;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(payload) as Record<string, unknown>;
+    } catch {
+      // Never quote the payload: it is model output, and spec §15.6 rule 1 forbids user
+      // content reaching a log. Length is enough to diagnose a truncation.
+      throw new Error(`gemini: stream chunk was not valid JSON (${payload.length} chars)`);
+    }
+    const meta = obj.usageMetadata as Record<string, number> | undefined;
+    if (meta) {
+      usage = {
+        inputTokens: meta.promptTokenCount ?? 0,
+        outputTokens: meta.candidatesTokenCount ?? 0,
+        model: args.model,
+      };
+    }
+    const candidates = obj.candidates as
+      | { content?: { parts?: { text?: string }[] } }[]
+      | undefined;
+    const text = candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+    if (text !== "") yield { text };
+  }
+
+  async function* iterate(): AsyncIterable<StreamChunk> {
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Normalise CRLF to LF before splitting: some endpoints emit CRLF line endings, and a
+        // split on "\n\n" alone would never match one, growing `buffer` for the rest of the
+        // response and turning the whole stream into zero yielded chunks and null usage --
+        // silently, since nothing here throws on that.
+        buffer = buffer.replace(/\r\n/g, "\n");
+        // SSE events are separated by a blank line. Hold the tail: a chunk boundary can land
+        // mid-event, and parsing half a JSON object throws.
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+        for (const event of events) yield* handleEvent(event);
+      }
+      // The read loop only processes events already terminated by a blank line, so anything
+      // still in `buffer` when the stream ends -- including a final event with no trailing
+      // blank line at all -- would otherwise be silently discarded. That final event is exactly
+      // the one carrying usageMetadata: answer generation is ~75% of this system's spend, so
+      // this flush is what stands between an ordinary response shape and a missing ledger row.
+      //
+      // decoder.decode() with no argument flushes any bytes withheld for an incomplete
+      // multi-byte UTF-8 sequence at the very end of the response -- concretely reachable here
+      // since the corpus is Vietnamese.
+      buffer += decoder.decode();
+      buffer = buffer.replace(/\r\n/g, "\n");
+      for (const event of buffer.split("\n\n")) yield* handleEvent(event);
+    } finally {
+      // cancel(), not releaseLock(): releaseLock() only detaches this reader, leaving the
+      // underlying stream (and its connection) unconsumed and open. cancel() is what actually
+      // tells the server and the connection pool the request is abandoned -- the path that
+      // matters here is a caller breaking out of `for await` with no AbortSignal at all.
+      await reader.cancel().catch(() => {
+        // A caller reading to completion has already been cancel()'d by the platform; a second
+        // cancel() on an exhausted stream can reject, and that rejection must not shadow
+        // whatever error (or clean return) got the generator here in the first place.
+      });
+    }
+  }
+
+  return { chunks: iterate(), usage: () => usage };
+}
+
 export function createGeminiAi(apiKey: string): AiClient {
   async function post(path: string, body: unknown): Promise<Record<string, unknown>> {
     const res = await fetch(`${BASE}/${path}`, {
@@ -160,5 +275,7 @@ export function createGeminiAi(apiKey: string): AiClient {
         model: CLASSIFY_MODEL,
       };
     },
+
+    generateStream: (args) => openStream(apiKey, args),
   };
 }

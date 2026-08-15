@@ -16,8 +16,9 @@ API Dockerfile) is already implemented and verified locally; see
 
 > **Deploying an already-provisioned environment?** Steps 1-6 are one-time setup. For
 > shipping new code to the environment that already exists, jump to
-> [Is there CI/CD?](#is-there-cicd-no--deploys-are-manual) — nothing deploys on merge,
-> and the order (schema → env vars → app) matters. Phases 1a and 1c additionally require
+> [Is there CI/CD?](#is-there-cicd-code-ships-automatically-migrations-and-env-vars-do-not) —
+> code ships automatically on merge once E2E passes, but the schema and env vars still don't,
+> and the order (schema → env vars → merge) matters. Phases 1a and 1c additionally require
 > their own checklists ([1a](#phase-1a--deploy-checklist-web-notes),
 > [1c](#phase-1c--deploy-checklist-life-domain-capture)).
 
@@ -624,6 +625,7 @@ a crash loop rather than a healthy deploy with a broken feature.
 | `GEMINI_API_KEY` | ✅ **2** | A **paid-tier** key. The 1c note saying "do not add this yet" expired when phase 2 shipped. |
 | `GEMINI_TIER` | ✅ **2** | Literally `free` or `paid`; anything else fails the schema. Must be `paid` in production — enforced, [see below](#gemini_tier-must-be-paid-in-production-and-that-is-enforced-not-advised). |
 | `ENRICH_MONTHLY_BUDGET_USD` | ✅ **2** | A positive number, e.g. `10`. Caps the **enrichment sweep** only — search is metered against the same ledger but never blocked by it, [see below](#the-budget-caps-the-sweep-search-is-metered-but-not-gated). |
+| `ASSISTANT_MONTHLY_BUDGET_USD` | ✅ **Stage C1** | A positive number, e.g. `10`. A circuit breaker, not a budget — it gates `POST /assistant` specifically (the one-box chat turn), set generously since refusing to answer is a UX failure. Independent of `ENRICH_MONTHLY_BUDGET_USD`; both read the same `usage_ledger`. |
 | `CORS_ORIGINS` | ✅ in practice | Optional in the schema (it falls back to localhost dev origins), but a deployed API without the real web origin blocks every browser write. |
 | `SUPABASE_JWT_SECRET` | ❌ must stay **unset** | Setting it forces the HS256 branch, which rejects the project's real ES256 tokens — every request 401s. |
 | `PORT` | ❌ leave to Railway | Railway injects it; setting it by hand only creates a way to disagree with the platform. |
@@ -1143,6 +1145,58 @@ before the next deploy: most of its entries produce no error anywhere.
   `$0.0000009`.
 - Post-`00025` re-check: `POST /notes`, `/tags`, `/me`, `/search` all still succeed;
   `note_chunks` / `usage_ledger` / `note_enrichment` return `42501` to `authenticated`.
+
+---
+
+## Web — Vercel deploy checklist
+
+This section did not exist before Stage C1 Task 10 — the web app is deployed on Vercel (a
+linked project, visible locally as `.vercel/project.json`: `projectName: "web"`,
+`framework: "nextjs"`, `rootDirectory: "apps/web"`, production URL
+`https://web-tan-nu-96.vercel.app`), but nothing about it had been written down here. What
+follows is what could be established from the linked project config and the CLI, not a fresh
+setup guide — unlike Supabase/Google/Railway above, provisioning this project is not part of
+this checklist.
+
+| Item | Value | Already true? |
+| --- | --- | --- |
+| Framework preset | Next.js (auto-detected) | yes |
+| Root Directory | `apps/web` | yes |
+| Build Command | `cd ../.. && pnpm turbo run build --filter=@cortex/web` | **not yet applied** — pinning was denied by the sandbox's live-infra guard; see below |
+| `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | set on the Vercel project | assumed — the production URL serves a working, signed-in app, which is not reachable with any of the three unset; not independently re-verified by this task |
+
+### Why the Build Command needed pinning
+
+Before Task 10 the Build Command was unset (`null` in `project.json`), so Vercel ran its own
+default. That default currently works — Vercel's own Turborepo detection walks up from
+`rootDirectory` and runs the monorepo build, which resolves `@cortex/shared`'s workspace
+dependency correctly. But a **bare** `next build` (no turbo, no dependency graph) fails:
+`packages/shared`'s `package.json` points `main` at `./dist/index.js`, and nothing produces
+that directory except `packages/shared`'s own `build` script — `next build` on its own never
+runs it. Pinning the command explicitly removes the dependence on Vercel's inference ever
+staying correct.
+
+```
+cd ../.. && pnpm turbo run build --filter=@cortex/web
+```
+
+(`cd ../..` is relative to the Root Directory, `apps/web`, landing back at the repo root where
+`turbo` and the workspace live.)
+
+**Not applied by this task.** Changing a live Vercel project's build settings is a
+dashboard-equivalent mutation this agent's sandbox explicitly blocks (`vercel project update`
+was denied by the harness's own auto-mode classifier, the same way Steps 2–4/6 above require a
+human with browser access). Set it by hand:
+
+- Dashboard: Project **web** → Settings → Build & Development Settings → Build Command → paste
+  the command above, override the framework default, Save.
+- Or CLI, from a session that allows project mutations:
+  ```bash
+  vercel project update web --build-command "cd ../.. && pnpm turbo run build --filter=@cortex/web"
+  ```
+
+Until one of those runs, the "Already true?" cell above stays aspirational, not verified —
+re-check `apps/web/.vercel/project.json`'s `buildCommand` field (`vercel pull`) after applying it.
 
 ---
 

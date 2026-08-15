@@ -59,7 +59,7 @@ export function MediaLogForm({ token, onDone }: { token: string; onDone: () => v
       });
       onDone();   // the note arrives in the list via Realtime -- no manual insert
     } catch {
-      // Same never-lose-input rule as QuickCapture: nothing is cleared on failure.
+      // Same never-lose-input rule as the capture box (assistant-box.tsx): nothing is cleared on failure.
       setError("Couldn't save — everything you typed is still here.");
     } finally {
       setSaving(false);

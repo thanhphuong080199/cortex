@@ -25,9 +25,18 @@ const aiCapturingPrompt = (value: unknown) => {
   };
 };
 
-/** The comma-separated vocabulary line buildPrompt writes, split back into names. */
+/**
+ * The comma-separated vocabulary line buildPrompt writes, split back into names.
+ *
+ * Anchored on the header rather than an absolute line index. An index constrains where every
+ * later paragraph of the prompt may go, and it fails SILENTLY -- it returns some other line and
+ * splits that on ", ", so a cap test would assert against the wrong text instead of erroring.
+ */
 const vocabularyIn = (prompt: string): string[] => {
-  const line = prompt.split("\n")[3] ?? "";
+  const lines = prompt.split("\n");
+  const header = lines.findIndex((l) => l.startsWith("Their existing tags"));
+  if (header === -1) throw new Error(`prompt has no "Their existing tags" header:\n${prompt}`);
+  const line = lines[header + 1] ?? "";
   return line === "(none yet)" ? [] : line.split(", ");
 };
 
@@ -61,19 +70,23 @@ const tagsOn = async (noteId: string) => {
   return (data ?? []) as unknown as { status: string; source: string; confidence: number; tags: { name: string } }[];
 };
 
-describe("extractNote", () => {
-  beforeEach(async () => {
-    // 00008_invite_gate.sql fires on every auth.users insert, including through the admin
-    // API, so createUser fails with "Signup not allowed" unless the email is allow-listed
-    // first -- the same step every other suite's harness performs.
-    const email = `extract-${Date.now()}@example.com`;
-    const { error: upsertErr } = await db.from("allowed_emails").upsert({ email });
-    if (upsertErr) throw upsertErr;
-    const { data } = await db.auth.admin.createUser({
-      email, password: "x".repeat(16), email_confirm: true,
-    });
-    userId = data.user!.id;
+/**
+ * 00008_invite_gate.sql fires on every auth.users insert, including through the admin
+ * API, so createUser fails with "Signup not allowed" unless the email is allow-listed
+ * first -- the same step every other suite's harness performs.
+ */
+async function createTestUser() {
+  const email = `extract-${Date.now()}@example.com`;
+  const { error: upsertErr } = await db.from("allowed_emails").upsert({ email });
+  if (upsertErr) throw upsertErr;
+  const { data } = await db.auth.admin.createUser({
+    email, password: "x".repeat(16), email_confirm: true,
   });
+  userId = data.user!.id;
+}
+
+describe("extractNote", () => {
+  beforeEach(createTestUser);
 
   it("attaches suggested tags with source 'ai' and the model's confidence", async () => {
     const note = await seedNote("thoughts on pricing psychology");
@@ -265,6 +278,36 @@ describe("extractNote", () => {
     expect(links!.map((l) => l.tag_id)).not.toContain(gone!.id);
   });
 
+  // Finding 3 (Stage C1 review round 1): a live assistant turn calls extractNote too, and
+  // without this its classification spend was indistinguishable from real 60-second-sweep
+  // activity -- filed under "sweep" with no request_id, unjoinable to the turn that spent it.
+  it("attributes classification spend to the caller's source and requestId when given one", async () => {
+    const note = await seedNote("body");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [] });
+    // usage_ledger.request_id is a uuid column -- a real one, not a human-readable stand-in.
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    await extractNote({ db, ai }, { ...note, source: "assistant", requestId });
+
+    const { data } = await db.from("usage_ledger")
+      .select("source, request_id").eq("note_id", note.noteId).eq("kind", "tag").single();
+    expect(data!.source).toBe("assistant");
+    expect(data!.request_id).toBe(requestId);
+  });
+
+  // The sweep's own call site (apps/api's enrich.service.ts) never sets `source`/`requestId` on
+  // the note it hands in -- this pins that omitting both still files the call under "sweep" with
+  // no request_id, unchanged from before Finding 3's fix.
+  it("defaults classification spend to source 'sweep' with no requestId", async () => {
+    const note = await seedNote("body");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [] });
+    await extractNote({ db, ai }, note);
+
+    const { data } = await db.from("usage_ledger")
+      .select("source, request_id").eq("note_id", note.noteId).eq("kind", "tag").single();
+    expect(data!.source).toBe("sweep");
+    expect(data!.request_id).toBeNull();
+  });
+
   it("stamps extracted_hash", async () => {
     const note = await seedNote("body");
     await extractNote({ db, ai: aiReturning({ domain: null, domain_meta: {}, tags: [] }) }, note);
@@ -289,5 +332,106 @@ describe("extractNote", () => {
 
     const { data } = await db.from("note_enrichment").select("extracted_hash").eq("note_id", note.noteId).maybeSingle();
     expect(data).toBeNull();
+  });
+});
+
+describe("extractNote — intent, complexity and language", () => {
+  beforeEach(createTestUser);
+
+  // Both fixtures are the NON-default value on purpose: "statement"/"simple" are what the
+  // defaults below produce, so feeding them here would pass against a hardcoded return and pin
+  // nothing. The omitted-field defaults are covered separately.
+  it("returns the intent the model classified", async () => {
+    const note = await seedNote("bao giờ tôi viết về chuyện này?");
+    const ai = aiReturning({
+      intent: "question", complexity: "complex", domain: null, domain_meta: {}, tags: [],
+    });
+    const out = await extractNote({ db, ai }, note);
+
+    expect(out.intent).toBe("question");
+    expect(out.complexity).toBe("complex");
+  });
+
+  it("asks for one JSON object carrying all four decisions, not four calls", async () => {
+    const schemas: Record<string, unknown>[] = [];
+    const ai = createFakeAi({
+      generateJson: async (args) => {
+        schemas.push(args.schema);
+        return {
+          value: { intent: "statement", complexity: "simple", domain: null, domain_meta: {}, tags: [] },
+          inputTokens: 1, outputTokens: 1, model: "fake-classify",
+        };
+      },
+    });
+    await extractNote({ db, ai }, await seedNote("hôm nay tôi chạy bộ"));
+
+    expect(schemas).toHaveLength(1);
+    const props = (schemas[0]!.properties ?? {}) as Record<string, unknown>;
+    expect(Object.keys(props).sort())
+      .toEqual(["complexity", "domain", "domain_meta", "intent", "tags"]);
+  });
+
+  // Cortex's users write Vietnamese. A prompt that says nothing about language gets tags back
+  // in whichever language the model felt like, which fragments the vocabulary that
+  // TAG_VOCABULARY_LIMIT exists to keep stable.
+  it("instructs the model to work in the language the note was written in", async () => {
+    const note = await seedNote("tôi ngủ không đủ giấc");
+    const { seen, ai } = aiCapturingPrompt({
+      intent: "statement", complexity: "simple", domain: null, domain_meta: {}, tags: [],
+    });
+    await extractNote({ db, ai }, note);
+
+    expect(seen[0]!).toMatch(/same language/i);
+  });
+
+  it("defaults to statement when the model omits intent, rather than throwing", async () => {
+    const note = await seedNote("ghi chú");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [] });
+    const out = await extractNote({ db, ai }, note);
+
+    expect(out.intent).toBe("statement");
+    expect(out.complexity).toBe("simple");
+  });
+
+  // The names, not just the count: the box has to say which tags it attached, and reading them
+  // back out of note_tags would be a second round trip for data this call already held.
+  it("names the tags it attached, not only how many", async () => {
+    const note = await seedNote("thoughts on pricing psychology");
+    const ai = aiReturning({
+      intent: "statement", complexity: "simple", domain: null, domain_meta: {},
+      tags: [{ name: "pricing", confidence: 0.8 }],
+    });
+    const out = await extractNote({ db, ai }, note);
+
+    expect(out.tags).toBe(1);
+    expect(out.tagNames).toEqual(["pricing"]);
+  });
+
+  // The spelling the box shows must not depend on where a tag sits relative to
+  // TAG_VOCABULARY_LIMIT. A tag stored as "Pricing" resolves through the capped vocabulary when
+  // it is recent and through the ilike fallback when it is not -- and the fallback used to store
+  // the lowercased LOOKUP KEY, so the same tag rendered "Pricing" or "pricing" by cap position.
+  it("reports the stored spelling of a tag resolved outside the capped vocabulary", async () => {
+    // Older than every tag seedTags writes (base 2020-01-01), so `created_at desc` cuts it from
+    // the vocabulary the model is shown and resolution has to take the fallback path.
+    const { error } = await db.from("tags")
+      .insert({ user_id: userId, name: "Pricing", created_at: "2019-01-01T00:00:00.000Z" });
+    if (error) throw error;
+    await seedTags(TAG_VOCABULARY_LIMIT, "cap");
+
+    const note = await seedNote("more on pricing");
+    const { seen, ai } = aiCapturingPrompt({
+      intent: "statement", complexity: "simple", domain: null, domain_meta: {},
+      tags: [{ name: "pricing", confidence: 0.9 }],
+    });
+    const out = await extractNote({ db, ai }, note);
+
+    // The test is worthless unless the tag really did fall outside the cap.
+    expect(vocabularyIn(seen[0]!)).not.toContain("Pricing");
+    expect(out.tagNames).toEqual(["Pricing"]);
+    // ...and it resolved rather than duplicated: one tag, not "Pricing" plus a new "pricing".
+    const { data: sameName } = await db.from("tags")
+      .select("id").eq("user_id", userId).ilike("name", "pricing");
+    expect(sameName).toHaveLength(1);
   });
 });

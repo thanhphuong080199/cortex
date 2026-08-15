@@ -2,13 +2,20 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { chunkText, EMBEDDING_MODEL } from "@cortex/shared";
 import { createHash } from "node:crypto";
 import type { AiClient } from "../ai/client.js";
-import { recordUsage } from "./budget.js";
+import { recordUsage, type UsageSource } from "./budget.js";
 
 export interface EnrichTarget {
   noteId: string;
   userId: string;
   contentText: string;
   contentHash: string;
+  // Who is asking, and (when known) which turn -- both optional, and both default to today's
+  // sweep behaviour (embedNote never reads them at all; extractNote defaults source to "sweep"
+  // and omits requestId when unset). A live assistant turn passes "assistant" plus its own
+  // requestId here so extractNote's ledger row can be attributed and joined back to that turn
+  // instead of being filed under the 60-second sweep with no request_id (see 00027).
+  source?: UsageSource;
+  requestId?: string;
 }
 
 const md5 = (s: string) => createHash("md5").update(s, "utf8").digest("hex");
@@ -81,7 +88,11 @@ export async function embedNote(
     });
     const { error } = await db.from("note_chunks").upsert(rows, { onConflict: "note_id,chunk_index" });
     if (error) throw error;
-    await recordUsage(db, { userId: note.userId, kind: "embed", model, inputTokens, outputTokens: 0 });
+    await recordUsage(db, {
+      userId: note.userId, kind: "embed", model, inputTokens, outputTokens: 0,
+      source: "sweep", noteId: note.noteId,
+      contentChars: stale.reduce((n, c) => n + c.content.length, 0),
+    });
   }
 
   // A shortened note leaves orphans behind, and an orphan chunk keeps matching searches by

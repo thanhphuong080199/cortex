@@ -28,6 +28,9 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().min(1),
   GEMINI_TIER: z.enum(["free", "paid"]),
   ENRICH_MONTHLY_BUDGET_USD: z.coerce.number().positive(),
+  // A circuit breaker, not a budget. It bounds a runaway loop or a pathological output; it is
+  // set generously, because refusing to answer is a UX failure and this product has two users.
+  ASSISTANT_MONTHLY_BUDGET_USD: z.coerce.number().positive(),
 });
 
 export type ApiEnv = z.infer<typeof envSchema>;

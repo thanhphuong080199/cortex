@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createServiceClient } from "../supabase.js";
 import { assertTierAllowsRealData, isOverBudget, monthToDateUsd, recordUsage } from "./budget.js";
 
@@ -27,6 +28,7 @@ describe("usage and budget", () => {
   it("prices a call from the model's constants and stores the model with it", async () => {
     await recordUsage(db, {
       userId, kind: "tag", model: "gemini-3.5-flash-lite", inputTokens: 1_000_000, outputTokens: 1_000_000,
+      source: "sweep",
     });
     const { data } = await db.from("usage_ledger").select("*").eq("user_id", userId).single();
     expect(data!.model).toBe("gemini-3.5-flash-lite");
@@ -40,8 +42,8 @@ describe("usage and budget", () => {
 
   it("sums only this user's rows", async () => {
     const otherId = await makeUser("budget-other");
-    await recordUsage(db, { userId, kind: "embed", model: "gemini-embedding-001", inputTokens: 1_000_000, outputTokens: 0 });
-    await recordUsage(db, { userId: otherId, kind: "embed", model: "gemini-embedding-001", inputTokens: 10_000_000, outputTokens: 0 });
+    await recordUsage(db, { userId, kind: "embed", model: "gemini-embedding-001", inputTokens: 1_000_000, outputTokens: 0, source: "sweep" });
+    await recordUsage(db, { userId: otherId, kind: "embed", model: "gemini-embedding-001", inputTokens: 10_000_000, outputTokens: 0, source: "sweep" });
     expect(await monthToDateUsd(db, userId)).toBeCloseTo(0.15, 6);
   });
 
@@ -73,7 +75,7 @@ describe("usage and budget", () => {
   // usage_month_to_date_usd compares against (which is UTC, hence getUTC*, not local getters).
   // Month -1 in January is not a special case -- Date.UTC rolls the year back itself.
   it("ignores rows from a previous month", async () => {
-    await recordUsage(db, { userId, kind: "embed", model: "gemini-embedding-001", inputTokens: 1_000_000, outputTokens: 0 });
+    await recordUsage(db, { userId, kind: "embed", model: "gemini-embedding-001", inputTokens: 1_000_000, outputTokens: 0, source: "sweep" });
     const now = new Date();
     const lastMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15, 12));
     await db.from("usage_ledger").update({ created_at: lastMonth.toISOString() }).eq("user_id", userId);
@@ -82,12 +84,12 @@ describe("usage and budget", () => {
 
   it("reports over budget only once the limit is passed", async () => {
     expect(await isOverBudget(db, userId, 1)).toBe(false);
-    await recordUsage(db, { userId, kind: "tag", model: "gemini-3.5-flash-lite", inputTokens: 20_000_000, outputTokens: 0 });
+    await recordUsage(db, { userId, kind: "tag", model: "gemini-3.5-flash-lite", inputTokens: 20_000_000, outputTokens: 0, source: "sweep" });
     expect(await isOverBudget(db, userId, 1)).toBe(true);
   });
 
   it("prices an unknown model at zero rather than throwing, so a model swap cannot wedge the pipeline", async () => {
-    await recordUsage(db, { userId, kind: "tag", model: "gemini-99-future", inputTokens: 1000, outputTokens: 1000 });
+    await recordUsage(db, { userId, kind: "tag", model: "gemini-99-future", inputTokens: 1000, outputTokens: 1000, source: "sweep" });
     const { data } = await db.from("usage_ledger").select("cost_usd").eq("user_id", userId).single();
     expect(Number(data!.cost_usd)).toBe(0);
   });
@@ -104,5 +106,40 @@ describe("usage and budget", () => {
       expect(() => assertTierAllowsRealData("free", "https://wilssluxogpdrbgffmzc.supabase.co"))
         .toThrow(/paid tier/i);
     });
+  });
+});
+
+describe("recordUsage attribution", () => {
+  it("writes every attribution field through to the row", async () => {
+    const rows: Record<string, unknown>[] = [];
+    const db = {
+      from: () => ({ insert: async (r: Record<string, unknown>) => { rows.push(r); return { error: null }; } }),
+    } as unknown as SupabaseClient;
+
+    await recordUsage(db, {
+      userId: "u1", kind: "chat", model: "m", inputTokens: 10, outputTokens: 5,
+      source: "assistant", noteId: "n1", requestId: "r1", attempt: 2,
+      latencyMs: 900, contentChars: 40,
+    });
+
+    expect(rows[0]).toMatchObject({
+      user_id: "u1", kind: "chat", source: "assistant", note_id: "n1",
+      request_id: "r1", attempt: 2, latency_ms: 900, content_chars: 40,
+    });
+  });
+
+  it("omits absent optional fields rather than writing nulls", async () => {
+    const rows: Record<string, unknown>[] = [];
+    const db = {
+      from: () => ({ insert: async (r: Record<string, unknown>) => { rows.push(r); return { error: null }; } }),
+    } as unknown as SupabaseClient;
+
+    await recordUsage(db, {
+      userId: "u1", kind: "embed", model: "m", inputTokens: 1, outputTokens: 0, source: "sweep",
+    });
+
+    expect(rows[0]).not.toHaveProperty("note_id");
+    expect(rows[0]).not.toHaveProperty("request_id");
+    expect(rows[0]!.source).toBe("sweep");
   });
 });

@@ -11,6 +11,7 @@ const base = {
   GEMINI_API_KEY: "key",
   GEMINI_TIER: "free",
   ENRICH_MONTHLY_BUDGET_USD: "5",
+  ASSISTANT_MONTHLY_BUDGET_USD: "5",
 };
 
 describe("parseApiEnv", () => {
@@ -76,6 +77,10 @@ describe("parseApiEnv — enrichment configuration", () => {
 
   it("rejects a non-numeric budget", () => {
     expect(() => parseApiEnv({ ...base, ENRICH_MONTHLY_BUDGET_USD: "lots" } as NodeJS.ProcessEnv)).toThrow();
+  });
+
+  it("rejects a non-numeric assistant budget", () => {
+    expect(() => parseApiEnv({ ...base, ASSISTANT_MONTHLY_BUDGET_USD: "lots" } as NodeJS.ProcessEnv)).toThrow();
   });
 
   it("rejects a tier outside free|paid", () => {

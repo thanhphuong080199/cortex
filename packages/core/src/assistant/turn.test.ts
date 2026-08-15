@@ -1,0 +1,332 @@
+import { describe, expect, it, vi } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { createFakeAi } from "../ai/fake.js";
+import { runTurn, type AssistantEvent } from "./turn.js";
+
+const NOTE = { id: "n1", user_id: "u1", content_text: "hôm nay tôi chạy bộ ở công viên" };
+
+interface HistoryRow {
+  role: string;
+  content: string;
+  created_at: string;
+  retrieval_meta: { incomplete?: boolean } | null;
+}
+
+/**
+ * A Supabase double covering only what runTurn (and, through it, extractNote and retrieve)
+ * touches -- but built as a real chainable query-builder rather than a fixed-shape object, so
+ * that `.eq().is().order().limit()` (tags' vocabulary read), `.eq().single()` (the domain
+ * lookup), `.eq()` awaited bare (note_tags' link read), and `.eq().order().limit()` (the two
+ * chat_messages reads) can all be satisfied by ONE implementation instead of five near-copies
+ * that drift apart.
+ *
+ * Each chain is thenable at every step (mirroring supabase-js's own PostgrestFilterBuilder),
+ * so a caller may terminate it with `.single()`, `.maybeSingle()`, or by awaiting the builder
+ * directly -- all three resolve to the same fixture.
+ *
+ * `select()` routes on the COLUMNS STRING, because that is the only thing that tells apart two
+ * different reads of the same table: chat_messages' "last message" probe and its full-history
+ * read both do `.eq().order().limit()`, and only their `select()` argument differs. Routing on
+ * anything looser (e.g. table name alone) would let a fixture written for one chain silently
+ * satisfy the other -- exactly the failure mode this double exists to avoid.
+ */
+function dbs(opts: { over?: boolean; history?: HistoryRow[] } = {}) {
+  const inserted: Record<string, Record<string, unknown>[]> = {};
+
+  function chain(resolve: () => { data: unknown; error: unknown }) {
+    const self: Record<string, unknown> = {
+      eq: () => self,
+      is: () => self,
+      ilike: () => self,
+      order: () => self,
+      limit: () => self,
+      select: () => self,
+      single: async () => resolve(),
+      maybeSingle: async () => resolve(),
+      then: (
+        onFulfilled: (r: { data: unknown; error: unknown }) => unknown,
+        onRejected?: (e: unknown) => unknown,
+      ) => Promise.resolve(resolve()).then(onFulfilled, onRejected),
+    };
+    return self;
+  }
+
+  const insertChain = (name: string, row: Record<string, unknown>) => {
+    (inserted[name] ??= []).push(row);
+    return chain(() => ({ data: { id: `${name}-1` }, error: null }));
+  };
+
+  const table = (name: string) => ({
+    select: (cols?: string) => {
+      if (name === "notes" && cols === "id, content_text") {
+        return chain(() => ({ data: NOTE, error: null }));
+      }
+      if (name === "notes" && cols === "domain") {
+        return chain(() => ({ data: { domain: null }, error: null }));
+      }
+      // The "last message" probe (session resolution): always empty, so every turn in this
+      // suite starts a fresh session -- none of these tests need cross-turn session reuse.
+      if (name === "chat_messages" && cols?.includes("session_id")) {
+        return chain(() => ({ data: [], error: null }));
+      }
+      // The full-history read. `opts.history` supplies genuine PRIOR turns; rows already
+      // pushed onto `inserted.chat_messages` by this same runTurn call (read lazily, at
+      // resolve time, so this reflects whichever insert has actually run by then) are merged
+      // in too. That merge is what lets this double catch the current-turn-duplicated-into-
+      // its-own-history bug: read-then-insert (the fix) sees none of its own row, while
+      // insert-then-read (the bug) would see it.
+      if (name === "chat_messages" && cols?.includes("retrieval_meta")) {
+        return chain(() => {
+          const already = (inserted.chat_messages ?? []).map((r) => ({
+            role: r.role as string,
+            content: r.content as string,
+            created_at: new Date().toISOString(),
+            retrieval_meta: (r.retrieval_meta as HistoryRow["retrieval_meta"]) ?? null,
+          }));
+          return { data: [...(opts.history ?? []), ...already], error: null };
+        });
+      }
+      if (name === "tags" && cols?.includes("id, name")) {
+        return chain(() => ({ data: [], error: null }));
+      }
+      if (name === "note_tags" && cols === "tag_id") {
+        return chain(() => ({ data: [], error: null }));
+      }
+      throw new Error(`dbs() double: unhandled select on "${name}" (cols: ${String(cols)})`);
+    },
+    insert: (row: Record<string, unknown>) => insertChain(name, row),
+    update: () => chain(() => ({ data: null, error: null })),
+    upsert: () => chain(() => ({ data: null, error: null })),
+  });
+
+  const client = {
+    from: (n: string) => table(n),
+    rpc: async (fn: string) =>
+      fn === "usage_month_to_date_usd"
+        ? { data: opts.over ? 999 : 0, error: null }
+        : { data: [], error: null },
+  } as unknown as SupabaseClient;
+
+  return { client, inserted };
+}
+
+const collect = async (gen: AsyncGenerator<AssistantEvent>) => {
+  const out: AssistantEvent[] = [];
+  for await (const e of gen) out.push(e);
+  return out;
+};
+
+const ai = () =>
+  createFakeAi({
+    generateJson: async () => ({
+      value: { intent: "statement", complexity: "simple", domain: "health", domain_meta: {}, tags: [] },
+      inputTokens: 5, outputTokens: 2, model: "fake-classify",
+    }),
+    generateStream: async () => ({
+      chunks: (async function* () { yield { text: "Đã " }; yield { text: "lưu." }; })(),
+      usage: () => ({ inputTokens: 20, outputTokens: 4, model: "fake-answer" }),
+    }),
+  });
+
+describe("runTurn", () => {
+  it("emits attached, citations, tokens and done", async () => {
+    const { client } = dbs();
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+    const types = events.map((e) => e.type);
+    expect(types).toContain("attached");
+    expect(types).toContain("citations");
+    expect(types.filter((t) => t === "token").length).toBeGreaterThan(0);
+    expect(types.at(-1)).toBe("done");
+  });
+
+  // The circuit breaker bounds a runaway; it must never cost the user their note or the
+  // context around it.
+  it("declines the answer when over budget, after still attaching and retrieving", async () => {
+    const { client } = dbs({ over: true });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", budgetUsd: 1 },
+    ));
+    const types = events.map((e) => e.type);
+    expect(types).toContain("attached");
+    expect(types).toContain("citations");
+    expect(types).toContain("declined");
+    expect(types).not.toContain("token");
+  });
+
+  // Finding 1 (Stage C1 review round 1): a rejected retrieval used to become `[]` with no log
+  // line anywhere, and the prompt then rendered "The user has no notes matching this." -- a
+  // false claim, since the search failed rather than genuinely finding nothing.
+  it("logs a rejected retrieval and tells the model the search failed, not that there are none", async () => {
+    const { client } = dbs();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let seen = "";
+    const broken = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", complexity: "simple", domain: "health", domain_meta: {}, tags: [] },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      embed: async () => { throw new Error("embed exploded"); },
+      generateStream: async ({ prompt }) => {
+        seen = prompt;
+        return { chunks: (async function* () { yield { text: "ok" }; })(), usage: () => null };
+      },
+    });
+    try {
+      const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: broken },
+        { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+      // The wire event is untouched by this fix -- still `[]` + degraded: true.
+      const citationsEvent = events.find((e) => e.type === "citations");
+      expect(citationsEvent).toMatchObject({ citations: [], degraded: true });
+      // But the PROMPT must say something true, not "no notes matching".
+      expect(seen).toMatch(/could not be searched/i);
+      expect(seen).not.toMatch(/no notes matching/i);
+      const logged = spy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("[assistant] retrieval failed");
+      expect(logged).toContain("embed exploded");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // The other half of Finding 1: a thrown extraction was equally silent, and indistinguishable
+  // in the logs from a `withDeadline` timeout (there were no logs for either).
+  it("logs a rejected extraction instead of staying silent", async () => {
+    const { client } = dbs();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const brokenAi = createFakeAi({
+      generateJson: async () => { throw new Error("classify exploded"); },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "ok" }; })(),
+        usage: () => null,
+      }),
+    });
+    try {
+      await collect(runTurn({ userDb: client, serviceDb: client, ai: brokenAi },
+        { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+      const logged = spy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("[assistant] extraction failed");
+      expect(logged).toContain("classify exploded");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("still answers when classification fails, marking attached as degraded", async () => {
+    const { client } = dbs();
+    const brokenAi = createFakeAi({
+      generateJson: async () => { throw new Error("classify exploded"); },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "ok" }; })(),
+        usage: () => null,
+      }),
+    });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: brokenAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+    const attached = events.find((e) => e.type === "attached");
+    expect(attached).toMatchObject({ degraded: true });
+    expect(events.map((e) => e.type)).toContain("token");
+  });
+
+  // This scripts `usage()` returning a value AFTER the chunk iterator throws -- something the
+  // real Gemini client (packages/core/src/ai/gemini.ts's openStream) cannot do: usageMetadata
+  // only ever arrives on the FINAL SSE event, so a socket death before that event means `usage`
+  // (the closure variable) was never assigned and `stream.usage()` returns null, not a value.
+  // What this test actually pins is runTurn's OWN branch -- "bill whenever `streamUsage` is
+  // truthy, independent of whether the stream finished" -- using a value the fake CAN produce
+  // but the real client never will. It documents that code path, not a guarantee that a real
+  // failed stream is ever billed; the next test (with `usage: () => null`, the shape the real
+  // client actually produces on a mid-stream death) pins the far more common case.
+  it("records the answer's usage even when the stream fails part-way", async () => {
+    const { client, inserted } = dbs();
+    const failing = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "question", complexity: "simple", domain: null, domain_meta: {}, tags: [] },
+        inputTokens: 5, outputTokens: 2, model: "fake-classify",
+      }),
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "half" }; throw new Error("socket died"); })(),
+        usage: () => ({ inputTokens: 30, outputTokens: 3, model: "fake-answer" }),
+      }),
+    });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: failing },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+    expect(events.map((e) => e.type)).toContain("error");
+    const chatRows = inserted.usage_ledger ?? [];
+    expect(chatRows.some((r) => r.kind === "chat")).toBe(true);
+  });
+
+  it("marks an interrupted assistant message incomplete, so it is excluded from context", async () => {
+    const { client, inserted } = dbs();
+    const failing = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "question", complexity: "simple", domain: null, domain_meta: {}, tags: [] },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "half" }; throw new Error("socket died"); })(),
+        usage: () => null,
+      }),
+    });
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: failing },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+    const messages = inserted.chat_messages ?? [];
+    const assistantRow = messages.find((m) => m.role === "assistant");
+    expect((assistantRow?.retrieval_meta as { incomplete?: boolean })?.incomplete).toBe(true);
+  });
+
+  // Finding 2 (Stage C1 review round 1): the user's turn is written before history is read, and
+  // with no exclusion the just-inserted row IS the history -- renderHistory then shows the model
+  // its own current note/question a second time, mislabeled as something that already happened.
+  it("does not duplicate the current turn's own message into its history", async () => {
+    const { client } = dbs();
+    let seen = "";
+    const capturing = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", complexity: "simple", domain: "health", domain_meta: {}, tags: [] },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async ({ prompt }) => {
+        seen = prompt;
+        return { chunks: (async function* () { yield { text: "ok" }; })(), usage: () => null };
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: capturing },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+    // No real prior turns exist in this fixture (opts.history defaults to []), so a correct
+    // history read is empty and renderHistory emits no section at all. The bug would have this
+    // read back the note it just wrote and render one.
+    expect(seen).not.toMatch(/earlier in this conversation/i);
+    expect(seen.match(new RegExp(NOTE.content_text, "g"))?.length ?? 0).toBe(1);
+  });
+
+  it("keeps an interrupted earlier answer out of the prompt", async () => {
+    const { client } = dbs({ history: [
+      { role: "assistant", content: "TRUNCATED-EARLIER-ANSWER",
+        created_at: new Date().toISOString(), retrieval_meta: { incomplete: true } },
+    ] });
+    let seen = "";
+    const capturing = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "question", complexity: "simple", domain: null, domain_meta: {}, tags: [] },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async ({ prompt }) => {
+        seen = prompt;
+        return { chunks: (async function* () { yield { text: "ok" }; })(), usage: () => null };
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: capturing },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+    expect(seen).not.toContain("TRUNCATED-EARLIER-ANSWER");
+  });
+});

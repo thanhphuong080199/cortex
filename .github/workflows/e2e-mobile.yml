@@ -105,6 +105,7 @@ jobs:
             echo "GEMINI_API_KEY=ci-dummy-key-no-e2e-run-may-reach-the-real-api"
             echo "GEMINI_TIER=free"
             echo "ENRICH_MONTHLY_BUDGET_USD=5"
+            echo "ASSISTANT_MONTHLY_BUDGET_USD=5"
             echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=$ANON_KEY"
           } >> "$GITHUB_ENV"
 
