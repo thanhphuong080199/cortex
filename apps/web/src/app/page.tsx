@@ -5,11 +5,11 @@ import { noteDomain } from "@cortex/shared";
 import {
   NOTE_VIEWS, VIEW_LABELS, applyNoteFilters, noteSelect, parseNoteFilters,
 } from "@/lib/note-views";
+import { AssistantBox } from "./assistant-box";
 import { CheckinWidget } from "./checkin-widget";
 import { ExportButton } from "./export-button";
 import { MediaLogPanel } from "./media-log-panel";
 import { NoteList, type NoteRow } from "./note-list";
-import { QuickCapture } from "./quick-capture";
 
 export default async function Home(
   { searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> },
@@ -68,7 +68,7 @@ export default async function Home(
           textarea, which is the friction that kills mood logging (spec §3). */}
       <CheckinWidget token={session.access_token} />
 
-      <QuickCapture token={session.access_token} />
+      <AssistantBox token={session.access_token} />
 
       <MediaLogPanel token={session.access_token} />
 
