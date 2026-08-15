@@ -1,0 +1,85 @@
+import { Body, Controller, Inject, Post, Req, Res, UseGuards } from "@nestjs/common";
+import type { Request, Response } from "express";
+import type { AiClient } from "@cortex/core";
+import { createServiceClient, createUserClient, errorMessage, runTurn } from "@cortex/core";
+import { assistantInput, type AssistantInput } from "@cortex/shared";
+import { AI_CLIENT } from "./ai-client.provider";
+import { CurrentUser } from "./auth/current-user.decorator";
+import type { AuthedUser } from "./auth/supabase-auth.guard";
+import { SupabaseAuthGuard } from "./auth/supabase-auth.guard";
+import { parseApiEnv } from "./env";
+import { ZodValidationPipe } from "./zod-validation.pipe";
+
+@Controller("assistant")
+@UseGuards(SupabaseAuthGuard)
+export class AssistantController {
+  // Service-role, singleton, for search_notes and the ledger only. Every user-facing read and
+  // write in the turn goes through createUserClient with the caller's JWT -- RLS is the
+  // enforcement, per spec §11.
+  private readonly serviceDb = createServiceClient();
+
+  constructor(@Inject(AI_CLIENT) private readonly ai: AiClient) {}
+
+  /**
+   * Deliberately NOT an eager `private readonly env = parseApiEnv(process.env)` class field.
+   * Nest instantiates every controller listed in a module's `controllers` array at
+   * `app.init()` time -- including during every OTHER e2e suite's boot via
+   * test/harness.ts's bootstrapTestApp(), which every e2e suite in this repo goes through. An
+   * eager field initializer would run parseApiEnv (and its ZodError if
+   * ASSISTANT_MONTHLY_BUDGET_USD is missing or invalid) at boot for all of them, not only for
+   * a request that actually hits POST /assistant -- the exact trap ai-client.provider.ts's
+   * createLazyGeminiAi documents and avoids for GEMINI_API_KEY/GEMINI_TIER. Parsing here,
+   * inside the handler, defers it to request time; it is not cached the way
+   * createLazyGeminiAi's real client is, because a zod parse of a handful of already-string
+   * env vars is cheap enough per request not to need it.
+   */
+  private env() {
+    return parseApiEnv(process.env);
+  }
+
+  @Post()
+  async assist(
+    @CurrentUser() user: AuthedUser,
+    @Body(new ZodValidationPipe(assistantInput)) body: AssistantInput,
+    @Req() req: Request,
+    @Res() res: Response,
+  ): Promise<void> {
+    const budgetUsd = this.env().ASSISTANT_MONTHLY_BUDGET_USD;
+
+    res.setHeader("content-type", "text/event-stream");
+    res.setHeader("cache-control", "no-cache, no-transform");
+    res.setHeader("connection", "keep-alive");
+    res.flushHeaders();
+
+    // Closing the tab must actually stop the work. Without this the answer streams to
+    // completion into a socket nobody is reading, and we pay for all of it.
+    const abort = new AbortController();
+    req.on("close", () => abort.abort());
+
+    try {
+      for await (const event of runTurn(
+        { userDb: createUserClient(user.token), serviceDb: this.serviceDb, ai: this.ai },
+        {
+          userId: user.id,
+          noteId: body.noteId,
+          sessionId: body.sessionId,
+          budgetUsd,
+          signal: abort.signal,
+        },
+      )) {
+        if (res.writableEnded) break;
+        const { type, ...data } = event;
+        res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+      }
+    } catch (err) {
+      // Headers are already sent, so there is no status code left to set -- the only way to
+      // report a failure is inside the stream. Never the raw error: it can carry model output.
+      console.error(`[assistant] turn failed: ${errorMessage(err)}`);
+      if (!res.writableEnded) {
+        res.write(`event: error\ndata: ${JSON.stringify({ message: "the turn failed" })}\n\n`);
+      }
+    } finally {
+      if (!res.writableEnded) res.end();
+    }
+  }
+}

@@ -1,3 +1,4 @@
+export * from "./assistant.js";
 export * from "./checkins.js";
 export * from "./domains.js";
 export * from "./media.js";
