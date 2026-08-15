@@ -89,7 +89,22 @@ export const CLASSIFY_MODEL = "gemini-3.5-flash-lite";
 // The flash-lite figures the brief drafted ($0.10/$0.40) are stale -- they match the
 // deprecated gemini-2.5-flash-lite tier. Current standard (non-batch) pricing: embedding is
 // input-only (no output charge); flash-lite is $0.30 input / $2.50 output per 1M tokens.
+// Reasoning: answering a question from the user's notes. Life-domains spec §1 says "Gemini 3
+// Pro", which is a model FAMILY, not an API id -- verified against
+// ai.google.dev/gemini-api/docs/models on 2026-08-15. The family has moved on since
+// CLASSIFY_MODEL was pinned (2026-08-10): the current Pro-tier id is a 3.1 preview release,
+// not a bare "gemini-3-pro" -- so treat any older doc in this repo spelling the id as
+// "gemini-3-pro" the same way CLASSIFY_MODEL's header already treats "Gemini 3 Flash": a
+// family name, never something to call the API with.
+export const ANSWER_MODEL = "gemini-3.1-pro-preview";
+// Reverified directly against ai.google.dev/gemini-api/docs/pricing on 2026-08-15, standard
+// (non-batch) tier, prompts <= 200k tokens (Cortex notes and chat context never approach that):
+// $2.00 input / $12.00 output per 1M tokens. The docs also list a > 200k-token tier ($4.00 /
+// $18.00) that does not apply here and is deliberately not encoded -- MODEL_PRICES_USD_PER_MTOK
+// has no room for a size-conditional rate, and adding one would be guessing at usage this
+// codebase never sends.
 export const MODEL_PRICES_USD_PER_MTOK: Record<string, { input: number; output: number }> = {
   "gemini-embedding-001": { input: 0.15, output: 0 },
   "gemini-3.5-flash-lite": { input: 0.3, output: 2.5 },
+  "gemini-3.1-pro-preview": { input: 2.0, output: 12.0 },
 };
