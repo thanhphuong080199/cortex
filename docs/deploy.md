@@ -1194,11 +1194,19 @@ logged-in CLI session — both platforms return an authorization error for that
 - **Railway**: prefer a **project token**, not a personal one — Project → Settings →
   Tokens → scope it to `cortex-api`'s `production` environment. A personal account token
   works too but grants access to every project on the account, not just this one.
-- **Vercel**: Account Settings → Tokens → Create Token. Vercel does not offer a
-  project-scoped token; this one is account-wide by design on their side. `deploy-web`
-  pins the target with `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` env vars in the workflow
-  (not secret — just IDs, matching `apps/web/.vercel/project.json`), so the token only
-  needs to be *valid*, not scoped, for the deploy to land on the right project.
+- **Vercel**: [vercel.com/account/tokens](https://vercel.com/account/tokens) — **the
+  dashboard's scope selector (top-left) must be on your personal account, not a team**,
+  or this page isn't reachable the same way. Create → name it → Scope dropdown → the
+  team that owns the project (`phillip7`) → the **`web`** project specifically (not "All
+  Projects", which creates a team-wide token instead) → set an expiration → Create.
+  This makes a genuinely **project-scoped token** (`vcp_...`), contrary to what an
+  earlier version of this doc claimed — Vercel does support scoping to one project, it's
+  just not reachable from `vercel tokens add` on the CLI (that command, and the REST API's
+  equivalent, both require a full-account token to call; a project-scoped token cannot
+  mint new tokens, which is why creating one has to start from the dashboard). `deploy-web`
+  still pins `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` in the workflow regardless (not secret —
+  just IDs, matching `apps/web/.vercel/project.json`), so the deploy target is explicit
+  either way.
 
 Until both secrets exist, `deploy-api`/`deploy-web` will run and fail (not silently skip) —
 that's deliberate, so a missing secret is loud in the Actions tab rather than a deploy that
