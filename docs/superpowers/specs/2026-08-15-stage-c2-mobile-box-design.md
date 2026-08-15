@@ -301,6 +301,13 @@ The stage is one PR; the ordering is what keeps it recoverable.
    count the chunks. Expo Go cannot answer this. If the body arrives as one piece, the contract
    grows a non-streaming JSON response and the box shows a thinking state instead — and learning
    that at task 1 is far cheaper than learning it at task 8.
+
+   **Spike result 2026-08-15:** not run — no Android device or emulator was available in the
+   implementation environment. By explicit ruling, the streaming design below stands unverified
+   on a real device rather than blocking the rest of the stage on hardware access. Task 6 ships
+   the streaming implementation as written; the risk this defers is a box that renders a "thinking"
+   state for longer than expected rather than token-by-token, if a real device turns out to
+   buffer the body — not a crash, and cheap to catch on the first real device run.
 2. `readEvents` → `@cortex/shared`, with the web box importing it (behaviour unchanged).
 3. `captureNote` takes an id; `assistantInput` takes `content`/`createdAt`; `runTurn`
    get-or-creates. Server-side, testable, nothing on screen yet.
