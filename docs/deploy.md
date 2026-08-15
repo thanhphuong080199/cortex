@@ -1146,6 +1146,58 @@ before the next deploy: most of its entries produce no error anywhere.
 
 ---
 
+## Web — Vercel deploy checklist
+
+This section did not exist before Stage C1 Task 10 — the web app is deployed on Vercel (a
+linked project, visible locally as `.vercel/project.json`: `projectName: "web"`,
+`framework: "nextjs"`, `rootDirectory: "apps/web"`, production URL
+`https://web-tan-nu-96.vercel.app`), but nothing about it had been written down here. What
+follows is what could be established from the linked project config and the CLI, not a fresh
+setup guide — unlike Supabase/Google/Railway above, provisioning this project is not part of
+this checklist.
+
+| Item | Value | Already true? |
+| --- | --- | --- |
+| Framework preset | Next.js (auto-detected) | yes |
+| Root Directory | `apps/web` | yes |
+| Build Command | `cd ../.. && pnpm turbo run build --filter=@cortex/web` | **pinned by Task 10** — see below |
+| `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | set on the Vercel project | assumed — the production URL serves a working, signed-in app, which is not reachable with any of the three unset; not independently re-verified by this task |
+
+### Why the Build Command needed pinning
+
+Before Task 10 the Build Command was unset (`null` in `project.json`), so Vercel ran its own
+default. That default currently works — Vercel's own Turborepo detection walks up from
+`rootDirectory` and runs the monorepo build, which resolves `@cortex/shared`'s workspace
+dependency correctly. But a **bare** `next build` (no turbo, no dependency graph) fails:
+`packages/shared`'s `package.json` points `main` at `./dist/index.js`, and nothing produces
+that directory except `packages/shared`'s own `build` script — `next build` on its own never
+runs it. Pinning the command explicitly removes the dependence on Vercel's inference ever
+staying correct.
+
+```
+cd ../.. && pnpm turbo run build --filter=@cortex/web
+```
+
+(`cd ../..` is relative to the Root Directory, `apps/web`, landing back at the repo root where
+`turbo` and the workspace live.)
+
+**Not applied by this task.** Changing a live Vercel project's build settings is a
+dashboard-equivalent mutation this agent's sandbox explicitly blocks (`vercel project update`
+was denied by the harness's own auto-mode classifier, the same way Steps 2–4/6 above require a
+human with browser access). Set it by hand:
+
+- Dashboard: Project **web** → Settings → Build & Development Settings → Build Command → paste
+  the command above, override the framework default, Save.
+- Or CLI, from a session that allows project mutations:
+  ```bash
+  vercel project update web --build-command "cd ../.. && pnpm turbo run build --filter=@cortex/web"
+  ```
+
+Until one of those runs, the "Already true?" cell above stays aspirational, not verified —
+re-check `apps/web/.vercel/project.json`'s `buildCommand` field (`vercel pull`) after applying it.
+
+---
+
 ## Is there CI/CD? (No — deploys are manual)
 
 **Merging to `main` deploys nothing.** Verified 2026-08-01 on both sides:

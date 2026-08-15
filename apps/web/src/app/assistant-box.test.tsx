@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantBox } from "./assistant-box";
 
@@ -81,5 +81,62 @@ describe("AssistantBox", () => {
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
     expect(await screen.findByText(/no answer/i)).toBeInTheDocument();
+  });
+
+  // The other half of "a dead assistant must never cost a capture": this is the case where
+  // the SAVE ITSELF never happened, not just the answer. It must read differently from
+  // "Saved. No answer right now." -- that message would be a lie here -- and the text must
+  // stay put so the only thing the user has to do is retry.
+  it("keeps the text and offers a retry when the save itself fails", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url));
+      return new Response("boom", { status: 500 });
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    const textarea = screen.getByLabelText(/what are you thinking/i);
+    await userEvent.type(textarea, "ghi chú chưa lưu");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    const error = await screen.findByRole("alert");
+    expect(error).toHaveTextContent(/couldn't save/i);
+    expect(within(error).getByRole("button", { name: /retry/i })).toBeInTheDocument();
+
+    // Never cleared: the text is still there to retry, unlike the success path.
+    expect(textarea).toHaveValue("ghi chú chưa lưu");
+    // The stream must never be reached when the save itself never happened.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatch(/\/notes$/);
+  });
+
+  it("retrying re-submits the same text and can succeed the second time", async () => {
+    const calls: string[] = [];
+    let noteAttempt = 0;
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url));
+      if (String(url).endsWith("/notes")) {
+        noteAttempt += 1;
+        return noteAttempt === 1
+          ? new Response("boom", { status: 500 })
+          : new Response(JSON.stringify({ id: "n1" }), { status: 201 });
+      }
+      return sse([["done", { messageId: "m1", sessionId: "s1" }]]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    const textarea = screen.getByLabelText(/what are you thinking/i);
+    await userEvent.type(textarea, "ghi chú chưa lưu");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    const error = await screen.findByRole("alert");
+    await userEvent.click(within(error).getByRole("button", { name: /retry/i }));
+
+    // The retry resubmitted the SAME text -- no re-typing required -- and this time the
+    // save succeeded, so the textarea clears and the stream is reached.
+    await waitFor(() => expect(textarea).toHaveValue(""));
+    expect(calls.filter((u) => u.endsWith("/notes"))).toHaveLength(2);
+    expect(calls.filter((u) => u.endsWith("/assistant"))).toHaveLength(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

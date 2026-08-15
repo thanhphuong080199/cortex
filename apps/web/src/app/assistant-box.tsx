@@ -57,6 +57,10 @@ export function AssistantBox({ token }: { token: string }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  // Separate from `status`: `status` covers outcomes AFTER the note is saved (a dead stream,
+  // a budget decline). `error` covers the save itself failing -- nothing was written, so it
+  // reads differently ("Couldn't save") and, unlike `status`, the text must not be cleared.
+  const [error, setError] = useState<string | null>(null);
   const [attached, setAttached] = useState<Attached | null>(null);
   const [citations, setCitations] = useState<Citation[]>([]);
   const [answer, setAnswer] = useState("");
@@ -75,15 +79,27 @@ export function AssistantBox({ token }: { token: string }) {
     if (!text.trim() || busy) return;
     setBusy(true);
     setStatus(null);
+    setError(null);
     setAttached(null);
     setCitations([]);
     setAnswer("");
-    try {
-      // FIRST, and awaited. The note is the deliverable; the answer is a bonus. Clearing the
-      // textarea only after this resolves is why a capture box never loses a thought.
-      const note = await api.createNote(token, { content: text });
-      setText("");
 
+    let note: { id: string };
+    try {
+      // FIRST, and awaited, in its OWN try/catch. The note is the deliverable; the answer is
+      // a bonus. Nothing was saved if this throws, so it returns before ever touching `text`
+      // or the SSE fetch -- the retry button below just resubmits what's still in state.
+      note = await api.createNote(token, { content: text });
+    } catch {
+      setError("Couldn't save — your text is still here.");
+      setBusy(false);
+      return;
+    }
+
+    // Cleared only after createNote resolves -- a capture box never loses a thought.
+    setText("");
+
+    try {
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/assistant`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -103,7 +119,7 @@ export function AssistantBox({ token }: { token: string }) {
         else if (ev.type === "error") setStatus("Saved. No answer right now.");
       }
     } catch {
-      // The note may well have been created before this threw. Never say it was lost.
+      // The note was already saved above -- only the stream failed. Never say it was lost.
       setStatus("Saved. No answer right now.");
     } finally {
       setBusy(false);
@@ -146,7 +162,13 @@ export function AssistantBox({ token }: { token: string }) {
 
       {answer && <p className="answer">{answer}</p>}
 
-      {status && <p className="hint" role="status">{status}</p>}
+      {error ? (
+        <p className="error" role="alert">
+          {error} <button type="button" onClick={() => void submit()}>Retry</button>
+        </p>
+      ) : (
+        status && <p className="hint" role="status">{status}</p>
+      )}
     </div>
   );
 }
