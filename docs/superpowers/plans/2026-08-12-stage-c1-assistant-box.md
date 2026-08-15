@@ -979,7 +979,9 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Context.** `selectContext` and `isStale` are pure so they can be tested without Docker. Session resolution against the database lives in Task 7, which is where the client is.
 
-Estimating tokens as `chars/4` here is the same English-biased estimate `00027`'s header records — and here it is **safe**, because under-counting Vietnamese means the window holds fewer real tokens than budgeted, never more. Erring small is the harmless direction for a prompt budget.
+Estimating tokens as `chars/4` here is the same English-biased estimate `00027`'s header records, and it is **not** safe in the direction this plan originally claimed. Under-counting does not mean the window holds fewer real tokens than budgeted — it means the filler keeps accepting turns while real tokens accumulate faster than the estimate, so the window holds **more**. `docs/phase-2-issue-log.md` H3 measures Vietnamese at 2–3 characters per token, so filling to 2000 estimated tokens is nearer 3300–4000 real ones. The per-turn framing the renderer adds and does not charge pushes the same way.
+
+The estimator stays `chars/4` regardless: replacing a known-wrong divisor with a guessed one is the trade H3 already rejected, and 2000 is a self-imposed window, not a model limit — overshooting it costs input tokens, it does not fail the request. What must not survive is the *reason*. Treat 2000 as a soft target that runs over, and never as headroom Task 6 can spend.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1064,9 +1066,12 @@ export interface ThreadTurn {
   createdAt: string;
 }
 
-// chars/4 -- the same English-biased estimate 00027's header records, and SAFE here in a way
-// it is not in the ledger: under-counting Vietnamese means the window holds fewer real tokens
-// than budgeted, never more. Erring small is the harmless direction for a prompt budget.
+// chars/4 -- the same English-biased estimate 00027's header records, and it errs the SAME
+// way here as it does in the ledger, not the opposite way: under-counting means this filler
+// accepts turns until the real token count is past the budget, not short of it. H3 in
+// docs/phase-2-issue-log.md measures Vietnamese at 2-3 chars/token, so a full 2000-token
+// window is nearer 3300-4000 real tokens. Kept anyway -- guessing a better divisor is the
+// trade H3 rejected, and 2000 is our own window, not a model limit.
 const estimateTokens = (s: string) => Math.ceil(s.length / 4);
 
 /**
@@ -1123,8 +1128,9 @@ Filled newest-first and then reversed, so the budget protects recent context
 while the prompt still reads chronologically.
 
 chars/4 is the same English-biased estimate the ledger records as wrong, and it
-is safe here for the opposite reason: under-counting Vietnamese means the window
-holds fewer real tokens than budgeted, never more.
+errs the same way here rather than the opposite way: under-counting means the
+filler accepts turns until the real count is past 2000, not short of it. Kept
+anyway, because 2000 is our own window and not a model limit.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
