@@ -1160,7 +1160,7 @@ this checklist.
 | --- | --- | --- |
 | Framework preset | Next.js (auto-detected) | yes |
 | Root Directory | `apps/web` | yes |
-| Build Command | `cd ../.. && pnpm turbo run build --filter=@cortex/web` | **pinned by Task 10** — see below |
+| Build Command | `cd ../.. && pnpm turbo run build --filter=@cortex/web` | **not yet applied** — pinning was denied by the sandbox's live-infra guard; see below |
 | `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | set on the Vercel project | assumed — the production URL serves a working, signed-in app, which is not reachable with any of the three unset; not independently re-verified by this task |
 
 ### Why the Build Command needed pinning
