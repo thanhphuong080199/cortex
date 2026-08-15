@@ -8,7 +8,7 @@ import { CheckinWidget } from "@/screens/checkin-widget";
 import { ExportButton } from "@/screens/export-button";
 import { MediaLogForm } from "@/screens/media-log-form";
 import { NoteList } from "@/screens/note-list";
-import { QuickCapture } from "@/screens/quick-capture";
+import { AssistantBox } from "@/screens/assistant-box";
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
@@ -72,7 +72,7 @@ export default function Home() {
           <NoteList
             header={
               <>
-                <QuickCapture />
+                <AssistantBox />
                 <CheckinWidget />
                 <MediaLogForm />
               </>
