@@ -31,6 +31,32 @@ describe("selectContext", () => {
     expect(selectContext(descending).map((t) => t.content)).toEqual(["oldest", "middle", "newest"]);
   });
 
+  // `localeCompare` collates `.` and `+` as punctuation rather than by code point, so it ranks
+  // the whole-second spelling AFTER the .113 that follows it. Both spellings arrive from
+  // PostgREST, which renders a row landing on a whole second with no fractional digits, so the
+  // pair is ordinary data and not a contrived string.
+  it("orders a whole-second timestamp before the fractional second that follows it", () => {
+    const whole: ThreadTurn = {
+      role: "user", content: "whole", createdAt: "2026-08-12T08:00:01+00:00",
+    };
+    const fractional: ThreadTurn = {
+      role: "assistant", content: "fractional", createdAt: "2026-08-12T08:00:01.113+00:00",
+    };
+    expect(selectContext([fractional, whole]).map((t) => t.content)).toEqual([
+      "whole", "fractional",
+    ]);
+  });
+
+  // Regressing the copy to `turns.sort(...)` reorders the caller's array in place, and nothing
+  // else here catches it: the desc/asc test evaluates `selectContext(descending)` first, so an
+  // in-place sort repairs the input before the second call reads it.
+  it("does not mutate the caller's array", () => {
+    const turns = [turn("user", "newest", 10), turn("assistant", "middle", 20), turn("user", "oldest", 30)];
+    const snapshot = [...turns];
+    selectContext(turns);
+    expect(turns).toEqual(snapshot);
+  });
+
   // The contiguity invariant. A window with a hole in it hands the model a conversation whose
   // middle is missing, which reads as a non-sequitur rather than as missing context -- so the
   // walk STOPS at the first over-budget turn instead of skipping it to reach older ones.
