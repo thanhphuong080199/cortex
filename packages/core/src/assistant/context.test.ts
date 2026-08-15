@@ -21,6 +21,25 @@ describe("selectContext", () => {
     expect(kept.some((t) => t.content === "tiny")).toBe(true);
   });
 
+  // Task 7 queries the thread as `order by created_at desc limit N`. Position must not be the
+  // recency signal, or that natural query shape silently fills the budget with the OLDEST
+  // turns and returns them newest-first -- no error, no empty result, just wrong context.
+  it("orders by createdAt, not by array position, so a created_at desc query is safe", () => {
+    const ascending = [turn("user", "oldest", 30), turn("assistant", "middle", 20), turn("user", "newest", 10)];
+    const descending = [...ascending].reverse();
+    expect(selectContext(descending)).toEqual(selectContext(ascending));
+    expect(selectContext(descending).map((t) => t.content)).toEqual(["oldest", "middle", "newest"]);
+  });
+
+  // The contiguity invariant. A window with a hole in it hands the model a conversation whose
+  // middle is missing, which reads as a non-sequitur rather than as missing context -- so the
+  // walk STOPS at the first over-budget turn instead of skipping it to reach older ones.
+  it("stops at the first over-budget turn rather than skipping it to reach older ones", () => {
+    const huge = "z".repeat(4 * (CONTEXT_TOKEN_BUDGET + 500));
+    const turns = [turn("user", "small_old", 30), turn("assistant", huge, 20), turn("user", "small_new", 10)];
+    expect(selectContext(turns).map((t) => t.content)).toEqual(["small_new"]);
+  });
+
   // Whole turns only: half an exchange is worse context than none, because the model reads a
   // truncated question as the whole question.
   it("never includes a partial turn", () => {
