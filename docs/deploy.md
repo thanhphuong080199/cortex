@@ -624,6 +624,7 @@ a crash loop rather than a healthy deploy with a broken feature.
 | `GEMINI_API_KEY` | ✅ **2** | A **paid-tier** key. The 1c note saying "do not add this yet" expired when phase 2 shipped. |
 | `GEMINI_TIER` | ✅ **2** | Literally `free` or `paid`; anything else fails the schema. Must be `paid` in production — enforced, [see below](#gemini_tier-must-be-paid-in-production-and-that-is-enforced-not-advised). |
 | `ENRICH_MONTHLY_BUDGET_USD` | ✅ **2** | A positive number, e.g. `10`. Caps the **enrichment sweep** only — search is metered against the same ledger but never blocked by it, [see below](#the-budget-caps-the-sweep-search-is-metered-but-not-gated). |
+| `ASSISTANT_MONTHLY_BUDGET_USD` | ✅ **Stage C1** | A positive number, e.g. `10`. A circuit breaker, not a budget — it gates `POST /assistant` specifically (the one-box chat turn), set generously since refusing to answer is a UX failure. Independent of `ENRICH_MONTHLY_BUDGET_USD`; both read the same `usage_ledger`. |
 | `CORS_ORIGINS` | ✅ in practice | Optional in the schema (it falls back to localhost dev origins), but a deployed API without the real web origin blocks every browser write. |
 | `SUPABASE_JWT_SECRET` | ❌ must stay **unset** | Setting it forces the HS256 branch, which rejects the project's real ES256 tokens — every request 401s. |
 | `PORT` | ❌ leave to Railway | Railway injects it; setting it by hand only creates a way to disagree with the platform. |

@@ -17,12 +17,20 @@ const renderHistory = (history: ThreadTurn[]) =>
         .map((t) => `${t.role === "user" ? "User" : "You"}: ${t.content}`)
         .join("\n")}`;
 
-const renderCitations = (citations: Citation[]) =>
-  citations.length === 0
-    ? "\n\nThe user has no notes matching this."
-    : `\n\nThe user's own notes:\n${citations
-        .map((c, i) => `[${i + 1}] ${c.title ? `${c.title}: ` : ""}${c.snippet}`)
-        .join("\n")}`;
+// `"failed"` is a distinct third state from an empty array, and the distinction is the whole
+// point: an empty array means retrieval RAN and genuinely found nothing, while `"failed"` means
+// retrieval never ran to completion (the search RPC or the embed call threw). Collapsing the two
+// into "no citations" makes the model assert "the user has no notes matching this" on a turn
+// where the server never actually got to look -- a false claim, not a hedge.
+const renderCitations = (citations: Citation[] | "failed") =>
+  citations === "failed"
+    ? "\n\nThe user's notes could not be searched right now (a technical failure, not an empty " +
+      "corpus). Say so plainly. Do not claim they have no notes on this."
+    : citations.length === 0
+      ? "\n\nThe user has no notes matching this."
+      : `\n\nThe user's own notes:\n${citations
+          .map((c, i) => `[${i + 1}] ${c.title ? `${c.title}: ` : ""}${c.snippet}`)
+          .join("\n")}`;
 
 /**
  * Answering never invents (life-domains spec §6.1): answer from the user's notes first, say so
@@ -30,7 +38,7 @@ const renderCitations = (citations: Citation[]) =>
  */
 export function buildAnswerPrompt(a: {
   question: string;
-  citations: Citation[];
+  citations: Citation[] | "failed";
   history: ThreadTurn[];
 }): string {
   return [
@@ -54,7 +62,7 @@ export function buildAcknowledgePrompt(a: {
   note: string;
   domain: string | null;
   tags: string[];
-  related: Citation[];
+  related: Citation[] | "failed";
   history: ThreadTurn[];
 }): string {
   return [

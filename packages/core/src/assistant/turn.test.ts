@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
@@ -69,9 +69,22 @@ function dbs(opts: { over?: boolean; history?: HistoryRow[] } = {}) {
       if (name === "chat_messages" && cols?.includes("session_id")) {
         return chain(() => ({ data: [], error: null }));
       }
-      // The full-history read. This is the ONLY chain `opts.history` threads into.
+      // The full-history read. `opts.history` supplies genuine PRIOR turns; rows already
+      // pushed onto `inserted.chat_messages` by this same runTurn call (read lazily, at
+      // resolve time, so this reflects whichever insert has actually run by then) are merged
+      // in too. That merge is what lets this double catch the current-turn-duplicated-into-
+      // its-own-history bug: read-then-insert (the fix) sees none of its own row, while
+      // insert-then-read (the bug) would see it.
       if (name === "chat_messages" && cols?.includes("retrieval_meta")) {
-        return chain(() => ({ data: opts.history ?? [], error: null }));
+        return chain(() => {
+          const already = (inserted.chat_messages ?? []).map((r) => ({
+            role: r.role as string,
+            content: r.content as string,
+            created_at: new Date().toISOString(),
+            retrieval_meta: (r.retrieval_meta as HistoryRow["retrieval_meta"]) ?? null,
+          }));
+          return { data: [...(opts.history ?? []), ...already], error: null };
+        });
       }
       if (name === "tags" && cols?.includes("id, name")) {
         return chain(() => ({ data: [], error: null }));
@@ -144,6 +157,64 @@ describe("runTurn", () => {
     expect(types).not.toContain("token");
   });
 
+  // Finding 1 (Stage C1 review round 1): a rejected retrieval used to become `[]` with no log
+  // line anywhere, and the prompt then rendered "The user has no notes matching this." -- a
+  // false claim, since the search failed rather than genuinely finding nothing.
+  it("logs a rejected retrieval and tells the model the search failed, not that there are none", async () => {
+    const { client } = dbs();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let seen = "";
+    const broken = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", complexity: "simple", domain: "health", domain_meta: {}, tags: [] },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      embed: async () => { throw new Error("embed exploded"); },
+      generateStream: async ({ prompt }) => {
+        seen = prompt;
+        return { chunks: (async function* () { yield { text: "ok" }; })(), usage: () => null };
+      },
+    });
+    try {
+      const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: broken },
+        { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+      // The wire event is untouched by this fix -- still `[]` + degraded: true.
+      const citationsEvent = events.find((e) => e.type === "citations");
+      expect(citationsEvent).toMatchObject({ citations: [], degraded: true });
+      // But the PROMPT must say something true, not "no notes matching".
+      expect(seen).toMatch(/could not be searched/i);
+      expect(seen).not.toMatch(/no notes matching/i);
+      const logged = spy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("[assistant] retrieval failed");
+      expect(logged).toContain("embed exploded");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // The other half of Finding 1: a thrown extraction was equally silent, and indistinguishable
+  // in the logs from a `withDeadline` timeout (there were no logs for either).
+  it("logs a rejected extraction instead of staying silent", async () => {
+    const { client } = dbs();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const brokenAi = createFakeAi({
+      generateJson: async () => { throw new Error("classify exploded"); },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "ok" }; })(),
+        usage: () => null,
+      }),
+    });
+    try {
+      await collect(runTurn({ userDb: client, serviceDb: client, ai: brokenAi },
+        { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+      const logged = spy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("[assistant] extraction failed");
+      expect(logged).toContain("classify exploded");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("still answers when classification fails, marking attached as degraded", async () => {
     const { client } = dbs();
     const brokenAi = createFakeAi({
@@ -211,6 +282,31 @@ describe("runTurn", () => {
     const messages = inserted.chat_messages ?? [];
     const assistantRow = messages.find((m) => m.role === "assistant");
     expect((assistantRow?.retrieval_meta as { incomplete?: boolean })?.incomplete).toBe(true);
+  });
+
+  // Finding 2 (Stage C1 review round 1): the user's turn is written before history is read, and
+  // with no exclusion the just-inserted row IS the history -- renderHistory then shows the model
+  // its own current note/question a second time, mislabeled as something that already happened.
+  it("does not duplicate the current turn's own message into its history", async () => {
+    const { client } = dbs();
+    let seen = "";
+    const capturing = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", complexity: "simple", domain: "health", domain_meta: {}, tags: [] },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async ({ prompt }) => {
+        seen = prompt;
+        return { chunks: (async function* () { yield { text: "ok" }; })(), usage: () => null };
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: capturing },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+    // No real prior turns exist in this fixture (opts.history defaults to []), so a correct
+    // history read is empty and renderHistory emits no section at all. The bug would have this
+    // read back the note it just wrote and render one.
+    expect(seen).not.toMatch(/earlier in this conversation/i);
+    expect(seen.match(new RegExp(NOTE.content_text, "g"))?.length ?? 0).toBe(1);
   });
 
   it("keeps an interrupted earlier answer out of the prompt", async () => {

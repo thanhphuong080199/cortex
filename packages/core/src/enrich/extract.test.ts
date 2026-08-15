@@ -278,6 +278,36 @@ describe("extractNote", () => {
     expect(links!.map((l) => l.tag_id)).not.toContain(gone!.id);
   });
 
+  // Finding 3 (Stage C1 review round 1): a live assistant turn calls extractNote too, and
+  // without this its classification spend was indistinguishable from real 60-second-sweep
+  // activity -- filed under "sweep" with no request_id, unjoinable to the turn that spent it.
+  it("attributes classification spend to the caller's source and requestId when given one", async () => {
+    const note = await seedNote("body");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [] });
+    // usage_ledger.request_id is a uuid column -- a real one, not a human-readable stand-in.
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    await extractNote({ db, ai }, { ...note, source: "assistant", requestId });
+
+    const { data } = await db.from("usage_ledger")
+      .select("source, request_id").eq("note_id", note.noteId).eq("kind", "tag").single();
+    expect(data!.source).toBe("assistant");
+    expect(data!.request_id).toBe(requestId);
+  });
+
+  // The sweep's own call site (apps/api's enrich.service.ts) never sets `source`/`requestId` on
+  // the note it hands in -- this pins that omitting both still files the call under "sweep" with
+  // no request_id, unchanged from before Finding 3's fix.
+  it("defaults classification spend to source 'sweep' with no requestId", async () => {
+    const note = await seedNote("body");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [] });
+    await extractNote({ db, ai }, note);
+
+    const { data } = await db.from("usage_ledger")
+      .select("source, request_id").eq("note_id", note.noteId).eq("kind", "tag").single();
+    expect(data!.source).toBe("sweep");
+    expect(data!.request_id).toBeNull();
+  });
+
   it("stamps extracted_hash", async () => {
     const note = await seedNote("body");
     await extractNote({ db, ai: aiReturning({ domain: null, domain_meta: {}, tags: [] }) }, note);

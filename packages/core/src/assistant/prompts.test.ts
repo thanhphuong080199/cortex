@@ -59,6 +59,24 @@ describe("buildAnswerPrompt", () => {
     expect(withNotes).not.toMatch(/no notes matching/i);
   });
 
+  // The third citations state, distinct from both neighbours: "failed" means retrieval never
+  // completed (the RPC or the embed call threw), which is a different fact from "ran and found
+  // nothing" and must not be said with the same words -- the empty-corpus line is a claim the
+  // server does not get to make when it never actually looked.
+  it("says the search itself failed, distinct from finding nothing and from finding notes", () => {
+    const failed = buildAnswerPrompt({ question: "q", citations: "failed", history: [] });
+    expect(failed).toMatch(/could not be searched/i);
+    expect(failed).not.toMatch(/no notes matching/i);
+
+    const empty = buildAnswerPrompt({ question: "q", citations: [], history: [] });
+    expect(empty).not.toMatch(/could not be searched/i);
+
+    const withNotes = buildAnswerPrompt({
+      question: "q", citations: [cite({ snippet: "first" })], history: [],
+    });
+    expect(withNotes).not.toMatch(/could not be searched/i);
+  });
+
   // The single most important string in the prompt, and the one nothing else asserts: every
   // other test here passes with the question line deleted.
   it("carries the question itself", () => {
@@ -123,6 +141,19 @@ describe("buildAcknowledgePrompt", () => {
     });
     expect(p).toMatch(/same language/i);
     expect(p).toMatch(/do not translate/i);
+  });
+
+  it("says the search itself failed, distinct from finding nothing and from finding notes", () => {
+    const failed = buildAcknowledgePrompt({
+      note: "n", domain: null, tags: [], related: "failed", history: [],
+    });
+    expect(failed).toMatch(/could not be searched/i);
+    expect(failed).not.toMatch(/no notes matching/i);
+
+    const empty = buildAcknowledgePrompt({
+      note: "n", domain: null, tags: [], related: [], history: [],
+    });
+    expect(empty).not.toMatch(/could not be searched/i);
   });
 
   it("numbers the related notes the same way the answer prompt does", () => {

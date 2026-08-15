@@ -130,7 +130,11 @@ export async function extractNote(
   // from the same model output, not only tags.
   await recordUsage(db, {
     userId: note.userId, kind: "tag", model, inputTokens, outputTokens,
-    source: "sweep", noteId: note.noteId, contentChars: note.contentText.length,
+    // Defaults preserve the sweep's own call site unchanged: it never sets `source`/`requestId`
+    // on the note it hands in, so this still lands as "sweep" with no request_id. A live
+    // assistant turn (turn.ts) passes both explicitly.
+    source: note.source ?? "sweep", noteId: note.noteId, requestId: note.requestId,
+    contentChars: note.contentText.length,
   });
 
   // ---- tags ----

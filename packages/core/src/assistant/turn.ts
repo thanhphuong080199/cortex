@@ -70,12 +70,16 @@ export async function* runTurn(
       .from("chat_sessions").insert({ user_id: args.userId }).select("id").single();
     sessionId = (created as { id: string } | null)?.id ?? sessionId ?? randomUUID();
   }
-  await userDb.from("chat_messages")
-    .insert({ user_id: args.userId, session_id: sessionId, role: "user", content: text });
-
+  // History is read BEFORE the current turn's own message is written, deliberately: writing
+  // first and reading back with no exclusion would make the just-inserted row indistinguishable
+  // from real prior conversation, and renderHistory would then show the model its own current
+  // note/question a second time, mislabeled as something that already happened.
   const { data: historyRows } = await userDb
     .from("chat_messages").select("role, content, created_at, retrieval_meta")
     .eq("session_id", sessionId).order("created_at", { ascending: false }).limit(40);
+
+  await userDb.from("chat_messages")
+    .insert({ user_id: args.userId, session_id: sessionId, role: "user", content: text });
   // No trailing reverse: `selectContext` sorts its input by `createdAt` on its own copy before
   // filling the budget (Task 5), so the order these rows arrive in does not matter here -- only
   // the filter below does.
@@ -101,6 +105,10 @@ export async function* runTurn(
     withDeadline(
       extractNote({ db: serviceDb, ai }, {
         noteId: args.noteId, userId: args.userId, contentText: text, contentHash,
+        // This call is the assistant's own classification spend, not the 60-second sweep's --
+        // filing it under "sweep" (extractNote's default) would make a live turn's cost
+        // indistinguishable from real sweep activity and unjoinable to this turn's requestId.
+        source: "assistant", requestId,
       }),
       EXTRACT_DEADLINE_MS,
     ),
@@ -108,13 +116,29 @@ export async function* runTurn(
   ]);
 
   // `withDeadline` resolves to null on timeout, so a fulfilled-but-null result is a timeout
-  // and must be treated exactly like a thrown one.
+  // and must be treated exactly like a thrown one. Both are logged (rejection and timeout give
+  // different diagnostics) so a run of degraded "attached" events is traceable instead of silent.
+  if (extraction.status === "rejected") {
+    console.error(`[assistant] extraction failed (request ${requestId}): ${errorMessage(extraction.reason)}`);
+  } else if (extraction.value === null) {
+    console.error(`[assistant] extraction timed out after ${EXTRACT_DEADLINE_MS}ms (request ${requestId})`);
+  }
   const extracted = extraction.status === "fulfilled" ? extraction.value : null;
   yield extracted
     ? { type: "attached", domain: extracted.domain, domainMeta: {}, tags: extracted.tagNames }
     : { type: "attached", domain: null, domainMeta: {}, tags: [], degraded: true };
 
+  // A rejected retrieval must not be reported to the model as an empty corpus (see prompts.ts's
+  // renderCitations): "no notes matched" and "the search failed" are different facts, and only
+  // the first one is safe to answer around. Logged here for the same reason extraction is above
+  // -- a total search_notes outage must produce log lines, not a silent stream of confident,
+  // note-free-but-not-actually-empty answers.
+  if (citationsResult.status === "rejected") {
+    console.error(`[assistant] retrieval failed (request ${requestId}): ${errorMessage(citationsResult.reason)}`);
+  }
   const citations = citationsResult.status === "fulfilled" ? citationsResult.value : [];
+  const citationsForPrompt: Citation[] | "failed" =
+    citationsResult.status === "fulfilled" ? citations : "failed";
   yield citationsResult.status === "fulfilled"
     ? { type: "citations", citations }
     : { type: "citations", citations: [], degraded: true };
@@ -131,10 +155,10 @@ export async function* runTurn(
     await userDb.from("notes").update({ source_type: "chat" }).eq("id", args.noteId);
   }
   const prompt = isQuestion
-    ? buildAnswerPrompt({ question: text, citations, history })
+    ? buildAnswerPrompt({ question: text, citations: citationsForPrompt, history })
     : buildAcknowledgePrompt({
         note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
-        related: citations, history,
+        related: citationsForPrompt, history,
       });
   const model = isQuestion ? ANSWER_MODEL : CLASSIFY_MODEL;
 
