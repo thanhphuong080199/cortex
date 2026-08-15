@@ -16,8 +16,9 @@ API Dockerfile) is already implemented and verified locally; see
 
 > **Deploying an already-provisioned environment?** Steps 1-6 are one-time setup. For
 > shipping new code to the environment that already exists, jump to
-> [Is there CI/CD?](#is-there-cicd-no--deploys-are-manual) — nothing deploys on merge,
-> and the order (schema → env vars → app) matters. Phases 1a and 1c additionally require
+> [Is there CI/CD?](#is-there-cicd-code-ships-automatically-migrations-and-env-vars-do-not) —
+> code ships automatically on merge once E2E passes, but the schema and env vars still don't,
+> and the order (schema → env vars → merge) matters. Phases 1a and 1c additionally require
 > their own checklists ([1a](#phase-1a--deploy-checklist-web-notes),
 > [1c](#phase-1c--deploy-checklist-life-domain-capture)).
 
@@ -1199,31 +1200,71 @@ re-check `apps/web/.vercel/project.json`'s `buildCommand` field (`vercel pull`) 
 
 ---
 
-## Is there CI/CD? (No — deploys are manual)
+## Is there CI/CD? (Code ships automatically; migrations and env vars do not)
 
-**Merging to `main` deploys nothing.** Verified 2026-08-01 on both sides:
+**Merging to `main` deploys the API and web app, once E2E passes — but not the schema.**
+`post-merge.yml`'s `deploy-api` and `deploy-web` jobs (added alongside the Stage C1 branch)
+run after `e2e-web`, gated on `needs.e2e-web.result == 'success'` and on a path filter (touch
+nothing under `apps/api`/`packages/core`/`packages/db`/`packages/shared`/`supabase/migrations`
+and `deploy-api` is skipped entirely; same idea for `deploy-web` and `apps/web`). Both are
+independent of `e2e-mobile` — neither app needs the mobile suite green to ship.
 
 | Layer | State | Evidence |
 | --- | --- | --- |
-| GitHub Actions | build / typecheck / lint / test / E2E only | Re-audited 2026-08-11. Five workflow files: `ci.yml` (`checks`, `db-tests`, and the `CI gate` job that branch protection requires), `e2e-web.yml`, `e2e-mobile.yml`, `post-merge.yml` (runs those two E2E suites plus an Android APK build on push to `main`), and `android-apk.yml`. **None of them deploys anything** — no `railway`/`vercel` step, no cloud credential. The original wording here said "exactly two jobs … no other workflow file", which stopped being true as workflows were added; the conclusion did not change, but check all five, not just `ci.yml`. |
-| Railway → GitHub | **not connected** | `railway status --json` reports `source: {"image": null, "repo": null}` for `cortex-api`. With no repo attached there is no push trigger, so Railway never sees a merge. |
-| Database migrations | manual | `supabase db push` is run by a human. Nothing applies migrations automatically. |
+| GitHub Actions | deploys API + web after E2E, on push to `main` | `post-merge.yml`'s `deploy-api`/`deploy-web` jobs — `railway up --service cortex-api --detach --yes` and `vercel deploy --prod` respectively, each needing its own repo secret (`RAILWAY_TOKEN`, `VERCEL_TOKEN` — see below). |
+| Railway → GitHub | still **not connected** as a native integration | `railway status --json` reports `source: {"image": null, "repo": null}` for `cortex-api` — deploys are the GitHub Actions job calling the Railway CLI directly, not Railway's own git integration. |
+| Database migrations | **still manual, deliberately** | `supabase db push` is run by a human. The deploy jobs do NOT run it — a bad migration must never apply itself just because the code that needs it happened to pass E2E. If a PR adds a migration, push it BEFORE merging, or the just-deployed code may assume a schema that isn't there yet. |
 
-So a merge to `main` gives you green checks and **a hosted environment still running the
-previous code**. Shipping is three deliberate steps, in this order:
+So a merge to `main` now ships code automatically, but **shipping a migration is still your
+job, and it goes first**:
 
 ```bash
-# 1. schema first -- new code usually assumes the new schema, not the reverse
+# 1. schema first -- new code usually assumes the new schema, not the reverse. Do this
+#    BEFORE merging a PR that includes a migration; the deploy jobs will not do it for you.
 pnpm exec supabase db push
 pnpm exec supabase migration list          # confirm local == remote
 
 # 2. env vars BEFORE the deploy that needs them (see the phase 1a checklist above).
-#    --skip-deploys avoids redeploying the OLD code just to attach a new variable.
+#    --skip-deploys avoids redeploying the OLD code just to attach a new variable -- useful
+#    when you're setting a var ahead of a merge that hasn't shipped yet.
 railway variables --service cortex-api --set-from-stdin SUPABASE_ANON_KEY --skip-deploys
 
-# 3. ship the API
-railway up --service cortex-api --detach --yes
+# 3. merge to main -- deploy-api and deploy-web take it from here, once e2e-web is green
 ```
+
+Manual deploys (`railway up` / `vercel deploy --prod` by hand) still work exactly as before,
+for anything the automatic path doesn't cover — a hotfix you want to ship without waiting on
+E2E, or a rollback.
+
+### Deploy job secrets
+
+`deploy-api` needs `RAILWAY_TOKEN` and `deploy-web` needs `VERCEL_TOKEN`, both as repo
+secrets (`gh secret set RAILWAY_TOKEN` / `gh secret set VERCEL_TOKEN`, or the GitHub UI —
+Settings → Secrets and variables → Actions). Neither could be minted from an already
+logged-in CLI session — both platforms return an authorization error for that
+(`projectTokenCreate`/`apiTokenCreate` on Railway: `Not Authorized`; `vercel tokens add`:
+`Cannot create tokens for this app (403)`) — so both have to come from the dashboard:
+
+- **Railway**: prefer a **project token**, not a personal one — Project → Settings →
+  Tokens → scope it to `cortex-api`'s `production` environment. A personal account token
+  works too but grants access to every project on the account, not just this one.
+- **Vercel**: [vercel.com/account/tokens](https://vercel.com/account/tokens) — **the
+  dashboard's scope selector (top-left) must be on your personal account, not a team**,
+  or this page isn't reachable the same way. Create → name it → Scope dropdown → the
+  team that owns the project (`phillip7`) → the **`web`** project specifically (not "All
+  Projects", which creates a team-wide token instead) → set an expiration → Create.
+  This makes a genuinely **project-scoped token** (`vcp_...`), contrary to what an
+  earlier version of this doc claimed — Vercel does support scoping to one project, it's
+  just not reachable from `vercel tokens add` on the CLI (that command, and the REST API's
+  equivalent, both require a full-account token to call; a project-scoped token cannot
+  mint new tokens, which is why creating one has to start from the dashboard). `deploy-web`
+  still pins `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` in the workflow regardless (not secret —
+  just IDs, matching `apps/web/.vercel/project.json`), so the deploy target is explicit
+  either way.
+
+Until both secrets exist, `deploy-api`/`deploy-web` will run and fail (not silently skip) —
+that's deliberate, so a missing secret is loud in the Actions tab rather than a deploy that
+quietly never happened.
 
 ### Verify a deploy with a WRITE, not with `/health`
 
@@ -1244,15 +1285,17 @@ That last case is a useful signal on its own: because Phase 0 had no `/notes` ro
 `404` vs `401` on an *unauthenticated* `POST /notes` tells you at a glance whether the
 running container predates Phase 1a.
 
-### If you want real CD later
+### If you want migrations in the pipeline too
 
-Attach the GitHub repo to the Railway service (Railway dashboard → service → Settings →
-Source) and it will deploy on push to `main`. Two caveats before enabling it:
+Deliberately not done. Adding a `supabase db push` step to `post-merge.yml`, gated to run
+*before* `deploy-api`/`deploy-web`, would close the last manual gap — but it also means a
+bad migration applies itself the moment its PR merges and E2E passes, with no human in that
+path. Revisit this if the manual step becomes the actual bottleneck, not by default.
 
-- Migrations still would not run. `supabase db push` would need its own workflow step,
-  gated to run *before* the app deploy, or a deploy will land on an older schema.
-- `apps/api/Dockerfile` expects the **repo root** as build context (it copies
-  `packages/`), which `railway.json` already encodes via `dockerfilePath`.
+An alternative to the GitHub Actions job this repo uses: attach the GitHub repo to the
+Railway service directly (Railway dashboard → service → Settings → Source), which deploys
+on push to `main` without a workflow step at all. Not used here because it can't be gated
+on `e2e-web` passing first, and it doesn't cover `apps/web` (a Vercel project) either way.
 
 ---
 

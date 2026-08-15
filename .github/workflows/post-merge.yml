@@ -33,6 +33,8 @@ jobs:
     outputs:
       mobile: ${{ steps.filter.outputs.mobile }}
       apk: ${{ steps.filter.outputs.apk }}
+      api: ${{ steps.filter.outputs.api }}
+      web: ${{ steps.filter.outputs.web }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -57,6 +59,20 @@ jobs:
               - 'packages/sync/**'
               - 'pnpm-lock.yaml'
               - '.github/workflows/android-apk.yml'
+              - '.github/workflows/post-merge.yml'
+            api:
+              - 'apps/api/**'
+              - 'packages/core/**'
+              - 'packages/db/**'
+              - 'packages/shared/**'
+              - 'supabase/migrations/**'
+              - 'pnpm-lock.yaml'
+              - 'railway.json'
+              - '.github/workflows/post-merge.yml'
+            web:
+              - 'apps/web/**'
+              - 'packages/shared/**'
+              - 'pnpm-lock.yaml'
               - '.github/workflows/post-merge.yml'
 
   # Unfiltered, as it was before: it finishes in about three minutes, and a change to
@@ -94,3 +110,45 @@ jobs:
       && needs.e2e-web.result == 'success'
       && (needs.e2e-mobile.result == 'success' || needs.e2e-mobile.result == 'skipped')
     uses: ./.github/workflows/android-apk.yml
+
+  # Deploy gate is e2e-web alone, not e2e-mobile: these two ship the API and the web app, and
+  # neither depends on the mobile suite being green. A plain `needs: [changes, e2e-web]` (no
+  # `always()`) already does the right thing here -- if e2e-web fails or is skipped, both deploy
+  # jobs are skipped too, unlike `apk` above which has to tell a legitimately-skipped mobile
+  # suite apart from a failing one.
+  #
+  # Migrations are NOT part of this pipeline. `supabase db push` stays a deliberate, manual step
+  # (docs/deploy.md's "Is there CI/CD?" section) -- a bad migration must never apply itself just
+  # because the code that needs it happened to pass E2E.
+  deploy-api:
+    name: Deploy API (Railway)
+    needs: [changes, e2e-web]
+    if: needs.changes.outputs.api == 'true' && needs.e2e-web.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service cortex-api --detach --yes
+
+  deploy-web:
+    name: Deploy Web (Vercel)
+    needs: [changes, e2e-web]
+    if: needs.changes.outputs.web == 'true' && needs.e2e-web.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Vercel CLI
+        run: npm install -g vercel
+      - name: Deploy
+        working-directory: apps/web
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_AvkhehlsdMcvoLJql9c2fUH0
+          VERCEL_PROJECT_ID: prj_s4LpM7MTeXIzvHrEAC3v8BVYleYg
+        run: vercel deploy --prod --yes --token="$VERCEL_TOKEN"
