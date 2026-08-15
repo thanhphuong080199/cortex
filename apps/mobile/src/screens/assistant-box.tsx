@@ -40,43 +40,52 @@ export function AssistantBox() {
 
       const id = randomUUID();
       const createdAt = new Date().toISOString();
+      // One try/finally around the whole turn, not two: `busy` must clear on EVERY exit path,
+      // including the local-write branch's `if (!wrote) return` and its `catch`. A second,
+      // separate try around only the network call left those two exits with no `finally` at
+      // all, so an empty-box tap -- or a genuine write failure -- left Send permanently
+      // disabled. Same shape the deleted quick-capture.tsx used for its own `if (!wrote) return`.
       try {
-        const wrote = await captureNote(db, { content: text, domain: null }, id);
-        if (!wrote) return;
-      } catch {
-        // The one genuine loss. Keep the text and say so -- same copy quick capture used.
-        setSaveFailed(true);
-        return;
-      }
-      // Cleared here, before any network. Web clears only after POST /notes resolves; this is
-      // both faster and strictly safer.
-      const asked = text;
-      setText("");
-
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!session) throw new StreamUnavailableError("not signed in");
-        for await (const ev of streamAssistantTurn({
-          noteId: id, content: asked, createdAt,
-          token: session.access_token,
-          apiUrl: process.env.EXPO_PUBLIC_API_URL!,
-          fetchFn: expoFetch as unknown as typeof fetch,
-        })) {
-          if (ev.type === "attached") setAttached(ev);
-          else if (ev.type === "token") setAnswer((a) => a + ev.text);
-          else if (ev.type === "declined") setStatus("Đã lưu. Chưa trả lời được (đã chạm giới hạn chi tiêu).");
-          else if (ev.type === "error") setStatus("Đã lưu. Chưa trả lời được.");
+        let wrote: boolean;
+        try {
+          wrote = await captureNote(db, { content: text, domain: null }, id);
+        } catch {
+          // The one genuine loss. Keep the text and say so -- same copy quick capture used.
+          setSaveFailed(true);
+          return;
         }
-      } catch {
-        // Offline, a dead stream, a 502 -- all the same from here, and all better answered
-        // from the local index than with an error message.
-        const hits = await offlineAnswer(db, asked).catch(() => []);
-        setMatches(hits);
-        setStatus(
-          hits.length > 0
-            ? `Không có mạng — ${hits.length} ghi chú của bạn khớp với câu này.`
-            : "Đã lưu.",
-        );
+        if (!wrote) return;
+
+        // Cleared here, before any network. Web clears only after POST /notes resolves; this
+        // is both faster and strictly safer.
+        const asked = text;
+        setText("");
+
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (!session) throw new StreamUnavailableError("not signed in");
+          for await (const ev of streamAssistantTurn({
+            noteId: id, content: asked, createdAt,
+            token: session.access_token,
+            apiUrl: process.env.EXPO_PUBLIC_API_URL!,
+            fetchFn: expoFetch as unknown as typeof fetch,
+          })) {
+            if (ev.type === "attached") setAttached(ev);
+            else if (ev.type === "token") setAnswer((a) => a + ev.text);
+            else if (ev.type === "declined") setStatus("Đã lưu. Chưa trả lời được (đã chạm giới hạn chi tiêu).");
+            else if (ev.type === "error") setStatus("Đã lưu. Chưa trả lời được.");
+          }
+        } catch {
+          // Offline, a dead stream, a 502 -- all the same from here, and all better answered
+          // from the local index than with an error message.
+          const hits = await offlineAnswer(db, asked).catch(() => []);
+          setMatches(hits);
+          setStatus(
+            hits.length > 0
+              ? `Không có mạng — ${hits.length} ghi chú của bạn khớp với câu này.`
+              : "Đã lưu.",
+          );
+        }
       } finally {
         setBusy(false);
       }
