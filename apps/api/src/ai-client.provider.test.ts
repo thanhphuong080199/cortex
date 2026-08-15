@@ -12,8 +12,9 @@ import { parseApiEnv } from "./env";
 // happens to carry, for two independent reasons:
 //
 //  1. Correctness. get() calls parseApiEnv BEFORE assertTierAllowsRealData, and this branch made
-//     DATABASE_URL / GEMINI_API_KEY / GEMINI_TIER / ENRICH_MONTHLY_BUDGET_USD required. With any
-//     of them missing, parseApiEnv throws a ZodError naming that variable, `rejects.toThrow`
+//     DATABASE_URL / GEMINI_API_KEY / GEMINI_TIER / ENRICH_MONTHLY_BUDGET_USD /
+//     ASSISTANT_MONTHLY_BUDGET_USD required. With any of them missing, parseApiEnv throws a
+//     ZodError naming that variable, `rejects.toThrow`
 //     sees a rejection, and /free-tier/i does not match -- so the test fails for a reason that
 //     has nothing to do with the rule it exists to pin. Locally that never happened because
 //     vitest's `setupFiles: ["dotenv/config"]` backfilled apps/api/.env; CI has no .env by
@@ -42,6 +43,7 @@ describe("createLazyGeminiAi", () => {
     GEMINI_API_KEY: "dummy-key-this-test-must-never-reach-the-network",
     GEMINI_TIER: "free",
     ENRICH_MONTHLY_BUDGET_USD: "5",
+    ASSISTANT_MONTHLY_BUDGET_USD: "5",
   };
 
   const saved = new Map<string, string | undefined>();

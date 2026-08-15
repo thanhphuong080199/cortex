@@ -34,7 +34,7 @@ test("navigating away flushes an edit that is still inside the debounce window",
   // precisely so that leaving fast does not discard the last keystrokes; going straight back is
   // the case that proves it.
   await page.goBack();
-  await expect(page.getByLabel("Quick capture")).toBeVisible();
+  await expect(page.getByLabel(/what are you thinking/i)).toBeVisible();
 
   await page.getByRole("link", { name: "Edit target" }).click();
   await expect(page.getByLabel("Note content")).toHaveValue(edited, { timeout: 15_000 });

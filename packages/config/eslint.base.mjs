@@ -3,7 +3,10 @@ import tseslint from "typescript-eslint";
 export default tseslint.config(
   ...tseslint.configs.recommended,
   {
-    ignores: ["**/dist/**", "**/.next/**", "**/.expo/**", "**/node_modules/**"],
+    // `.vercel/output` is gitignored, so CI never sees it -- but `vercel deploy` run locally
+    // leaves generated launchers behind that fail no-require-imports, turning a local lint red
+    // for reasons no commit caused.
+    ignores: ["**/dist/**", "**/.next/**", "**/.expo/**", "**/.vercel/**", "**/node_modules/**"],
   },
   {
     rules: {

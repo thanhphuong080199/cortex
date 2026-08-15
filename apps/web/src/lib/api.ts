@@ -43,7 +43,7 @@ function validated<T>(schema: ZodType<T>, value: T): T {
 // the throw would escape the caller's promise chain.
 export const api = {
   createNote: async (token: string, input: CreateNoteInput) =>
-    send("/notes", "POST", token, validated(createNoteInput, input)),
+    send("/notes", "POST", token, validated(createNoteInput, input)) as Promise<{ id: string }>,
   updateNote: async (token: string, id: string, input: UpdateNoteInput) =>
     send(`/notes/${id}`, "PATCH", token, validated(updateNoteInput, input)),
   deleteNote: async (token: string, id: string) => send(`/notes/${id}`, "DELETE", token),

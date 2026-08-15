@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { AI_CLIENT, createLazyGeminiAi } from "./ai-client.provider";
+import { AssistantController } from "./assistant.controller";
 import { CheckinsController } from "./checkins.controller";
 import { ExportController } from "./export.controller";
 import { HealthController } from "./health.controller";
@@ -27,10 +28,16 @@ import { TagsController } from "./tags.controller";
 // imported": createLazyGeminiAi() (ai-client.provider.ts) never calls parseApiEnv/createGeminiAi
 // until something actually calls embed()/generateJson(), which only happens inside a real
 // POST /search request -- never during any other suite's boot or tests.
+//
+// AssistantController is the same story, plus a second lazy read: it parses
+// ASSISTANT_MONTHLY_BUDGET_USD from process.env inside its handler, not as an eager class
+// field, so a missing/invalid value only throws for an actual POST /assistant request -- not
+// at app.init() for every other e2e suite that boots this module (see the controller's own
+// comment).
 @Module({
   controllers: [
     HealthController, MeController, NotesController, TagsController, ExportController,
-    CheckinsController, MediaController, SyncController, SearchController,
+    CheckinsController, MediaController, SyncController, SearchController, AssistantController,
   ],
   providers: [{ provide: AI_CLIENT, useFactory: createLazyGeminiAi }],
 })

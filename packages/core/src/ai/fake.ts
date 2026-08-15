@@ -25,6 +25,7 @@ export interface FakeAiScript {
     prompt: string;
     schema: Record<string, unknown>;
   }) => Promise<JsonResult<unknown>>;
+  generateStream?: AiClient["generateStream"];
 }
 
 /**
@@ -66,6 +67,11 @@ export function createFakeAi(script: FakeAiScript = {}): AiClient {
       (script.generateJson as AiClient["generateJson"] | undefined) ??
       (async () => {
         throw new Error("createFakeAi: generateJson was called but not scripted for this test");
+      }),
+    generateStream:
+      script.generateStream ??
+      (async () => {
+        throw new Error("createFakeAi: generateStream was called but not scripted for this test");
       }),
   };
 }

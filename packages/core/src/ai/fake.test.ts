@@ -49,3 +49,27 @@ describe("createFakeAi", () => {
     await expect(createFakeAi().generateJson({ prompt: "p", schema: {} })).rejects.toThrow(/not scripted/i);
   });
 });
+
+describe("createFakeAi.generateStream", () => {
+  it("yields the scripted chunks and then reports usage", async () => {
+    const ai = createFakeAi({
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "hel" }; yield { text: "lo" }; })(),
+        usage: () => ({ inputTokens: 7, outputTokens: 2, model: "fake-stream" }),
+      }),
+    });
+
+    const res = await ai.generateStream({ prompt: "p", model: "fake-stream" });
+    let out = "";
+    for await (const c of res.chunks) out += c.text;
+
+    expect(out).toBe("hello");
+    expect(res.usage()).toEqual({ inputTokens: 7, outputTokens: 2, model: "fake-stream" });
+  });
+
+  it("throws a named error when a test calls it without scripting it", async () => {
+    const ai = createFakeAi();
+    await expect(ai.generateStream({ prompt: "p", model: "m" }))
+      .rejects.toThrow(/generateStream was called but not scripted/);
+  });
+});

@@ -214,6 +214,7 @@ describe("runSweep", () => {
     // priced call directly is what actually pushes this user over budget.
     await recordUsage(db, {
       userId, kind: "tag", model: "gemini-3.5-flash-lite", inputTokens: 20_000_000, outputTokens: 0,
+      source: "sweep",
     });
 
     const noteId = await seedBackdated("would be enriched if there were money");
@@ -258,6 +259,7 @@ describe("runSweep", () => {
     // MODEL_PRICES_USD_PER_MTOK and price at zero, so no amount of fake traffic crosses a budget.
     await recordUsage(db, {
       userId: hog, kind: "tag", model: "gemini-3.5-flash-lite", inputTokens: 20_000_000, outputTokens: 0,
+      source: "sweep",
     });
 
     const hogNote = await seedBackdated("over budget, and first in line", { owner: hog });

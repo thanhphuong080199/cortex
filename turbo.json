@@ -41,7 +41,8 @@
         "DATABASE_URL",
         "GEMINI_API_KEY",
         "GEMINI_TIER",
-        "ENRICH_MONTHLY_BUDGET_USD"
+        "ENRICH_MONTHLY_BUDGET_USD",
+        "ASSISTANT_MONTHLY_BUDGET_USD"
       ]
     }
   }

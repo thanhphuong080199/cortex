@@ -23,18 +23,48 @@ export function priceUsd(model: string, inputTokens: number, outputTokens: numbe
  * distinguishing them. That is an accepted approximation, not a bug, but it means the ledger's
  * dollar figure is not audit-grade for the 'embed' portion.
  */
+/** Which part of the system spent this. See 00027 -- 'embed' alone cannot answer that. */
+export type UsageSource = "sweep" | "assistant" | "search";
+
 export async function recordUsage(
   db: SupabaseClient,
-  u: { userId: string; kind: "embed" | "tag"; model: string; inputTokens: number; outputTokens: number },
+  u: {
+    userId: string;
+    kind: "embed" | "tag" | "chat";
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    source: UsageSource;
+    noteId?: string;
+    requestId?: string;
+    attempt?: number;
+    latencyMs?: number;
+    contentChars?: number;
+  },
 ): Promise<void> {
-  const { error } = await db.from("usage_ledger").insert({
+  // `source` is REQUIRED, not optional with a default. A default would put every new call
+  // site into whichever bucket the default names, which is exactly the ambiguity 00027
+  // exists to remove -- and it would do it silently.
+  //
+  // Optional fields are OMITTED rather than written as null so a row's shape says which
+  // facts were actually known. `undefined` would be serialised away by PostgREST anyway;
+  // spelling it out means a reader of this function does not have to know that.
+  const row: Record<string, unknown> = {
     user_id: u.userId,
     kind: u.kind,
     model: u.model,
     input_tokens: u.inputTokens,
     output_tokens: u.outputTokens,
     cost_usd: priceUsd(u.model, u.inputTokens, u.outputTokens),
-  });
+    source: u.source,
+  };
+  if (u.noteId !== undefined) row.note_id = u.noteId;
+  if (u.requestId !== undefined) row.request_id = u.requestId;
+  if (u.attempt !== undefined) row.attempt = u.attempt;
+  if (u.latencyMs !== undefined) row.latency_ms = u.latencyMs;
+  if (u.contentChars !== undefined) row.content_chars = u.contentChars;
+
+  const { error } = await db.from("usage_ledger").insert(row);
   if (error) throw error;
 }
 

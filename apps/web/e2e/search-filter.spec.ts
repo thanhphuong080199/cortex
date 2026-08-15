@@ -41,7 +41,7 @@ test("an apostrophe-only query yields the empty state, not an error", async ({ p
   await page.goto(`/?q=${encodeURIComponent("don't")}`);
   await expect(page.getByText("Nothing here yet.")).toBeVisible({ timeout: 15_000 });
   // error.tsx renders on a thrown query; make sure that is not what we are looking at.
-  await expect(page.getByLabel("Quick capture")).toBeVisible();
+  await expect(page.getByLabel(/what are you thinking/i)).toBeVisible();
 });
 
 test("a searchable word in the apostrophe note still finds it", async ({ page }) => {

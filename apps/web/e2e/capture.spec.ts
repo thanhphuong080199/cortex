@@ -12,12 +12,12 @@ test("a captured note reaches the corpus", async ({ page }) => {
   const body = `web capture ${Date.now()}`;
 
   await page.goto("/");
-  await page.getByLabel("Quick capture").fill(body);
+  await page.getByLabel(/what are you thinking/i).fill(body);
   // There is no Save button: ⌘/Ctrl+Enter is the only submit path.
-  await page.getByLabel("Quick capture").press("Control+Enter");
+  await page.getByLabel(/what are you thinking/i).press("Control+Enter");
 
   // The box is cleared ONLY on success, so an empty textarea is the acknowledgement.
-  await expect(page.getByLabel("Quick capture")).toHaveValue("", { timeout: 15_000 });
+  await expect(page.getByLabel(/what are you thinking/i)).toHaveValue("", { timeout: 15_000 });
 
   // Reload rather than waiting for the live echo: this asserts the WRITE, and the SSR read in
   // page.tsx is the independent confirmation that the row is really there.
@@ -47,10 +47,10 @@ test("the open page learns about the capture without a reload", async ({ page })
   const body = `web live capture ${Date.now()}`;
 
   await page.goto("/");
-  await page.getByLabel("Quick capture").fill(body);
-  await page.getByLabel("Quick capture").press("Control+Enter");
+  await page.getByLabel(/what are you thinking/i).fill(body);
+  await page.getByLabel(/what are you thinking/i).press("Control+Enter");
 
-  await expect(page.getByLabel("Quick capture")).toHaveValue("", { timeout: 15_000 });
+  await expect(page.getByLabel(/what are you thinking/i)).toHaveValue("", { timeout: 15_000 });
   await expect(page.getByRole("link", { name: body })).toBeVisible({ timeout: 15_000 });
 });
 
@@ -69,8 +69,8 @@ test("a failed capture keeps the text and offers a retry", async ({ page }) => {
     route.request().method() === "POST" ? route.abort("failed") : route.continue(),
   );
 
-  await page.getByLabel("Quick capture").fill(body);
-  await page.getByLabel("Quick capture").press("Control+Enter");
+  await page.getByLabel(/what are you thinking/i).fill(body);
+  await page.getByLabel(/what are you thinking/i).press("Control+Enter");
 
   // "A capture box must never lose a thought" -- the text stays put and the error names a retry.
   //
@@ -80,12 +80,12 @@ test("a failed capture keeps the text and offers a retry", async ({ page }) => {
   const error = page.locator("p.error[role=alert]");
   await expect(error).toContainText("Couldn't save", { timeout: 15_000 });
   await expect(error.getByRole("button", { name: "Retry" })).toBeVisible();
-  await expect(page.getByLabel("Quick capture")).toHaveValue(body);
+  await expect(page.getByLabel(/what are you thinking/i)).toHaveValue(body);
 });
 
 test("capture is disabled with no connection", async ({ page, context }) => {
   await page.goto("/");
-  await expect(page.getByLabel("Quick capture")).toBeVisible();
+  await expect(page.getByLabel(/what are you thinking/i)).toBeVisible();
 
   await context.setOffline(true);
   // The component listens for the browser's offline event; it does not poll.
