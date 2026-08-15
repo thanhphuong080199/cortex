@@ -31,8 +31,10 @@ describe("buildAnswerPrompt", () => {
       citations: [cite({ noteId: "a", snippet: "first" }), cite({ noteId: "b", snippet: "second" })],
       history: [],
     });
-    expect(p).toContain("[1] first");
-    expect(p).toContain("[2] second");
+    // Paired with the heading, not asserted in isolation: `toContain("[1] first")` alone
+    // survives deleting "The user's own notes:", and that heading is the only thing telling the
+    // model the snippets below are the user's rather than the assistant's own.
+    expect(p).toContain("The user's own notes:\n[1] first\n[2] second");
   });
 
   it("renders a note's title beside its snippet when it has one", () => {
@@ -61,7 +63,7 @@ describe("buildAnswerPrompt", () => {
   // other test here passes with the question line deleted.
   it("carries the question itself", () => {
     expect(buildAnswerPrompt({ question: "tôi ngủ mấy tiếng?", citations: [], history: [] }))
-      .toContain("tôi ngủ mấy tiếng?");
+      .toContain("Their question: tôi ngủ mấy tiếng?");
   });
 
   // Task 5 built the rolling window; this is the only thing that proves it is rendered. The
@@ -87,10 +89,14 @@ describe("buildAcknowledgePrompt", () => {
     const p = buildAcknowledgePrompt({
       note: "hôm nay tôi chạy bộ", domain: "health", tags: ["thể dục"], related: [], history: [],
     });
-    expect(p).toContain("health");
-    expect(p).toContain("thể dục");
+    // Each value paired with the label that claims it. Asserting mere presence cannot tell the
+    // two apart: swap domain and tags in the renderer and the prompt reads "You filed it under:
+    // thể dục. You tagged it: health." -- the assistant naming what it attached backwards --
+    // and a bare toContain("health") passes anyway.
+    expect(p).toContain("You filed it under: health");
+    expect(p).toContain("You tagged it: thể dục");
     // The note itself, for the same reason the question is asserted above.
-    expect(p).toContain("hôm nay tôi chạy bộ");
+    expect(p).toContain("Their note: hôm nay tôi chạy bộ");
   });
 
   // `${a.domain}` with no fallback renders the string "null" into the prompt, and an empty tag
@@ -99,8 +105,8 @@ describe("buildAcknowledgePrompt", () => {
     const p = buildAcknowledgePrompt({
       note: "n", domain: null, tags: [], related: [], history: [],
     });
-    expect(p).toContain("no domain");
-    expect(p).toContain("nothing");
+    expect(p).toContain("You filed it under: no domain");
+    expect(p).toContain("You tagged it: nothing");
     expect(p).not.toContain("null");
   });
 
@@ -123,7 +129,7 @@ describe("buildAcknowledgePrompt", () => {
     const p = buildAcknowledgePrompt({
       note: "n", domain: null, tags: [], related: [cite({ snippet: "ghi chú cũ" })], history: [],
     });
-    expect(p).toContain("[1] ghi chú cũ");
+    expect(p).toContain("The user's own notes:\n[1] ghi chú cũ");
   });
 
   it("renders the conversation history with each side labelled", () => {

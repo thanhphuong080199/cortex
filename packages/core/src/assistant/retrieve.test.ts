@@ -128,11 +128,22 @@ describe("retrieve", () => {
   // empty corpus, and the model would answer from general knowledge as if it were the user's
   // own notes -- a wrong answer, silently, which is worse than a failed turn.
   it("surfaces a search failure instead of answering from an empty corpus", async () => {
+    const ledger: Record<string, unknown>[] = [];
+    // Both halves. `kind` pins the mapping -- a raw PostgrestError reaching CoreErrorFilter has
+    // no kind, no status and is not an HttpException, so the filter falls through to logging the
+    // literal "[object Object]". `cause.message` pins that the mapping did not cost the
+    // diagnostic: the PostgREST internals stay reachable, just not caller-facing.
     await expect(
-      retrieve({ db: fakeDb({ rpcError: { message: "search is down" } }), ai: createFakeAi() }, {
+      retrieve({
+        db: fakeDb({ ledger, rpcError: { message: "search is down" } }), ai: createFakeAi(),
+      }, {
         userId: "u1", text: QUERY, requestId: "r1",
       }),
-    ).rejects.toMatchObject({ message: "search is down" });
+    ).rejects.toMatchObject({ kind: "internal", cause: { message: "search is down" } });
+    // The ledger row is written BEFORE the search, and this is the only thing that says so:
+    // moving recordUsage below the RPC passes every other test in this file while turning each
+    // failed search into an unbilled embed. The money was already spent at ai.embed.
+    expect(ledger).toHaveLength(1);
   });
 
   it("does not fail the turn when the ledger write fails", async () => {
@@ -153,6 +164,10 @@ describe("retrieve", () => {
       // errorMessage, not String(err). A PostgREST error is a plain object, so `String(err)` is
       // the literal "[object Object]" and the one line explaining the outage explains nothing.
       expect(logged).toContain("ledger down");
+      // Paired with its label, so the id cannot drift into some other position and still pass.
+      // A ledger outage is N of these lines; without the request id none of them can be traced
+      // back to the turn that spent the money.
+      expect(logged).toContain("request r1");
       // Spec §15.6 rule 1: no note content reaches a log line, and the query text IS note
       // content when the turn is a statement rather than a question.
       expect(logged).not.toContain(QUERY);

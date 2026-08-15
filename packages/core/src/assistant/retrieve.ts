@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AiClient } from "../ai/client.js";
 import { recordUsage } from "../enrich/budget.js";
-import { errorMessage } from "../errors.js";
+import { errorMessage, mapPostgrestError } from "../errors.js";
 
 export interface Citation {
   noteId: string;
@@ -44,19 +44,27 @@ export async function retrieve(
   // Metered, never fatal -- the same trade search.controller.ts documents. A ledger outage
   // must not turn a working turn into a failed one; a silent under-count is the accepted cost.
   // errorMessage, not String(err): PostgREST errors are plain objects and stringify to
-  // "[object Object]". Never log args.text -- it is note content (§15.6 rule 1).
+  // "[object Object]". Never log args.text -- it is note content (§15.6 rule 1); the requestId
+  // is an opaque correlation id (00027's column) and is not, so a ledger outage yields N lines
+  // that can each be traced back to a turn rather than N identical ones.
   //
   // The catch is scoped to recordUsage ALONE, deliberately. Widening it to cover the search
   // below would turn a failed search into an empty citation list, and the answer prompt cannot
   // tell "you have no notes about this" apart from "the search broke" -- so the model would
   // answer from general knowledge as if it were the user's own thinking.
+  //
+  // The ORDER is load-bearing too: the money is spent at ai.embed above, so the ledger row is
+  // written before the search rather than after it. Moving this below the RPC would leave every
+  // failed search as an unbilled embed -- the blind spot the ledger exists to close.
   try {
     await recordUsage(db, {
       userId: args.userId, kind: "embed", model, inputTokens, outputTokens: 0,
       source: "assistant", requestId: args.requestId, contentChars: args.text.length,
     });
   } catch (err) {
-    console.error(`[assistant] usage_ledger write failed: ${errorMessage(err)}`);
+    console.error(
+      `[assistant] usage_ledger write failed (request ${args.requestId}): ${errorMessage(err)}`,
+    );
   }
 
   const { data, error } = await db.rpc("search_notes", {
@@ -65,7 +73,12 @@ export async function retrieve(
     p_embedding: embedding,
     p_limit: args.limit ?? 5,
   });
-  if (error) throw error;
+  // Mapped, not rethrown raw. This module is on the HTTP path (POST /assistant), and a raw
+  // PostgrestError has no `kind`, is not an HttpException, and carries `code` but no `status` --
+  // so CoreErrorFilter falls through every branch and logs the literal "[object Object]". The
+  // sweep's modules (budget/embed/extract) rethrow raw because they never reach the filter.
+  // The PostgREST internals stay in `cause`, out of the caller-facing message (errors.ts:9-13).
+  if (error) throw mapPostgrestError(error);
 
   // Five, not search's twenty: these go into a prompt, not a scrollable result list, and every
   // extra snippet is context budget spent on a note the answer will not cite.
