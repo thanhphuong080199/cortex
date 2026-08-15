@@ -1,4 +1,5 @@
 import { noteDomain, type NoteDomain } from "@cortex/shared";
+import { randomUUID } from "expo-crypto";
 import { usePowerSync } from "@powersync/react-native";
 import { useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
@@ -40,7 +41,7 @@ export function QuickCapture() {
       setSaving(true);
       setError(false);
       try {
-        const wrote = await captureNote(db, { content, domain });
+        const wrote = await captureNote(db, { content, domain }, randomUUID());
         if (!wrote) return;
         setContent("");
         setDomain(null);
