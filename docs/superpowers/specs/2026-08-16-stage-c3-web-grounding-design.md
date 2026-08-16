@@ -106,7 +106,11 @@ point. A promise here would be the same bug as a promise there.
 
 ```ts
 export interface WebSource { url: string; title: string; }
-export interface GroundingResult { sources: WebSource[]; queries: string[]; }
+export interface GroundingResult {
+  sources: WebSource[];
+  queries: string[];
+  entryPoint?: string;
+}
 ```
 
 `sources` is built from `groundingChunks[].web` (`{uri, title}`), `queries` from
@@ -115,7 +119,10 @@ individual chunks — is **not** carried: §6.2 asks for a visible split between
 for inline span-level attribution, and the answer is streamed token by token into a `<p>` that has
 no span structure to attach it to. Recorded as a deliberate omission rather than an oversight.
 
-`searchEntryPoint.renderedContent` is carried too, on the web path only — see §7.
+`searchEntryPoint.renderedContent` is carried as `entryPoint`. The **server always sends it** —
+it has no way to know which client is listening, and inferring one from a User-Agent would be a
+new coupling in exchange for a few hundred bytes. Web renders it; mobile ignores the field and
+builds chips from `queries` instead (§7.2). The asymmetry lives entirely in the clients.
 
 ---
 
