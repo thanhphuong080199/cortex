@@ -33,8 +33,13 @@ const renderCitations = (citations: Citation[] | "failed") =>
           .join("\n")}`;
 
 /**
- * Answering never invents (life-domains spec §6.1): answer from the user's notes first, say so
- * when the notes cannot answer, and never present outside content as the user's own thinking.
+ * Interim loosening of life-domains spec §6.1's "answering never invents" policy, ahead of
+ * that spec's own planned §6 (Gemini `google_search` grounding, dual "from your notes / from
+ * the web" citations -- not built yet). Until that lands, the model's own general knowledge is
+ * the only thing available to fill a gap, so it may use it -- but must always say plainly that
+ * it did, never blend it into "their own notes" the way a citation does. This is a stopgap:
+ * full grounding, plus verifying the user's own claims and proactively offering to save new
+ * knowledge as a note, is the larger scope going into the phase-3 spec.
  */
 export function buildAnswerPrompt(a: {
   question: string;
@@ -42,11 +47,14 @@ export function buildAnswerPrompt(a: {
   history: ThreadTurn[];
 }): string {
   return [
-    "You are the user's second brain. Answer their question using their own notes.",
+    "You are the user's second brain and conversational assistant. Answer their question using " +
+      "their own notes first.",
     LANGUAGE_RULE,
     "Cite the notes you used by their bracketed number, like [1].",
-    "If their notes do not answer the question, say so plainly and briefly. Do not fill the " +
-      "gap with general knowledge presented as if it came from them.",
+    "If their notes do not fully answer the question, you may fill the gap with your own " +
+      "general knowledge -- but say plainly that it is not from their notes (e.g. \"Trong " +
+      "note của bạn không có, nhưng theo mình biết...\"). Never present outside knowledge as " +
+      "if it were the user's own notes or thinking.",
     renderCitations(a.citations),
     renderHistory(a.history),
     `\n\nTheir question: ${a.question}`,
