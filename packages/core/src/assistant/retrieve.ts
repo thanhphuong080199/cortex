@@ -4,6 +4,8 @@ import { recordUsage } from "../enrich/budget.js";
 import { errorMessage, mapPostgrestError } from "../errors.js";
 
 export interface Citation {
+  /** Matches @cortex/shared's Citation. Set at construction so nothing downstream maps. */
+  type: "note";
   noteId: string;
   title: string | null;
   snippet: string;
@@ -83,6 +85,7 @@ export async function retrieve(
   // Five, not search's twenty: these go into a prompt, not a scrollable result list, and every
   // extra snippet is context budget spent on a note the answer will not cite.
   return ((data ?? []) as SearchRow[]).map((r) => ({
+    type: "note" as const,
     noteId: r.note_id,
     title: r.title,
     snippet: r.snippet,

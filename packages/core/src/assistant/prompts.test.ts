@@ -4,7 +4,7 @@ import { buildAcknowledgePrompt, buildAnswerPrompt } from "./prompts.js";
 import type { Citation } from "./retrieve.js";
 
 const cite = (over: Partial<Citation> = {}): Citation => ({
-  noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts", ...over,
+  type: "note", noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts", ...over,
 });
 
 const turn = (role: ThreadTurn["role"], content: string): ThreadTurn => ({
