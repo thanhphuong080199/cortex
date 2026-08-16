@@ -145,8 +145,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Vercel CLI
         run: npm install -g vercel
+      # No `working-directory: apps/web` here: the Vercel project itself has
+      # rootDirectory: "apps/web" (apps/web/.vercel/project.json), which the CLI applies
+      # relative to cwd. Running from apps/web made it look for apps/web/apps/web and fail
+      # every post-merge deploy with "provided path ... does not exist".
       - name: Deploy
-        working-directory: apps/web
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: team_AvkhehlsdMcvoLJql9c2fUH0
