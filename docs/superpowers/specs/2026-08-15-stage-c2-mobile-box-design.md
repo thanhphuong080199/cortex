@@ -388,3 +388,18 @@ selectors have each cost a day already.
 - **`CoreErrorFilter` logs `JSON.stringify(cause)`**, including PostgREST `details`/`hint`, which
   can carry note content. Unchanged by C2.
 - **`complexity`** is still recorded by extract and read by nothing.
+- **Nothing in this stage has run on a real Android device.** The spike in §8 step 1 was skipped
+  (no device/emulator in the implementation environment) and Task 10's Maestro flows were
+  written and statically verified (YAML parsing, testID cross-referencing against
+  `assistant-box.tsx`) but never executed with `maestro test`. This means the streaming design
+  (§3), the two rewritten flows (`02-online-basics.yaml`, `04a-offline-actions.yaml`), and their
+  `subflows/scroll-to-top.yaml` and `assert-offline-results.js` dependencies are unverified
+  against real hardware end to end. The first real device run is the actual gate this stage's
+  functional correctness has not yet passed.
+- **`extract.ts`'s media prompt lists kind values that don't match `mediaKind`'s actual enum**:
+  the prompt (`packages/core/src/enrich/extract.ts`, the `pending_item` rule) offers the model
+  `"movie"|"book"|"show"|"game"|"album"`, but `packages/shared/src/enums.ts`'s `mediaKind` enum
+  is `["movie", "tv", "book", "game", "podcast"]` — `"show"`/`"album"` are not valid enum values
+  the schema will accept, and `"tv"`/`"podcast"` are never offered to the model at all. Predates
+  C2 (not introduced by any task in this stage); surfaced incidentally during Task 10's review
+  while checking a Maestro flow's media-logging sentence against the prompt.
