@@ -358,11 +358,23 @@ directly and assert on the mood widget's `"Mood 4 of 5 — good"` label, and
 `scripts/assert-offline-results.js` checks both the double-tapped Save and the mood undo against
 the database. **They break by construction** — rewriting them is work inside the stage, not
 fallout from it. The two database assertions survive unchanged; only the taps that produce them
-move to the box. Three flows are enough:
+move to the box. Three flows are written as:
 
 - type → the note appears in the list, in airplane mode, with no server involved;
 - type → an answer streams in;
 - a note that states a mood → the mood line appears → Undo → the row is gone.
+
+**Revised after the final whole-branch review:** the second and third of those cannot actually
+run in `e2e-mobile.yml`. `GEMINI_API_KEY` is pinned to a dummy value there on purpose — no E2E
+run may reach the real Gemini API — so `extractNote`/`generateStream` fail every time,
+deterministically, in exactly this environment. Mood and the media find-or-create dedup check
+both depend entirely on a successful extraction (there is no manual fallback left; `CheckinWidget`
+and `MediaLogForm` are gone), so neither has a path through automated CI as designed. The box's
+capture-survives-AI-failure behaviour is still real and still worth asserting — mirroring
+`apps/web/e2e/assistant-box.spec.ts`'s existing convention for the identical constraint — so the
+"answer streams in" flow now asserts the box's degraded `box-status` message instead of a real
+answer. The mood and media-dedup scenarios were removed from the automated flow rather than left
+red or made to pass vacuously; see §10 for what they cost and a sketch of how to get them back.
 
 `e2e-mobile.yml` is `workflow_call`-only, invoked from `post-merge.yml` — **it cannot fail this
 PR.** So a stale flow costs nothing until the moment it costs it on `main`, and the flows have to
@@ -402,4 +414,23 @@ selectors have each cost a day already.
   is `["movie", "tv", "book", "game", "podcast"]` — `"show"`/`"album"` are not valid enum values
   the schema will accept, and `"tv"`/`"podcast"` are never offered to the model at all. Predates
   C2 (not introduced by any task in this stage); surfaced incidentally during Task 10's review
-  while checking a Maestro flow's media-logging sentence against the prompt.
+  while checking a Maestro flow's media-logging sentence against the prompt. **Not inert:** before
+  C2 nothing asked the model for `pending_item.kind` at all; now every media note does, on every
+  real-model run. A model that answers `"show"` or `"album"` fails `pendingMediaItem`'s parse,
+  which fails `domainMetaSchemas.media`'s strict parse for the whole object, silently dropping
+  `pending_item` and skipping the media link. Worth fixing in the same pass as whatever restores
+  the mood/media Maestro coverage below, since both touch `extract.ts`'s media prompt.
+- **Mood and media-dedup have no automated E2E coverage**, removed from `02-online-basics.yaml`
+  during the final whole-branch review (see §9.2): both depend on a live model call succeeding,
+  and `e2e-mobile.yml` is contractually forbidden from ever using a real Gemini key. This is a
+  genuine regression in coverage that Stage C2's own design opened — `CheckinWidget` and
+  `MediaLogForm` used to make these paths testable without any model at all, and now nothing does.
+  Two ways back, neither attempted here: (a) give `e2e-mobile.yml` a narrow, budget-capped way to
+  call a real key for just these two assertions — a cost/security decision for a human to make,
+  not something to default into; or (b) for the media-dedup case specifically,
+  `apps/api/src/media.controller.ts`'s `/media-log` endpoint (still live, no longer called by the
+  mobile UI since Task 8, but still used by `e2e/scripts/seed.mjs` to pre-seed "Dune") could seed
+  the SECOND colliding note directly via a host-side `runScript` HTTP call — the same pattern
+  `server-edit-note.js` already uses — bypassing the AI path entirely while still exercising the
+  server-side find-or-create collision `assert-media-dedup.js` checks. Mood has no equivalent
+  non-AI path today; recovering it would need its own design.
