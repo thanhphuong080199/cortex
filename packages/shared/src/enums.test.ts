@@ -19,10 +19,10 @@ describe("shared enums", () => {
     expect(EMBEDDING_DIM).toBe(1536);
     expect(EMBEDDING_MODEL).toBe("gemini-embedding-001");
   });
-  it("noteSourceType covers capture channels, chat, and saved answers", () => {
+  it("noteSourceType covers capture channels, chat, saved answers, and small talk", () => {
     expect(noteSourceType.options).toEqual([
       "quick", "web_clip", "voice", "email", "telegram", "import",
-      "chat", "assistant", "web_search",
+      "chat", "assistant", "web_search", "chitchat",
     ]);
   });
 });

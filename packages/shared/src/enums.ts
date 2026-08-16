@@ -33,9 +33,12 @@ export type NoteLifecycle = z.infer<typeof noteLifecycle>;
 //                and cited as something you saved, never as your own thinking.
 // 'web_search'-- the same, for an answer carrying web citations. Required by the
 //                life-domains spec §6.3 since 2026-08-01 and never added until now.
+// 'chitchat'  -- small talk with nothing to file. Saved like everything else, but excluded
+//                from the note lists AND from search_notes, so banter never becomes a
+//                citation the model then answers around (stage C4 spec §5.3).
 export const noteSourceType = z.enum([
   "quick", "web_clip", "voice", "email", "telegram", "import",
-  "chat", "assistant", "web_search",
+  "chat", "assistant", "web_search", "chitchat",
 ]);
 export const paraCategory = z.enum(["project", "area", "resource", "archive"]);
 export const suggestionStatus = z.enum(["suggested", "accepted", "rejected"]);
