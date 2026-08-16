@@ -97,6 +97,22 @@ export function parseModelJson<T>(text: string): T {
 }
 
 /**
+ * The streaming request body, as a pure function so it can be asserted without a mocked fetch
+ * -- the same reason extractVectors and parseModelJson are exported. `google_search` is
+ * Gemini's built-in grounding tool (life-domains spec §6.1); the model decides per turn whether
+ * to use it, so declaring the tool is a permission, not an instruction.
+ */
+export function buildStreamBody(
+  args: { prompt: string; grounding?: boolean },
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { contents: [{ parts: [{ text: args.prompt }] }] };
+  // Spread-if rather than assigning undefined: `tools: undefined` survives into JSON.stringify
+  // as an absent key here, but the shape a test compares against would still differ.
+  if (args.grounding) body.tools = [{ google_search: {} }];
+  return body;
+}
+
+/**
  * `streamGenerateContent?alt=sse` returns Server-Sent Events. Each `data:` line is a full
  * GenerateContentResponse; text arrives incrementally and `usageMetadata` arrives on the LAST
  * one. Answer generation is the largest line item in this system's spend, so dropping that
@@ -104,14 +120,14 @@ export function parseModelJson<T>(text: string): T {
  */
 async function openStream(
   apiKey: string,
-  args: { prompt: string; model: string; signal?: AbortSignal },
+  args: { prompt: string; model: string; signal?: AbortSignal; grounding?: boolean },
 ): Promise<StreamResult> {
   const res = await fetch(
     `${BASE}/models/${args.model}:streamGenerateContent?alt=sse`,
     {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({ contents: [{ parts: [{ text: args.prompt }] }] }),
+      body: JSON.stringify(buildStreamBody(args)),
       signal: args.signal,
     },
   );

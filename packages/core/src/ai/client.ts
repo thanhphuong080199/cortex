@@ -19,7 +19,15 @@ export interface JsonResult<T> {
 export interface AiClient {
   embed(texts: string[]): Promise<EmbedResult>;
   generateJson<T>(args: { prompt: string; schema: Record<string, unknown> }): Promise<JsonResult<T>>;
-  generateStream(args: { prompt: string; model: string; signal?: AbortSignal }): Promise<StreamResult>;
+  /**
+   * `grounding` declares Gemini's built-in `google_search` tool for this call. Optional and
+   * defaulting to off: an implementation that never grounds should not have to say so, and the
+   * acknowledge path in turn.ts must never pass it (spec §2 -- searching the web to acknowledge
+   * a private sentence spends money and privacy for nothing).
+   */
+  generateStream(args: {
+    prompt: string; model: string; signal?: AbortSignal; grounding?: boolean;
+  }): Promise<StreamResult>;
 }
 
 export interface StreamChunk {

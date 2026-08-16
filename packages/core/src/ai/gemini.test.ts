@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createGeminiAi, extractVectors, normalizeEmbedding, parseModelJson } from "./gemini.js";
+import { buildStreamBody, createGeminiAi, extractVectors, normalizeEmbedding, parseModelJson } from "./gemini.js";
 
 // Pins the normalization math in isolation, with no fetch and no network -- gemini.ts's HTTP
 // shape stays untested per the brief (a mocked-fetch test would only assert the mock), but this
@@ -84,6 +84,27 @@ describe("parseModelJson", () => {
     try { parseModelJson(leaky); } catch (e) { thrown = String(e); }
     expect(thrown).not.toContain("biopsy");
     expect(thrown).not.toContain("malignant");
+  });
+});
+
+describe("buildStreamBody", () => {
+  it("sends no tools when grounding is off", () => {
+    expect(buildStreamBody({ prompt: "xin chào" })).toEqual({
+      contents: [{ parts: [{ text: "xin chào" }] }],
+    });
+  });
+
+  it("omits tools when grounding is explicitly false", () => {
+    expect(buildStreamBody({ prompt: "xin chào", grounding: false })).not.toHaveProperty("tools");
+  });
+
+  // The tool name is `google_search` and Gemini rejects any other spelling with a 400. Pinned
+  // as a literal because a typo here fails only against the live API, which no test calls.
+  it("declares the google_search tool when grounding is on", () => {
+    expect(buildStreamBody({ prompt: "phim Dune 3 ra khi nào", grounding: true })).toEqual({
+      contents: [{ parts: [{ text: "phim Dune 3 ra khi nào" }] }],
+      tools: [{ google_search: {} }],
+    });
   });
 });
 
