@@ -396,6 +396,35 @@ describe("runTurn", () => {
     expect(seen).not.toContain("TRUNCATED-EARLIER-ANSWER");
   });
 
+  // The wiring, end to end: what the turn reads out of chat_messages has to reach the classifier
+  // prompt. Asserted on the prompt text itself, because a plumbing mistake here (passing nothing,
+  // or passing it to the wrong call) is invisible in every other assertion -- the turn still
+  // answers, just with the wrong branch.
+  it("shows the classifier the conversation so far", async () => {
+    const { client } = dbs({
+      history: [
+        { role: "user", content: "RAG là gì", created_at: "2026-08-16T10:00:00Z", retrieval_meta: null },
+        { role: "assistant", content: "RAG là retrieval augmented generation.",
+          created_at: "2026-08-16T10:00:05Z", retrieval_meta: null },
+      ],
+    });
+    const prompts: string[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async (args) => {
+        prompts.push(args.prompt);
+        return {
+          value: { intent: "question", complexity: "simple", domain: null,
+                   domain_meta: {}, tags: [], mood: null },
+          inputTokens: 10, outputTokens: 5, model: "fake-classify",
+        };
+      },
+    });
+
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(prompts[0], "the classifier prompt").toContain("RAG là gì");
+  });
+
   /**
    * The mobile case. The device wrote the note into its own SQLite and PowerSync has not
    * uploaded it, so the server has never seen the id. Red the moment the create branch is

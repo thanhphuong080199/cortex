@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { mediaKind } from "@cortex/shared";
 import { createFakeAi } from "../ai/fake.js";
 import { createServiceClient } from "../supabase.js";
-import { buildPrompt, extractNote, TAG_VOCABULARY_LIMIT } from "./extract.js";
+import { CLASSIFIER_HISTORY_TURNS, INTENTS, buildPrompt, extractNote, TAG_VOCABULARY_LIMIT } from "./extract.js";
+import type { ThreadTurn } from "../assistant/context.js";
 
 const db = createServiceClient();
 let userId: string;
@@ -11,6 +12,16 @@ const aiReturning = (value: unknown) =>
   createFakeAi({
     generateJson: async () => ({ value, inputTokens: 10, outputTokens: 5, model: "fake-classify" }),
   });
+
+/**
+ * `runExtract(partial)` is shorthand for calling extractNote with a scripted model response.
+ */
+async function runExtract(value: unknown) {
+  if (!userId) throw new Error("userId not set");
+  const note = await seedNote("body");
+  const ai = aiReturning(value);
+  return extractNote({ db, ai }, note);
+}
 
 /** Same script, but hands back the prompt the model was actually shown. */
 const aiCapturingPrompt = (value: unknown) => {
@@ -85,6 +96,71 @@ async function createTestUser() {
   });
   userId = data.user!.id;
 }
+
+describe("the intent vocabulary", () => {
+  // The schema enum is what the model is allowed to return; the prompt is the only place it
+  // learns what the values MEAN. A value present in one and absent from the other is never a
+  // type error -- it is a value the model never emits, or emits and cannot be parsed. Derived
+  // from one constant here for the same reason the media-kind line is derived from mediaKind.
+  it("names every intent in the classification prompt", () => {
+    const prompt = buildPrompt("bất kỳ", []);
+    for (const intent of INTENTS) {
+      expect(prompt, `the prompt never mentions "${intent}"`).toContain(`"${intent}"`);
+    }
+  });
+
+  it("offers exactly the three intents and no more", () => {
+    expect([...INTENTS]).toEqual(["question", "statement", "chitchat"]);
+  });
+
+  // THE OBSERVED BUG (2026-08-16). Before this, buildPrompt said nothing about intent at all --
+  // no definition, no examples -- and the model inferred the field's meaning from a schema key.
+  // A short follow-up is the case that inference gets wrong, so the rule has to name it.
+  it("tells the model a short follow-up is still a question", () => {
+    expect(buildPrompt("bất kỳ", [])).toMatch(/follow-up|còn gì|tiếp/i);
+  });
+});
+
+describe("the classification prompt's conversation window", () => {
+  const history: ThreadTurn[] = [
+    { role: "user", content: "RAG là gì", createdAt: "2026-08-16T10:00:00Z" },
+    { role: "assistant", content: "RAG là retrieval augmented generation...", createdAt: "2026-08-16T10:00:05Z" },
+  ];
+
+  // Without this, "Hmmm, ok còn gì khác không" reaches the classifier as an isolated sentence
+  // and comes back `statement` -- which routes it to the acknowledge prompt, whose first rule
+  // is "The user did not ask a question. Do not answer one." The conversation then dies while
+  // every other part of the system is working correctly.
+  it("shows the model the turns being followed up on", () => {
+    const prompt = buildPrompt("Hmmm, ok còn gì khác không", [], history);
+    expect(prompt).toContain("RAG là gì");
+    expect(prompt).toContain("retrieval augmented generation");
+  });
+
+  // The sweep calls extractNote too, and there is no conversation there. Absent history must
+  // render NOTHING -- an empty "Earlier in this conversation:" header is a heading the model
+  // then has to interpret, on every note in the corpus.
+  it("renders no conversation section when there is none", () => {
+    const prompt = buildPrompt("một ghi chú bình thường", []);
+    expect(prompt).not.toMatch(/earlier|conversation|trước đó/i);
+  });
+
+  // A COST CEILING, not a preference. This prompt runs on EVERY capture, so history here is a
+  // per-note tax forever. A follow-up depends on the exchange immediately before it, not on
+  // turn 40 -- and the 2000-token window selectContext builds for the ANSWER prompt would
+  // roughly double this call's input for nothing.
+  it("keeps only the last two turns", () => {
+    const long: ThreadTurn[] = Array.from({ length: 10 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant", content: `turn-${i}`,
+      createdAt: `2026-08-16T10:0${i}:00Z`,
+    }));
+    const prompt = buildPrompt("tiếp đi", [], long);
+    expect(prompt).toContain("turn-9");
+    expect(prompt).toContain("turn-8");
+    expect(prompt).not.toContain("turn-7");
+    expect(CLASSIFIER_HISTORY_TURNS).toBe(2);
+  });
+});
 
 describe("extractNote", () => {
   beforeEach(createTestUser);
@@ -459,6 +535,26 @@ describe("extractNote — intent, complexity and language", () => {
     await extractNote({ db, ai }, note);
 
     expect(seen[0]!).toMatch(/same language/i);
+  });
+
+  it("passes a chitchat classification through", async () => {
+    const out = await runExtract({ intent: "chitchat" });
+    expect(out.intent).toBe("chitchat");
+  });
+
+  // THE DEFAULT, AND WHY IT IS A COMPARISON AND NOT A CAST. `required` in a responseSchema is a
+  // request, not a guarantee. "statement" is the branch that never spends the reasoning model
+  // and never grounds, so it is the only safe landing place for a value the model did not send
+  // or sent wrong. Widening the return type with `value.intent as Intent` would compile, would
+  // pass every other test in this file, and would let "chit chat" or "" through into turn.ts's
+  // branch -- where it silently reads as "not a question", which is right by accident today and
+  // wrong the moment a fourth intent exists.
+  it("defaults a missing intent to statement", async () => {
+    expect((await runExtract({})).intent).toBe("statement");
+  });
+
+  it("defaults an unrecognised intent to statement", async () => {
+    expect((await runExtract({ intent: "chit chat" })).intent).toBe("statement");
   });
 
   it("defaults to statement when the model omits intent, rather than throwing", async () => {

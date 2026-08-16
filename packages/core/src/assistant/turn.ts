@@ -156,6 +156,11 @@ export async function* runTurn(
         // filing it under "sweep" (extractNote's default) would make a live turn's cost
         // indistinguishable from real sweep activity and unjoinable to this turn's requestId.
         source: "assistant", requestId,
+        // Handed over whole; buildPrompt takes the last CLASSIFIER_HISTORY_TURNS. Without this
+        // the classifier sees "ok còn gì khác không" as an isolated sentence, returns
+        // `statement`, and the acknowledge prompt then refuses to answer -- observed
+        // 2026-08-16 and the reason this field exists.
+        history,
       }),
       EXTRACT_DEADLINE_MS,
     ),
