@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { buildStreamBody, createGeminiAi, extractVectors, normalizeEmbedding, parseModelJson } from "./gemini.js";
+import {
+  buildStreamBody,
+  createGeminiAi,
+  extractGrounding,
+  extractVectors,
+  normalizeEmbedding,
+  parseModelJson,
+} from "./gemini.js";
 
 // Pins the normalization math in isolation, with no fetch and no network -- gemini.ts's HTTP
 // shape stays untested per the brief (a mocked-fetch test would only assert the mock), but this
@@ -105,6 +112,75 @@ describe("buildStreamBody", () => {
       contents: [{ parts: [{ text: "phim Dune 3 ra khi nào" }] }],
       tools: [{ google_search: {} }],
     });
+  });
+});
+
+describe("extractGrounding", () => {
+  it("returns null for a chunk with no grounding metadata", () => {
+    expect(extractGrounding({ candidates: [{ content: { parts: [{ text: "hi" }] } }] })).toBeNull();
+    expect(extractGrounding({})).toBeNull();
+  });
+
+  it("reads sources and queries out of groundingMetadata", () => {
+    const out = extractGrounding({
+      candidates: [{
+        groundingMetadata: {
+          webSearchQueries: ["Dune Part Three release date"],
+          groundingChunks: [
+            { web: { uri: "https://example.com/a", title: "example.com" } },
+            { web: { uri: "https://example.org/b", title: "example.org" } },
+          ],
+          searchEntryPoint: { renderedContent: "<div class=\"container\">chips</div>" },
+        },
+      }],
+    });
+    expect(out).toEqual({
+      sources: [
+        { url: "https://example.com/a", title: "example.com" },
+        { url: "https://example.org/b", title: "example.org" },
+      ],
+      queries: ["Dune Part Three release date"],
+      entryPoint: "<div class=\"container\">chips</div>",
+    });
+  });
+
+  // A grounded turn where the model searched and every chunk was unusable is still a BILLED
+  // turn (turn.ts fires the ledger row on queries, not on sources -- see Task 6), so this must
+  // not collapse to null.
+  it("returns queries with an empty source list rather than null", () => {
+    expect(extractGrounding({
+      candidates: [{ groundingMetadata: { webSearchQueries: ["gì đó"] } }],
+    })).toEqual({ sources: [], queries: ["gì đó"] });
+  });
+
+  // groundingChunks can carry non-web entries (retrieved context); those have no `web` key and
+  // must be dropped rather than becoming {url: undefined}.
+  it("drops grounding chunks that carry no web entry", () => {
+    const out = extractGrounding({
+      candidates: [{
+        groundingMetadata: {
+          groundingChunks: [{ retrievedContext: { title: "x" } }, { web: { uri: "https://a", title: "a" } }],
+        },
+      }],
+    });
+    expect(out!.sources).toEqual([{ url: "https://a", title: "a" }]);
+  });
+
+  // A source with no usable URL is not a source. Rendering it produces a dead link presented
+  // as provenance, which is worse than showing one fewer citation.
+  it("drops a web chunk with no uri", () => {
+    const out = extractGrounding({
+      candidates: [{ groundingMetadata: { groundingChunks: [{ web: { title: "no link" } }] } }],
+    });
+    expect(out!.sources).toEqual([]);
+  });
+
+  // The title is what the UI renders. Falling back to the URL beats rendering an empty <a>.
+  it("falls back to the url when a web chunk has no title", () => {
+    const out = extractGrounding({
+      candidates: [{ groundingMetadata: { groundingChunks: [{ web: { uri: "https://a.example" } }] } }],
+    });
+    expect(out!.sources).toEqual([{ url: "https://a.example", title: "https://a.example" }]);
   });
 });
 
