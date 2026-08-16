@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { domainMetaSchemas, noteDomain } from "@cortex/shared";
+import { domainMetaSchemas, mediaKind, noteDomain } from "@cortex/shared";
 import type { AiClient } from "../ai/client.js";
 import type { EnrichTarget } from "./embed.js";
 import { recordUsage } from "./budget.js";
@@ -66,7 +66,12 @@ const RESPONSE_SCHEMA = {
  */
 export const TAG_VOCABULARY_LIMIT = 200;
 
-function buildPrompt(contentText: string, vocabulary: string[]): string {
+/**
+ * Exported for extract.test.ts only. The media-kind line has to be assertable against
+ * `mediaKind`: the two live in different packages, drift is not a type error, and the
+ * symptom is a silently empty domain_meta rather than anything that throws.
+ */
+export function buildPrompt(contentText: string, vocabulary: string[]): string {
   return [
     "You organise one person's personal notes. Return JSON only.",
     "",
@@ -80,7 +85,8 @@ function buildPrompt(contentText: string, vocabulary: string[]): string {
     "- domain must be one of: " + noteDomain.options.join(", ") + ", or null when none fits.",
     "- domain_meta holds only what the text actually states. Omit anything you are guessing.",
     "- when domain is \"media\", domain_meta.pending_item is REQUIRED and looks like",
-    "  {\"kind\": \"movie\"|\"book\"|\"show\"|\"game\"|\"album\", \"title\": \"...\", \"year\": 2010}.",
+    "  {\"kind\": " + mediaKind.options.map((k) => `"${k}"`).join("|") +
+      ", \"title\": \"...\", \"year\": 2010}.",
     "  Use the work's own title as the person wrote it. Omit year when the text does not say.",
     "- mood is 1 to 5, and ONLY when the note says how the writer feels — \"mệt\", \"vui\",",
     "  \"chán\". A note about a difficult topic is not a bad mood. Return null if you are",

@@ -358,7 +358,7 @@ months of.
 
 | Risk | Mitigation |
 | --- | --- |
-| Gemini grounding + function calling can't be mixed in one request | Design already avoids it (retrieval injected as context, not a tool); verify at phase-3 implementation |
+| Gemini grounding + function calling can't be mixed in one request | CLOSED 2026-08-16: verified that Gemini 3 supports combining `google_search` with function calling. No change to C3 — retrieval stays injected context by choice (C3 spec §11), not by constraint. |
 | Domain enum too coarse or wrong | `domain` is one nullable column + jsonb; adding a value is a check-constraint migration, and undomained notes are always valid |
 | Check-in habit doesn't stick → phase-7 correlations starve | Widget ships in 1c (earliest possible); digest degrades gracefully to note-cluster-only when signals are sparse |
 | Gemini model/pricing churn between now and phase 2 | Tiers named, IDs pinned at implementation; `packages/ai` interface keeps a provider swap contained |

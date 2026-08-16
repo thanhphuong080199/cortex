@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { mediaKind } from "@cortex/shared";
 import { createFakeAi } from "../ai/fake.js";
 import { createServiceClient } from "../supabase.js";
-import { extractNote, TAG_VOCABULARY_LIMIT } from "./extract.js";
+import { buildPrompt, extractNote, TAG_VOCABULARY_LIMIT } from "./extract.js";
 
 const db = createServiceClient();
 let userId: string;
@@ -509,5 +510,22 @@ describe("extractNote — intent, complexity and language", () => {
     const { data: sameName } = await db.from("tags")
       .select("id").eq("user_id", userId).ilike("name", "pricing");
     expect(sameName).toHaveLength(1);
+  });
+});
+
+describe("the media prompt and the mediaKind enum", () => {
+  // The prompt is the only place the model learns what kinds exist. Offering it a value the
+  // strict parse then rejects silently costs the note its domain_meta AND its media link --
+  // and the prompt and the enum are in different packages, so nothing else notices.
+  it("offers exactly the kinds mediaKind accepts", () => {
+    // The "pending_item is REQUIRED" sentence literally contains the substring "pending_item"
+    // and would satisfy a naive `.includes("pending_item")` search without ever reaching the
+    // `{"kind": ...}` shape line below it -- so this anchors on the shape fragment itself.
+    const line = buildPrompt("bất kỳ", []).split("\n").find((l) => l.includes("\"kind\":"));
+    expect(line, "the pending_item kind-shape line").toBeDefined();
+
+    const offered = [...line!.matchAll(/"([a-z_]+)"(?=\s*[|,])/g)].map((m) => m[1]!);
+    expect(offered.length, "no quoted kinds parsed out of the prompt line").toBeGreaterThan(0);
+    expect(new Set(offered)).toEqual(new Set(mediaKind.options));
   });
 });
