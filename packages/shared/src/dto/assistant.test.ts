@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assistantInput } from "./assistant.js";
+import { assistantInput, readCitation } from "./assistant.js";
 
 describe("assistantInput", () => {
   it("accepts a note id alone", () => {
@@ -52,5 +52,39 @@ describe("assistantInput", () => {
   it("rejects a createdAt that is not a timestamp", () => {
     const r = assistantInput.safeParse({ noteId: crypto.randomUUID(), createdAt: "yesterday" });
     expect(r.success).toBe(false);
+  });
+});
+
+describe("readCitation", () => {
+  // THE BACKWARD-COMPATIBILITY GUARD. Every chat_messages row written before stage C3 has a
+  // citations array whose entries carry no `type` key. There is no backfill migration -- the
+  // column is jsonb and rewriting a user's conversation history to add a field whose absence
+  // already means exactly one thing is not worth the migration. This default is that decision,
+  // and it is the only place it exists.
+  it("reads a pre-C3 citation, which has no type, as a note", () => {
+    expect(readCitation({
+      noteId: "n1", title: "Dune", snippet: "…", score: 0.8, matchedBy: "fts",
+    })).toEqual({
+      type: "note", noteId: "n1", title: "Dune", snippet: "…", score: 0.8, matchedBy: "fts",
+    });
+  });
+
+  it("reads an explicit note citation unchanged", () => {
+    const row = { type: "note", noteId: "n1", title: null, snippet: "s", score: 0.5, matchedBy: "vec" };
+    expect(readCitation(row)).toEqual(row);
+  });
+
+  it("reads a web citation", () => {
+    expect(readCitation({ type: "web", url: "https://a.example", title: "a" }))
+      .toEqual({ type: "web", url: "https://a.example", title: "a" });
+  });
+
+  // A malformed entry is dropped, not rendered. citations is jsonb with no database-level
+  // shape, so a bad row must not take the whole transcript down with it.
+  it("returns null for anything it cannot read", () => {
+    expect(readCitation(null)).toBeNull();
+    expect(readCitation("nope")).toBeNull();
+    expect(readCitation({ type: "web" })).toBeNull();          // no url
+    expect(readCitation({ title: "no ids at all" })).toBeNull(); // neither noteId nor url
   });
 });

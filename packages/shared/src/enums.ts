@@ -66,14 +66,16 @@ export type MediaStatus = z.infer<typeof mediaStatus>;
 export const flashcardStatus = z.enum(["suggested", "active", "suspended"]);
 
 // usage_ledger.kind's full SQL vocabulary (00007_integrations_ops.sql), for the enum-parity
-// pair only. This is deliberately WIDER than any TS call site: only 'embed', 'tag' and 'chat'
-// are written today (packages/core/src/enrich/budget.ts's recordUsage narrows its own `kind`
-// parameter to that trio), while 'digest', 'memory' and 'transcribe' anticipate
+// pair only. This is deliberately WIDER than any TS call site: only 'embed', 'tag', 'chat' and
+// 'grounding' are written today (packages/core/src/enrich/budget.ts's recordUsage narrows its
+// own `kind` parameter to that quartet), while 'digest', 'memory' and 'transcribe' anticipate
 // workloads later phases add. A narrow union assigning into this wider vocabulary is fine;
 // what must not happen again is a TS union value the SQL CHECK constraint does not accept --
 // recordUsage briefly had "extract" here, which does not appear in the constraint below, and
 // nothing caught it before the first real insert. Existing to close exactly that gap.
-export const usageLedgerKind = z.enum(["embed", "chat", "tag", "digest", "memory", "transcribe"]);
+export const usageLedgerKind = z.enum([
+  "embed", "chat", "tag", "digest", "memory", "transcribe", "grounding",
+]);
 
 // Pinned by 00012_embedding_dims_gemini.sql and asserted against the live column width
 // by packages/db's embedding-dims test. Changing either side alone breaks that test.
@@ -108,3 +110,16 @@ export const MODEL_PRICES_USD_PER_MTOK: Record<string, { input: number; output: 
   "gemini-3.5-flash-lite": { input: 0.3, output: 2.5 },
   "gemini-3.1-pro-preview": { input: 2.0, output: 12.0 },
 };
+
+/**
+ * Grounding with Google Search is priced per QUERY, not per token, so it cannot live in
+ * MODEL_PRICES_USD_PER_MTOK. $14 per 1,000 queries, verified against Google's pricing page on
+ * 2026-08-01 and recorded in the life-domains spec §8.
+ *
+ * The first 5,000 prompts per month are free and this constant does NOT model that: every
+ * grounded turn is charged from the first one, so for a handful of testers the ledger reports
+ * spend that was never billed. Wrong in the SAFE direction -- the circuit breaker trips early
+ * rather than late -- and tracking a monthly allowance would be a second accounting system for a
+ * discount that stops applying the moment this app has real users.
+ */
+export const GROUNDING_USD_PER_QUERY = 0.014;

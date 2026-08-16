@@ -211,8 +211,7 @@ filing.
 ### 5.2 How a note is created on mobile
 
 Mobile inverts the order. The local INSERT is the deliverable and everything else is a bonus, so
-the note is durable before any network exists. This is the stage C2 design; until it ships, mobile
-capture is the same first two steps without the assistant.
+the note is durable before any network exists.
 
 ```mermaid
 sequenceDiagram
@@ -847,12 +846,13 @@ doc (§15.6).
 
 Full detail and the Expo/PowerSync specifics are in the phase 1b spec §7.
 
-### 15.4 The `sensitive` tier (implemented in phase 2)
+### 15.4 The `sensitive` tier
 
-`notes.sensitive boolean not null default false`. When true, the note is excluded from
-chunking and embedding, from auto-tagging, from chat retrieval by default, from digests,
-from `memory_facts` generation, and from web-search grounding; its content is masked in
-list views until revealed.
+`notes.sensitive` is **designed but not built.** It is the control that would keep a note out
+of web-search grounding, and grounding shipped in stage C3 without it — see that stage's spec
+§11, which records the gap as its largest knowingly-unfinished item. Earlier revisions of this
+section claimed the column was implemented in phase 2; it was not, and the claim is corrected
+here rather than deleted so the error is visible to anyone who read it.
 
 This is a real control, not a half-measure: it does not pretend to be encryption, it
 keeps the row off every path that reaches a third party. It is consistent with the
@@ -885,3 +885,8 @@ table where alice also has none stays green with the policy deleted (issue-log E
 5. **Tester disclosure** — one page shown at invite: no E2EE; the operator can technically
    read the database; content is processed by Google's API under paid-tier terms; **do not
    store passwords**; full export and hard delete are available.
+   - When the assistant searches the web (stage C3, Gemini Grounding with Google Search), Google
+     retains the prompt, the contextual information sent with it, and the output for **30 days**
+     in order to produce Grounded Results and Search Suggestions. This is separate from the
+     paid-tier guarantee that content is not used for training, and it applies only to turns the
+     model chose to ground.

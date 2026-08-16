@@ -4,7 +4,7 @@ import { buildAcknowledgePrompt, buildAnswerPrompt } from "./prompts.js";
 import type { Citation } from "./retrieve.js";
 
 const cite = (over: Partial<Citation> = {}): Citation => ({
-  noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts", ...over,
+  type: "note", noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts", ...over,
 });
 
 const turn = (role: ThreadTurn["role"], content: string): ThreadTurn => ({
@@ -101,6 +101,12 @@ describe("buildAnswerPrompt", () => {
     expect(buildAnswerPrompt({ question: "q", citations: [], history: [] }))
       .not.toMatch(/earlier in this conversation/i);
   });
+
+  it("tells the answer prompt when it may search and what it may never claim", () => {
+    const p = buildAnswerPrompt({ question: "Dune 3 khi nào?", citations: [], history: [] });
+    expect(p).toMatch(/time-sensitive/i);
+    expect(p).toMatch(/never present web content as the user's own/i);
+  });
 });
 
 describe("buildAcknowledgePrompt", () => {
@@ -171,5 +177,14 @@ describe("buildAcknowledgePrompt", () => {
     });
     expect(p).toContain("User: câu hỏi cũ");
     expect(p).toContain("You: câu trả lời cũ");
+  });
+
+  // The acknowledge branch is not grounded (turn.ts passes `grounding: isQuestion`), so telling
+  // it about searching would describe a capability it does not have.
+  it("does not tell the acknowledge prompt about searching", () => {
+    const p = buildAcknowledgePrompt({
+      note: "hôm nay mình ngủ 5 tiếng", domain: "health", tags: [], related: [], history: [],
+    });
+    expect(p).not.toMatch(/search/i);
   });
 });

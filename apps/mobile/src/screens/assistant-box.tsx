@@ -1,6 +1,7 @@
 import { usePowerSync } from "@powersync/react-native";
 import { randomUUID } from "expo-crypto";
 import { fetch as expoFetch } from "expo/fetch";
+import * as WebBrowser from "expo-web-browser";
 import { useRef, useState } from "react";
 import { ActivityIndicator, Pressable, Text, TextInput, View } from "react-native";
 
@@ -27,6 +28,7 @@ export function AssistantBox() {
   const [status, setStatus] = useState<string | null>(null);
   const [attached, setAttached] = useState<Extract<BoxEvent, { type: "attached" }> | null>(null);
   const [mood, setMood] = useState<{ checkinId: string; mood: number } | null>(null);
+  const [web, setWeb] = useState<Extract<BoxEvent, { type: "web" }> | null>(null);
   const [answer, setAnswer] = useState("");
   const [matches, setMatches] = useState<OfflineMatch[]>([]);
   const run = useRef(createInFlightGuard()).current;
@@ -38,6 +40,7 @@ export function AssistantBox() {
       setStatus(null);
       setAttached(null);
       setMood(null);
+      setWeb(null);
       setAnswer("");
       setMatches([]);
 
@@ -74,6 +77,7 @@ export function AssistantBox() {
             fetchFn: expoFetch as unknown as typeof fetch,
           })) {
             if (ev.type === "attached") setAttached(ev);
+            else if (ev.type === "web") setWeb(ev);
             else if (ev.type === "token") setAnswer((a) => a + ev.text);
             else if (ev.type === "mood") {
               // Mirrored locally under the server's id so undo has a row to delete before
@@ -158,6 +162,49 @@ export function AssistantBox() {
           >
             <Text style={{ textDecorationLine: "underline" }}>Hoàn tác</Text>
           </Pressable>
+        </View>
+      ) : null}
+
+      {/* Note citations have no mobile UI yet -- this screen has never rendered the
+          "citations" BoxEvent. The web block below stands alone, but stays visually distinct
+          from any future note-citation block per life-domains spec §6.2: the two are never
+          merged into one list. */}
+      {web && web.sources.length > 0 ? (
+        <View style={{ gap: 4 }} testID="box-web-sources">
+          <Text style={{ fontWeight: "600" }}>Từ web</Text>
+          {web.sources.map((s) => (
+            <Text
+              key={s.url}
+              testID="box-web-source"
+              style={{ color: "#1a73e8", textDecorationLine: "underline" }}
+              onPress={() => void WebBrowser.openBrowserAsync(s.url)}
+            >
+              {s.title}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+
+      {/* Search Suggestions, reconstructed rather than the injected `entryPoint` HTML web
+          renders -- this app has no react-native-webview to render HTML+CSS in. See C3 spec
+          §7.2: a knowing, recorded trade-off, not an oversight, with a condition to revisit it. */}
+      {web && web.queries.length > 0 ? (
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }} testID="box-web-chips">
+          {web.queries.map((q) => (
+            <Text
+              key={q}
+              testID="box-web-chip"
+              style={{
+                paddingVertical: 6, paddingHorizontal: 12, borderRadius: 16,
+                backgroundColor: "#eee", overflow: "hidden",
+              }}
+              onPress={() => void WebBrowser.openBrowserAsync(
+                `https://www.google.com/search?q=${encodeURIComponent(q)}`,
+              )}
+            >
+              {q}
+            </Text>
+          ))}
         </View>
       ) : null}
 

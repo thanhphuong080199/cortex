@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ANSWER_MODEL, CLASSIFY_MODEL } from "@cortex/shared";
-import type { AiClient } from "../ai/client.js";
+import { ANSWER_MODEL, CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, type WebCitation } from "@cortex/shared";
+import type { AiClient, GroundingResult } from "../ai/client.js";
 import { isOverBudget, recordUsage } from "../enrich/budget.js";
 import { extractNote } from "../enrich/extract.js";
 import { errorMessage } from "../errors.js";
@@ -16,6 +16,7 @@ export type AssistantEvent =
   | { type: "attached"; domain: string | null; domainMeta: Record<string, unknown>;
       tags: string[]; degraded?: boolean; mediaTitle?: string }
   | { type: "citations"; citations: Citation[]; degraded?: boolean }
+  | { type: "web"; sources: WebCitation[]; queries: string[]; entryPoint?: string }
   | { type: "mood"; checkinId: string; mood: number }
   | { type: "token"; text: string }
   | { type: "declined"; reason: "budget" }
@@ -245,19 +246,59 @@ export async function* runTurn(
   let answer = "";
   let incomplete = false;
   let streamUsage: { inputTokens: number; outputTokens: number; model: string } | null = null;
+  let grounding: GroundingResult | null = null;
   try {
-    const stream = await ai.generateStream({ prompt, model, signal: args.signal });
+    const stream = await ai.generateStream({
+      prompt, model, signal: args.signal,
+      // The whole enablement decision. Never unconditional: see the acknowledge-path test.
+      grounding: isQuestion,
+    });
     try {
       for await (const chunk of stream.chunks) {
         answer += chunk.text;
         yield { type: "token", text: chunk.text };
       }
     } finally {
+      // Both reads live in the `finally` for the same reason: an aborted answer has still been
+      // billed and has still been searched, and neither fact survives if it is only read on the
+      // success path.
       streamUsage = stream.usage();
+      grounding = stream.grounding?.() ?? null;
     }
   } catch (err) {
     incomplete = true;
     yield { type: "error", message: errorMessage(err).slice(0, 200) };
+  }
+
+  // `searched` and "has sources" are different facts and are used for different things. Google
+  // billed the turn the moment the model issued a query, even if every chunk came back
+  // unusable -- and it billed the turn just as surely if a source came back with no query
+  // attached, which extractGrounding's degrade-to-`[]` on a malformed webSearchQueries (and a
+  // chunk split across handleEvent's last-one-wins capture) can both produce. Sources are
+  // therefore equally good evidence a search happened, so `searched` is true on EITHER being
+  // non-empty -- keying it on `queries` alone would let that state through with a full "Từ web"
+  // block on screen and no ledger row behind it, so isOverBudget never sees the spend. The EVENT
+  // keys off having something to show: emitting `sources: []` would force every client to
+  // re-check a length, when "a web event arrived" is otherwise exactly "the box searched".
+  const searched = grounding !== null
+    && (grounding.queries.length > 0 || grounding.sources.length > 0);
+  // The wire shape, not `grounding.sources` (WebSource[], no `type` key): both clients declare
+  // the `web` event's `sources` as WebCitation[] and reach it through an unchecked cast, and
+  // `chat_messages.citations` below already gets this exact shape. One concept, one shape, on
+  // both channels -- emitting the AI client's internal WebSource[] here would make the clients'
+  // declared type a lie that only an unchecked cast was hiding.
+  const webCitations: WebCitation[] = (grounding?.sources ?? [])
+    .map((s) => ({ type: "web" as const, url: s.url, title: s.title }));
+
+  // Keyed off the same array this yields, not off `grounding` directly -- `webCitations` is
+  // exactly `[]` when there is nothing to show, whatever shape `grounding` itself is in.
+  if (webCitations.length > 0) {
+    yield {
+      type: "web",
+      sources: webCitations,
+      queries: grounding?.queries ?? [],
+      ...(grounding?.entryPoint !== undefined ? { entryPoint: grounding.entryPoint } : {}),
+    };
   }
 
   // Billed whether or not it finished. An abandoned answer is still money spent, and this is
@@ -275,9 +316,29 @@ export async function* runTurn(
     }
   }
 
+  // A SECOND row, not a field on the chat row. Grounding is priced per query while the answer
+  // is priced per token, and folding a per-query charge into a per-token row makes both
+  // unreadable. `source: 'assistant'` is what puts it inside the existing circuit breaker --
+  // isOverBudget sums by source, so no new budget is introduced.
+  if (searched) {
+    try {
+      await recordUsage(serviceDb, {
+        userId: args.userId, kind: "grounding", model,
+        inputTokens: 0, outputTokens: 0,
+        costUsd: GROUNDING_USD_PER_QUERY,
+        source: "assistant", noteId: args.noteId, requestId,
+        latencyMs: Date.now() - classifyStarted, contentChars: text.length,
+      });
+    } catch (err) {
+      console.error(`[assistant] grounding usage_ledger write failed: ${errorMessage(err)}`);
+    }
+  }
+
   const { data: message } = await userDb.from("chat_messages").insert({
     user_id: args.userId, session_id: sessionId, role: "assistant", content: answer,
-    citations, retrieval_meta: { requestId, incomplete },
+    // `citations` already carries `type: "note"` from retrieve.ts, so no mapping happens here.
+    citations: [...citations, ...webCitations],
+    retrieval_meta: { requestId, incomplete },
   }).select("id").single();
 
   if (!incomplete) {

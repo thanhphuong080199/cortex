@@ -1,5 +1,14 @@
 import { CLASSIFY_MODEL, EMBEDDING_DIM, EMBEDDING_MODEL } from "@cortex/shared";
-import type { AiClient, EmbedResult, JsonResult, StreamChunk, StreamResult, StreamUsage } from "./client.js";
+import type {
+  AiClient,
+  EmbedResult,
+  GroundingResult,
+  JsonResult,
+  StreamChunk,
+  StreamResult,
+  StreamUsage,
+  WebSource,
+} from "./client.js";
 
 const BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -97,6 +106,64 @@ export function parseModelJson<T>(text: string): T {
 }
 
 /**
+ * The streaming request body, as a pure function so it can be asserted without a mocked fetch
+ * -- the same reason extractVectors and parseModelJson are exported. `google_search` is
+ * Gemini's built-in grounding tool (life-domains spec §6.1); the model decides per turn whether
+ * to use it, so declaring the tool is a permission, not an instruction.
+ */
+export function buildStreamBody(
+  args: { prompt: string; grounding?: boolean },
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { contents: [{ parts: [{ text: args.prompt }] }] };
+  // Spread-if rather than assigning undefined: `tools: undefined` survives into JSON.stringify
+  // as an absent key here, but the shape a test compares against would still differ.
+  if (args.grounding) body.tools = [{ google_search: {} }];
+  return body;
+}
+
+/**
+ * Pulls the grounding report out of one parsed SSE payload, or null if this chunk carried none.
+ *
+ * Pure and exported for the same reason buildStreamBody is: gemini.ts's HTTP shape is untested
+ * by design, so anything here that can be wrong has to be reachable without a fetch.
+ */
+export function extractGrounding(obj: Record<string, unknown>): GroundingResult | null {
+  const candidates = obj.candidates as { groundingMetadata?: Record<string, unknown> }[] | undefined;
+  const meta = candidates?.[0]?.groundingMetadata;
+  if (!meta) return null;
+
+  // `?? []` only substitutes on null/undefined -- a field present but sent as some other shape
+  // (a string, a bare object, a number) would sail through the cast and blow up the following
+  // .map/.filter with "chunks.map is not a function". extractGrounding runs synchronously
+  // inside handleEvent, so that throw would propagate out of iterate() and kill the WHOLE
+  // answer stream, not just drop a citation -- Array.isArray degrades an unexpected shape to an
+  // empty list instead. Do not revert to `?? []` here.
+  const chunks = (
+    Array.isArray(meta.groundingChunks) ? meta.groundingChunks : []
+  ) as { web?: { uri?: string; title?: string } }[];
+  const sources: WebSource[] = chunks
+    .map((c) => c.web)
+    // A chunk with no `web` is a retrieved-context chunk, and a `web` with no `uri` is a
+    // citation with nothing to link to. Both are dropped rather than rendered as a dead link
+    // presented to the user as provenance.
+    .filter((w): w is { uri: string; title?: string } => typeof w?.uri === "string" && w.uri !== "")
+    .map((w) => ({ url: w.uri, title: w.title && w.title !== "" ? w.title : w.uri }));
+
+  // Same reasoning as `chunks` above: a non-array webSearchQueries must degrade to [], not throw.
+  const queries = (
+    Array.isArray(meta.webSearchQueries) ? meta.webSearchQueries : []
+  ).filter((q): q is string => typeof q === "string");
+
+  const entry = (meta.searchEntryPoint as { renderedContent?: unknown } | undefined)?.renderedContent;
+
+  return {
+    sources,
+    queries,
+    ...(typeof entry === "string" && entry !== "" ? { entryPoint: entry } : {}),
+  };
+}
+
+/**
  * `streamGenerateContent?alt=sse` returns Server-Sent Events. Each `data:` line is a full
  * GenerateContentResponse; text arrives incrementally and `usageMetadata` arrives on the LAST
  * one. Answer generation is the largest line item in this system's spend, so dropping that
@@ -104,14 +171,14 @@ export function parseModelJson<T>(text: string): T {
  */
 async function openStream(
   apiKey: string,
-  args: { prompt: string; model: string; signal?: AbortSignal },
+  args: { prompt: string; model: string; signal?: AbortSignal; grounding?: boolean },
 ): Promise<StreamResult> {
   const res = await fetch(
     `${BASE}/models/${args.model}:streamGenerateContent?alt=sse`,
     {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({ contents: [{ parts: [{ text: args.prompt }] }] }),
+      body: JSON.stringify(buildStreamBody(args)),
       signal: args.signal,
     },
   );
@@ -128,6 +195,7 @@ async function openStream(
   }
 
   let usage: StreamUsage | null = null;
+  let grounding: GroundingResult | null = null;
 
   /**
    * Parses one SSE event's `data:` line and yields a chunk if it carried text, capturing
@@ -156,6 +224,13 @@ async function openStream(
         model: args.model,
       };
     }
+    // BEFORE the text branch, not inside it. A chunk can carry grounding metadata and no text
+    // at all, and a capture placed inside `if (text !== "")` silently sees nothing on exactly
+    // those chunks -- the same failure this file already paid for once with usageMetadata (see
+    // the header above openStream). Last one wins: Gemini reports the full accumulated metadata
+    // each time rather than a delta.
+    const g = extractGrounding(obj);
+    if (g) grounding = g;
     const candidates = obj.candidates as
       | { content?: { parts?: { text?: string }[] } }[]
       | undefined;
@@ -208,7 +283,7 @@ async function openStream(
     }
   }
 
-  return { chunks: iterate(), usage: () => usage };
+  return { chunks: iterate(), usage: () => usage, grounding: () => grounding };
 }
 
 export function createGeminiAi(apiKey: string): AiClient {

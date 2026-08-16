@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { ANSWER_MODEL, GROUNDING_USD_PER_QUERY } from "@cortex/shared";
 import { createServiceClient } from "../supabase.js";
 import { assertTierAllowsRealData, isOverBudget, monthToDateUsd, recordUsage } from "./budget.js";
 
@@ -38,6 +39,21 @@ describe("usage and budget", () => {
     // already corrected that price and this test must consume the same constant, not a second
     // copy of it -- so 1M in + 1M out prices at 0.30 + 2.50 = 2.80.
     expect(Number(data!.cost_usd)).toBeCloseTo(2.8, 6); // 0.30 in + 2.50 out
+  });
+
+  // THE ONE THAT MATTERS. recordUsage computes cost_usd from priceUsd(model, in, out), which is
+  // token-based -- and a grounding row has no tokens of its own (they are already on the `chat`
+  // row for the same call). Without the override the row lands at cost_usd = 0 and the most
+  // expensive per-unit thing in the system is free in the ledger. Asserting "a row exists" would
+  // pass against exactly that bug, so this asserts the VALUE.
+  it("writes the cost it is given rather than pricing it from tokens", async () => {
+    await recordUsage(db, {
+      userId, kind: "grounding", model: ANSWER_MODEL,
+      inputTokens: 0, outputTokens: 0, source: "assistant",
+      costUsd: GROUNDING_USD_PER_QUERY,
+    });
+    const { data } = await db.from("usage_ledger").select("*").eq("user_id", userId).single();
+    expect(Number(data!.cost_usd)).toBeCloseTo(0.014, 6);
   });
 
   it("sums only this user's rows", async () => {

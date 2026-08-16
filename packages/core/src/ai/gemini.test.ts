@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createGeminiAi, extractVectors, normalizeEmbedding, parseModelJson } from "./gemini.js";
+import {
+  buildStreamBody,
+  createGeminiAi,
+  extractGrounding,
+  extractVectors,
+  normalizeEmbedding,
+  parseModelJson,
+} from "./gemini.js";
 
 // Pins the normalization math in isolation, with no fetch and no network -- gemini.ts's HTTP
 // shape stays untested per the brief (a mocked-fetch test would only assert the mock), but this
@@ -84,6 +91,120 @@ describe("parseModelJson", () => {
     try { parseModelJson(leaky); } catch (e) { thrown = String(e); }
     expect(thrown).not.toContain("biopsy");
     expect(thrown).not.toContain("malignant");
+  });
+});
+
+describe("buildStreamBody", () => {
+  it("sends no tools when grounding is off", () => {
+    expect(buildStreamBody({ prompt: "xin chào" })).toEqual({
+      contents: [{ parts: [{ text: "xin chào" }] }],
+    });
+  });
+
+  it("omits tools when grounding is explicitly false", () => {
+    expect(buildStreamBody({ prompt: "xin chào", grounding: false })).not.toHaveProperty("tools");
+  });
+
+  // The tool name is `google_search` and Gemini rejects any other spelling with a 400. Pinned
+  // as a literal because a typo here fails only against the live API, which no test calls.
+  it("declares the google_search tool when grounding is on", () => {
+    expect(buildStreamBody({ prompt: "phim Dune 3 ra khi nào", grounding: true })).toEqual({
+      contents: [{ parts: [{ text: "phim Dune 3 ra khi nào" }] }],
+      tools: [{ google_search: {} }],
+    });
+  });
+});
+
+describe("extractGrounding", () => {
+  it("returns null for a chunk with no grounding metadata", () => {
+    expect(extractGrounding({ candidates: [{ content: { parts: [{ text: "hi" }] } }] })).toBeNull();
+    expect(extractGrounding({})).toBeNull();
+  });
+
+  it("reads sources and queries out of groundingMetadata", () => {
+    const out = extractGrounding({
+      candidates: [{
+        groundingMetadata: {
+          webSearchQueries: ["Dune Part Three release date"],
+          groundingChunks: [
+            { web: { uri: "https://example.com/a", title: "example.com" } },
+            { web: { uri: "https://example.org/b", title: "example.org" } },
+          ],
+          searchEntryPoint: { renderedContent: "<div class=\"container\">chips</div>" },
+        },
+      }],
+    });
+    expect(out).toEqual({
+      sources: [
+        { url: "https://example.com/a", title: "example.com" },
+        { url: "https://example.org/b", title: "example.org" },
+      ],
+      queries: ["Dune Part Three release date"],
+      entryPoint: "<div class=\"container\">chips</div>",
+    });
+  });
+
+  // A grounded turn where the model searched and every chunk was unusable is still a BILLED
+  // turn (turn.ts fires the ledger row on queries, not on sources -- see Task 6), so this must
+  // not collapse to null.
+  it("returns queries with an empty source list rather than null", () => {
+    expect(extractGrounding({
+      candidates: [{ groundingMetadata: { webSearchQueries: ["gì đó"] } }],
+    })).toEqual({ sources: [], queries: ["gì đó"] });
+  });
+
+  // groundingChunks can carry non-web entries (retrieved context); those have no `web` key and
+  // must be dropped rather than becoming {url: undefined}.
+  it("drops grounding chunks that carry no web entry", () => {
+    const out = extractGrounding({
+      candidates: [{
+        groundingMetadata: {
+          groundingChunks: [{ retrievedContext: { title: "x" } }, { web: { uri: "https://a", title: "a" } }],
+        },
+      }],
+    });
+    expect(out!.sources).toEqual([{ url: "https://a", title: "a" }]);
+  });
+
+  // A source with no usable URL is not a source. Rendering it produces a dead link presented
+  // as provenance, which is worse than showing one fewer citation.
+  it("drops a web chunk with no uri", () => {
+    const out = extractGrounding({
+      candidates: [{ groundingMetadata: { groundingChunks: [{ web: { title: "no link" } }] } }],
+    });
+    expect(out!.sources).toEqual([]);
+  });
+
+  // The title is what the UI renders. Falling back to the URL beats rendering an empty <a>.
+  it("falls back to the url when a web chunk has no title", () => {
+    const out = extractGrounding({
+      candidates: [{ groundingMetadata: { groundingChunks: [{ web: { uri: "https://a.example" } }] } }],
+    });
+    expect(out!.sources).toEqual([{ url: "https://a.example", title: "https://a.example" }]);
+  });
+
+  // Fix round 1: `?? []` only substitutes on null/undefined, so a field present but sent as a
+  // non-array shape used to sail through the cast and throw out of the following .map/.filter
+  // -- inside extractGrounding, which runs synchronously in handleEvent, that would have killed
+  // the whole answer stream rather than just dropping a citation. Array.isArray must degrade an
+  // unexpected shape to an empty list instead.
+  it("degrades to an empty source list rather than throwing when groundingChunks is not an array", () => {
+    const out = extractGrounding({
+      candidates: [{ groundingMetadata: { groundingChunks: "oops", webSearchQueries: ["q"] } }],
+    });
+    expect(out).toEqual({ sources: [], queries: ["q"] });
+  });
+
+  it("degrades to an empty query list rather than throwing when webSearchQueries is not an array", () => {
+    const out = extractGrounding({
+      candidates: [{
+        groundingMetadata: {
+          webSearchQueries: { not: "an array" },
+          groundingChunks: [{ web: { uri: "https://a", title: "a" } }],
+        },
+      }],
+    });
+    expect(out).toEqual({ sources: [{ url: "https://a", title: "a" }], queries: [] });
   });
 });
 
@@ -265,5 +386,97 @@ describe("createGeminiAi.generateStream", () => {
     expect(capturedUrl).toContain("alt=sse");
     expect((capturedInit?.headers as Record<string, string>)["x-goog-api-key"]).toBe("secret-key");
     expect(capturedInit?.signal).toBe(controller.signal);
+  });
+
+  // handleEvent captures grounding BEFORE the `if (text !== "")` guard, deliberately: Gemini's
+  // final grounding chunk carries `groundingMetadata` with empty (or absent) `parts` -- no text
+  // of its own at all. This is the identical failure this file already paid for once with
+  // usageMetadata (see the header comment above openStream); a capture moved inside the text
+  // guard would silently see nothing on exactly this chunk, and grounding() would go null on
+  // every real turn while every other suite in this repo stayed green. This chunk yields no
+  // text, so the test only passes because the capture happens outside that guard.
+  it("captures grounding from a chunk that carries no text", async () => {
+    const noTextGroundingChunk = JSON.stringify({
+      candidates: [{
+        content: { parts: [] },
+        groundingMetadata: {
+          groundingChunks: [{ web: { uri: "https://a.example", title: "a" } }],
+          webSearchQueries: ["Dune 3"],
+        },
+      }],
+    });
+
+    globalThis.fetch = (async () => new Response(
+      `data: ${noTextGroundingChunk}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    const ai = createGeminiAi("key");
+    const res = await ai.generateStream({ prompt: "p", model: "m", grounding: true });
+    let out = "";
+    for await (const c of res.chunks) out += c.text;
+
+    expect(out).toBe("");
+    expect(res.grounding?.()).toEqual({
+      sources: [{ url: "https://a.example", title: "a" }],
+      queries: ["Dune 3"],
+    });
+  });
+
+  // The same "readable no matter what happened to the read loop" contract usage() already has
+  // (see "keeps whatever usage was captured..." above, and turn.test.ts's "records the answer's
+  // usage even when the stream fails part-way", which is the model for this one): grounding is
+  // read from stream.grounding() inside runTurn's `finally`, specifically so an aborted answer
+  // -- still billed, still searched -- doesn't lose the fact that it was searched. `grounding`
+  // is a plain closure variable set by handleEvent, so it must survive the read loop erroring
+  // out after it was set, exactly like `usage` does.
+  it("keeps whatever grounding was captured even when the stream ends in an abort", async () => {
+    const groundingChunk = JSON.stringify({
+      candidates: [{
+        content: { parts: [] },
+        groundingMetadata: {
+          groundingChunks: [{ web: { uri: "https://a.example", title: "a" } }],
+          webSearchQueries: ["Dune 3"],
+        },
+      }],
+    });
+
+    // `pull`, not `start`: erroring a stream immediately discards whatever is still sitting in
+    // its internal queue (WHATWG streams' ResetQueue step), so an enqueue()+error() pair issued
+    // together inside `start` would drop the grounding chunk before any reader ever saw it --
+    // proving nothing about survival past a read. Deferring the error to the SECOND `pull` call
+    // guarantees the first read() already resolved with the chunk (pull only runs again once
+    // the queue has been drained), so the second read() is what actually dies -- the same shape
+    // an AbortController produces when a live turn is cancelled mid-stream.
+    let delivered = false;
+    const stream = new ReadableStream({
+      pull(controller) {
+        if (!delivered) {
+          delivered = true;
+          controller.enqueue(new TextEncoder().encode(`data: ${groundingChunk}\n\n`));
+        } else {
+          controller.error(new DOMException("aborted", "AbortError"));
+        }
+      },
+    });
+
+    globalThis.fetch = (async () => new Response(stream, {
+      status: 200, headers: { "content-type": "text/event-stream" },
+    })) as typeof fetch;
+
+    const ai = createGeminiAi("key");
+    const res = await ai.generateStream({ prompt: "p", model: "m", grounding: true });
+
+    let thrown: unknown;
+    try {
+      for await (const c of res.chunks) void c;
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeDefined();
+    expect(res.grounding?.()).toEqual({
+      sources: [{ url: "https://a.example", title: "a" }],
+      queries: ["Dune 3"],
+    });
   });
 });

@@ -33,13 +33,11 @@ const renderCitations = (citations: Citation[] | "failed") =>
           .join("\n")}`;
 
 /**
- * Interim loosening of life-domains spec §6.1's "answering never invents" policy, ahead of
- * that spec's own planned §6 (Gemini `google_search` grounding, dual "from your notes / from
- * the web" citations -- not built yet). Until that lands, the model's own general knowledge is
- * the only thing available to fill a gap, so it may use it -- but must always say plainly that
- * it did, never blend it into "their own notes" the way a citation does. This is a stopgap:
- * full grounding, plus verifying the user's own claims and proactively offering to save new
- * knowledge as a note, is the larger scope going into the phase-3 spec.
+ * Stage C3 is life-domains spec §6: Gemini `google_search` grounding, with dual "from your
+ * notes / from the web" citations. The model may fill a gap in the user's notes from the web or
+ * from its own general knowledge -- either way it must say plainly that the material is not
+ * from their notes, never blend it into "their own notes" the way a citation does. Web sources
+ * are additionally carried as `WebCitation`s (turn.ts) so the UI can show the notes/web split.
  */
 export function buildAnswerPrompt(a: {
   question: string;
@@ -51,10 +49,15 @@ export function buildAnswerPrompt(a: {
       "their own notes first.",
     LANGUAGE_RULE,
     "Cite the notes you used by their bracketed number, like [1].",
-    "If their notes do not fully answer the question, you may fill the gap with your own " +
-      "general knowledge -- but say plainly that it is not from their notes (e.g. \"Trong " +
-      "note của bạn không có, nhưng theo mình biết...\"). Never present outside knowledge as " +
-      "if it were the user's own notes or thinking.",
+    "If their notes do not fully answer the question, you may fill the gap -- from the web, or " +
+      "from your own general knowledge -- but say plainly that it is not from their notes " +
+      "(e.g. \"Trong note của bạn không có, nhưng theo mình biết...\").",
+    // Life-domains spec §6.1. Grounding replaced the narrower rule this line used to carry: the
+    // gap-filler is no longer only the model's own memory, so the disclosure rule has to name
+    // the web explicitly rather than "outside knowledge" in general.
+    "You may search the web when their notes cannot answer the question, or when the question " +
+      "is time-sensitive. Answer from their notes first.",
+    "Never present web content as the user's own thinking. Say where something came from.",
     renderCitations(a.citations),
     renderHistory(a.history),
     `\n\nTheir question: ${a.question}`,

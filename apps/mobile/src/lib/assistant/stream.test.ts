@@ -91,4 +91,22 @@ describe("streamAssistantTurn", () => {
     );
     expect(await collect(streamAssistantTurn({ ...args, fetchFn }))).toEqual([{ type: "done" }]);
   });
+
+  it("yields a web event with its sources and queries", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      sseResponse(
+        'event: token\ndata: {"text":"ừ"}\n\n' +
+        'event: web\ndata: {"sources":[{"type":"web","url":"https://a.example","title":"a"}],' +
+        '"queries":["Dune 3"]}\n\n' +
+        'event: done\ndata: {"messageId":"m1","sessionId":"s1"}\n\n',
+      ),
+    );
+
+    const events = await collect(streamAssistantTurn({ ...args, fetchFn }));
+    expect(events).toContainEqual({
+      type: "web",
+      sources: [{ type: "web", url: "https://a.example", title: "a" }],
+      queries: ["Dune 3"],
+    });
+  });
 });

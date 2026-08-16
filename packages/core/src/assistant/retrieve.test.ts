@@ -48,7 +48,7 @@ describe("retrieve", () => {
       userId: "u1", text: QUERY, requestId: "r1",
     });
     expect(out).toEqual([
-      { noteId: "n1", title: "t", snippet: "s", score: 0.5, matchedBy: "both" },
+      { type: "note", noteId: "n1", title: "t", snippet: "s", score: 0.5, matchedBy: "both" },
     ]);
   });
 

@@ -1,4 +1,4 @@
-import { readEvents, type Citation } from "@cortex/shared";
+import { readEvents, type Citation, type WebCitation } from "@cortex/shared";
 
 /**
  * The turn could not be had. Distinct from a turn that ran and declined (`declined`) or one
@@ -13,6 +13,7 @@ export type BoxEvent =
   | { type: "attached"; domain: string | null; domainMeta: Record<string, unknown>;
       tags: string[]; degraded?: boolean; mediaTitle?: string }
   | { type: "citations"; citations: Citation[] }
+  | { type: "web"; sources: WebCitation[]; queries: string[] }
   | { type: "token"; text: string }
   | { type: "mood"; checkinId: string; mood: number }
   | { type: "declined" }
@@ -71,6 +72,16 @@ export async function* streamAssistantTurn(args: {
         break;
       case "citations":
         yield { type: "citations", citations: (d.citations as Citation[]) ?? [] };
+        break;
+      case "web":
+        yield {
+          type: "web",
+          sources: (Array.isArray(d.sources) ? d.sources : []) as WebCitation[],
+          // `entryPoint` is deliberately dropped: it is HTML+CSS and this app has no WebView
+          // to render it in. Chips are rebuilt from `queries` in the screen -- C3 spec §7.2,
+          // including the condition under which that decision gets revisited.
+          queries: (Array.isArray(d.queries) ? d.queries : []) as string[],
+        };
         break;
       case "token":
         yield { type: "token", text: String(d.text ?? "") };
