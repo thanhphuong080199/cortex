@@ -13,15 +13,6 @@ const aiReturning = (value: unknown) =>
     generateJson: async () => ({ value, inputTokens: 10, outputTokens: 5, model: "fake-classify" }),
   });
 
-/**
- * `runExtract(partial)` is shorthand for calling extractNote with a scripted model response.
- */
-async function runExtract(value: unknown) {
-  if (!userId) throw new Error("userId not set");
-  const note = await seedNote("body");
-  const ai = aiReturning(value);
-  return extractNote({ db, ai }, note);
-}
 
 /** Same script, but hands back the prompt the model was actually shown. */
 const aiCapturingPrompt = (value: unknown) => {
@@ -538,7 +529,9 @@ describe("extractNote — intent, complexity and language", () => {
   });
 
   it("passes a chitchat classification through", async () => {
-    const out = await runExtract({ intent: "chitchat" });
+    const note = await seedNote("body");
+    const ai = aiReturning({ intent: "chitchat", domain: null, domain_meta: {}, tags: [] });
+    const out = await extractNote({ db, ai }, note);
     expect(out.intent).toBe("chitchat");
   });
 
@@ -550,11 +543,17 @@ describe("extractNote — intent, complexity and language", () => {
   // branch -- where it silently reads as "not a question", which is right by accident today and
   // wrong the moment a fourth intent exists.
   it("defaults a missing intent to statement", async () => {
-    expect((await runExtract({})).intent).toBe("statement");
+    const note = await seedNote("body");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [] });
+    const out = await extractNote({ db, ai }, note);
+    expect(out.intent).toBe("statement");
   });
 
   it("defaults an unrecognised intent to statement", async () => {
-    expect((await runExtract({ intent: "chit chat" })).intent).toBe("statement");
+    const note = await seedNote("body");
+    const ai = aiReturning({ intent: "chit chat", domain: null, domain_meta: {}, tags: [] });
+    const out = await extractNote({ db, ai }, note);
+    expect(out.intent).toBe("statement");
   });
 
   it("defaults to statement when the model omits intent, rather than throwing", async () => {

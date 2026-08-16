@@ -418,6 +418,10 @@ describe("runTurn", () => {
           inputTokens: 10, outputTokens: 5, model: "fake-classify",
         };
       },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "ok" }; })(),
+        usage: () => ({ inputTokens: 20, outputTokens: 4, model: "fake-answer" }),
+      }),
     });
 
     await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
