@@ -8,7 +8,7 @@ import { errorMessage } from "../errors.js";
 import { CheckinService } from "../checkins/service.js";
 import { MediaService } from "../media/service.js";
 import { NoteService } from "../notes/service.js";
-import { isStale, selectContext, type ThreadTurn } from "./context.js";
+import { resolveCurrentSession, selectContext, type ThreadTurn } from "./context.js";
 import { buildAcknowledgePrompt, buildAnswerPrompt } from "./prompts.js";
 import { retrieve, type Citation } from "./retrieve.js";
 
@@ -107,11 +107,15 @@ export async function* runTurn(
     .from("chat_messages").select("session_id, created_at")
     .eq("user_id", args.userId).order("created_at", { ascending: false }).limit(1);
   const lastRow = (last ?? [])[0] as { session_id: string; created_at: string } | undefined;
-  sessionId = sessionId ?? lastRow?.session_id;
-  if (!sessionId || isStale(lastRow?.created_at ?? null, new Date())) {
+  // The SAME call the web pane makes (page.tsx). A client-supplied id is honoured only while
+  // the thread it names is still live: past the idle gap this turn starts a new session
+  // whatever the client asked for, which is what the two lines this replaced already did.
+  const live = resolveCurrentSession(lastRow ?? null, new Date());
+  sessionId = live === null ? undefined : (sessionId ?? live);
+  if (!sessionId) {
     const { data: created } = await userDb
       .from("chat_sessions").insert({ user_id: args.userId }).select("id").single();
-    sessionId = (created as { id: string } | null)?.id ?? sessionId ?? randomUUID();
+    sessionId = (created as { id: string } | null)?.id ?? randomUUID();
   }
   // History is read BEFORE the current turn's own message is written, deliberately: writing
   // first and reading back with no exclusion would make the just-inserted row indistinguishable

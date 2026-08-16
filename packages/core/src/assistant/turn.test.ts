@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { GROUNDING_USD_PER_QUERY } from "@cortex/shared";
+import { GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS } from "@cortex/shared";
 import type { GroundingResult } from "../ai/client.js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
@@ -41,6 +41,7 @@ function dbs(
     over?: boolean; history?: HistoryRow[]; note?: typeof NOTE | null;
     failInsertOn?: string;
     mediaItem?: { id: string; title: string; kind: string };
+    lastMessage?: { session_id: string; created_at: string };
   } = {},
 ) {
   const inserted: Record<string, Record<string, unknown>[]> = {};
@@ -85,10 +86,11 @@ function dbs(
       if (name === "notes" && cols === "domain") {
         return chain(() => ({ data: { domain: null }, error: null }));
       }
-      // The "last message" probe (session resolution): always empty, so every turn in this
-      // suite starts a fresh session -- none of these tests need cross-turn session reuse.
+      // The "last message" probe (session resolution). Empty by default, so a turn with no
+      // `lastMessage` starts a fresh session -- which is what every test written before C4
+      // assumed. `lastMessage` is what lets a test say "this user was mid-conversation".
       if (name === "chat_messages" && cols?.includes("session_id")) {
-        return chain(() => ({ data: [], error: null }));
+        return chain(() => ({ data: opts.lastMessage ? [opts.lastMessage] : [], error: null }));
       }
       // The full-history read. `opts.history` supplies genuine PRIOR turns; rows already
       // pushed onto `inserted.chat_messages` by this same runTurn call (read lazily, at
@@ -702,5 +704,33 @@ describe("runTurn", () => {
       { userId: "u1", noteId: "n1", budgetUsd: 5 },
     ));
     expect((inserted.usage_ledger ?? []).some((r) => r.kind === "grounding")).toBe(false);
+  });
+
+  // The turn's half of the shared decision. This asserts the OUTCOME (a new chat_sessions row,
+  // or none) rather than that a particular function was called, which is the honest limit here:
+  // it stays green against a correct copy of the logic and turns red against a wrong one. The
+  // guard against a *correct* copy silently drifting later is that there is only one place to
+  // change -- Step 6 removed the arithmetic from this file entirely.
+  it("resumes the session the last message belongs to", async () => {
+    const { client, inserted } = dbs({
+      lastMessage: { session_id: "s-old", created_at: new Date(Date.now() - 60_000).toISOString() },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(inserted.chat_sessions ?? []).toHaveLength(0);
+    expect((inserted.chat_messages ?? []).every((r) => r.session_id === "s-old")).toBe(true);
+  });
+
+  it("opens a new session once the idle gap has passed", async () => {
+    const { client, inserted } = dbs({
+      lastMessage: {
+        session_id: "s-old",
+        created_at: new Date(Date.now() - SESSION_IDLE_RESET_MS - 1000).toISOString(),
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(inserted.chat_sessions ?? []).toHaveLength(1);
+    expect((inserted.chat_messages ?? []).some((r) => r.session_id === "s-old")).toBe(false);
   });
 });
