@@ -82,7 +82,7 @@ export async function runSweep(deps: SweepDeps): Promise<SweepResult> {
     for (const row of claimed) {
       let over = budgetChecked.get(row.user_id);
       if (over === undefined) {
-        over = await isOverBudget(db, row.user_id, budgetUsd);
+        over = await isOverBudget(db, row.user_id, budgetUsd, "sweep");
         budgetChecked.set(row.user_id, over);
       }
       if (over) {

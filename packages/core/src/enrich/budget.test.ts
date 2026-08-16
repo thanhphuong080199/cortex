@@ -88,6 +88,36 @@ describe("usage and budget", () => {
     expect(await isOverBudget(db, userId, 1)).toBe(true);
   });
 
+  /**
+   * Red the moment the source filter is dropped from the RPC or from isOverBudget's call:
+   * enrichment spend declines an assistant turn, and the user is told the assistant hit a
+   * limit it never approached.
+   */
+  it("counts only the named source", async () => {
+    await recordUsage(db, { userId, kind: "tag", model: "gemini-3.5-flash-lite",
+      inputTokens: 1_000_000, outputTokens: 0, source: "sweep" });
+    await recordUsage(db, { userId, kind: "chat", model: "gemini-3.1-pro-preview",
+      inputTokens: 1000, outputTokens: 0, source: "assistant" });
+
+    const sweep = await monthToDateUsd(db, userId, "sweep");
+    const assistant = await monthToDateUsd(db, userId, "assistant");
+    const total = await monthToDateUsd(db, userId);
+
+    expect(sweep).toBeGreaterThan(0);
+    expect(assistant).toBeGreaterThan(0);
+    expect(assistant).not.toBeCloseTo(sweep, 10);
+    // Omitting the source still means "everything", which is 00021's behaviour unchanged.
+    expect(total).toBeCloseTo(sweep + assistant, 10);
+  });
+
+  it("does not decline the assistant for money the sweep spent", async () => {
+    await recordUsage(db, { userId, kind: "tag", model: "gemini-3.5-flash-lite",
+      inputTokens: 100_000_000, outputTokens: 0, source: "sweep" });
+
+    expect(await isOverBudget(db, userId, 1, "assistant")).toBe(false);
+    expect(await isOverBudget(db, userId, 1, "sweep")).toBe(true);
+  });
+
   it("prices an unknown model at zero rather than throwing, so a model swap cannot wedge the pipeline", async () => {
     await recordUsage(db, { userId, kind: "tag", model: "gemini-99-future", inputTokens: 1000, outputTokens: 1000, source: "sweep" });
     const { data } = await db.from("usage_ledger").select("cost_usd").eq("user_id", userId).single();

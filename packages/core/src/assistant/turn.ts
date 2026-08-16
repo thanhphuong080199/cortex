@@ -225,7 +225,7 @@ export async function* runTurn(
 
   // A circuit breaker, not a budget: it bounds a runaway, and it never costs the user the
   // note or the context around it -- both are already emitted above.
-  if (await isOverBudget(serviceDb, args.userId, args.budgetUsd)) {
+  if (await isOverBudget(serviceDb, args.userId, args.budgetUsd, "assistant")) {
     yield { type: "declined", reason: "budget" };
     return;
   }
