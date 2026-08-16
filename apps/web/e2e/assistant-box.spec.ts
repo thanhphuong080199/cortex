@@ -28,7 +28,7 @@ test("shows web sources in their own block, separate from note citations", async
       })}\n\n` +
       `event: token\ndata: ${JSON.stringify({ text: "Đã lưu." })}\n\n` +
       `event: web\ndata: ${JSON.stringify({
-        sources: [{ url: "https://a.example", title: "a" }],
+        sources: [{ type: "web", url: "https://a.example", title: "a" }],
         queries: ["Dune 3"],
       })}\n\n` +
       `event: done\ndata: ${JSON.stringify({ messageId: "m1", sessionId: "s1" })}\n\n`;

@@ -387,4 +387,96 @@ describe("createGeminiAi.generateStream", () => {
     expect((capturedInit?.headers as Record<string, string>)["x-goog-api-key"]).toBe("secret-key");
     expect(capturedInit?.signal).toBe(controller.signal);
   });
+
+  // handleEvent captures grounding BEFORE the `if (text !== "")` guard, deliberately: Gemini's
+  // final grounding chunk carries `groundingMetadata` with empty (or absent) `parts` -- no text
+  // of its own at all. This is the identical failure this file already paid for once with
+  // usageMetadata (see the header comment above openStream); a capture moved inside the text
+  // guard would silently see nothing on exactly this chunk, and grounding() would go null on
+  // every real turn while every other suite in this repo stayed green. This chunk yields no
+  // text, so the test only passes because the capture happens outside that guard.
+  it("captures grounding from a chunk that carries no text", async () => {
+    const noTextGroundingChunk = JSON.stringify({
+      candidates: [{
+        content: { parts: [] },
+        groundingMetadata: {
+          groundingChunks: [{ web: { uri: "https://a.example", title: "a" } }],
+          webSearchQueries: ["Dune 3"],
+        },
+      }],
+    });
+
+    globalThis.fetch = (async () => new Response(
+      `data: ${noTextGroundingChunk}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    const ai = createGeminiAi("key");
+    const res = await ai.generateStream({ prompt: "p", model: "m", grounding: true });
+    let out = "";
+    for await (const c of res.chunks) out += c.text;
+
+    expect(out).toBe("");
+    expect(res.grounding?.()).toEqual({
+      sources: [{ url: "https://a.example", title: "a" }],
+      queries: ["Dune 3"],
+    });
+  });
+
+  // The same "readable no matter what happened to the read loop" contract usage() already has
+  // (see "keeps whatever usage was captured..." above, and turn.test.ts's "records the answer's
+  // usage even when the stream fails part-way", which is the model for this one): grounding is
+  // read from stream.grounding() inside runTurn's `finally`, specifically so an aborted answer
+  // -- still billed, still searched -- doesn't lose the fact that it was searched. `grounding`
+  // is a plain closure variable set by handleEvent, so it must survive the read loop erroring
+  // out after it was set, exactly like `usage` does.
+  it("keeps whatever grounding was captured even when the stream ends in an abort", async () => {
+    const groundingChunk = JSON.stringify({
+      candidates: [{
+        content: { parts: [] },
+        groundingMetadata: {
+          groundingChunks: [{ web: { uri: "https://a.example", title: "a" } }],
+          webSearchQueries: ["Dune 3"],
+        },
+      }],
+    });
+
+    // `pull`, not `start`: erroring a stream immediately discards whatever is still sitting in
+    // its internal queue (WHATWG streams' ResetQueue step), so an enqueue()+error() pair issued
+    // together inside `start` would drop the grounding chunk before any reader ever saw it --
+    // proving nothing about survival past a read. Deferring the error to the SECOND `pull` call
+    // guarantees the first read() already resolved with the chunk (pull only runs again once
+    // the queue has been drained), so the second read() is what actually dies -- the same shape
+    // an AbortController produces when a live turn is cancelled mid-stream.
+    let delivered = false;
+    const stream = new ReadableStream({
+      pull(controller) {
+        if (!delivered) {
+          delivered = true;
+          controller.enqueue(new TextEncoder().encode(`data: ${groundingChunk}\n\n`));
+        } else {
+          controller.error(new DOMException("aborted", "AbortError"));
+        }
+      },
+    });
+
+    globalThis.fetch = (async () => new Response(stream, {
+      status: 200, headers: { "content-type": "text/event-stream" },
+    })) as typeof fetch;
+
+    const ai = createGeminiAi("key");
+    const res = await ai.generateStream({ prompt: "p", model: "m", grounding: true });
+
+    let thrown: unknown;
+    try {
+      for await (const c of res.chunks) void c;
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeDefined();
+    expect(res.grounding?.()).toEqual({
+      sources: [{ url: "https://a.example", title: "a" }],
+      queries: ["Dune 3"],
+    });
+  });
 });

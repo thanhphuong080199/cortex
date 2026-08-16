@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ANSWER_MODEL, CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, type WebCitation } from "@cortex/shared";
-import type { AiClient, GroundingResult, WebSource } from "../ai/client.js";
+import type { AiClient, GroundingResult } from "../ai/client.js";
 import { isOverBudget, recordUsage } from "../enrich/budget.js";
 import { extractNote } from "../enrich/extract.js";
 import { errorMessage } from "../errors.js";
@@ -16,7 +16,7 @@ export type AssistantEvent =
   | { type: "attached"; domain: string | null; domainMeta: Record<string, unknown>;
       tags: string[]; degraded?: boolean; mediaTitle?: string }
   | { type: "citations"; citations: Citation[]; degraded?: boolean }
-  | { type: "web"; sources: WebSource[]; queries: string[]; entryPoint?: string }
+  | { type: "web"; sources: WebCitation[]; queries: string[]; entryPoint?: string }
   | { type: "mood"; checkinId: string; mood: number }
   | { type: "token"; text: string }
   | { type: "declined"; reason: "budget" }
@@ -272,19 +272,32 @@ export async function* runTurn(
 
   // `searched` and "has sources" are different facts and are used for different things. Google
   // billed the turn the moment the model issued a query, even if every chunk came back
-  // unusable -- so the ledger row (Task 6) keys off `searched`. The EVENT keys off having
-  // something to show: emitting `sources: []` would force every client to re-check a length,
-  // when "a web event arrived" is otherwise exactly "the box searched".
-  const searched = grounding !== null && grounding.queries.length > 0;
+  // unusable -- and it billed the turn just as surely if a source came back with no query
+  // attached, which extractGrounding's degrade-to-`[]` on a malformed webSearchQueries (and a
+  // chunk split across handleEvent's last-one-wins capture) can both produce. Sources are
+  // therefore equally good evidence a search happened, so `searched` is true on EITHER being
+  // non-empty -- keying it on `queries` alone would let that state through with a full "Từ web"
+  // block on screen and no ledger row behind it, so isOverBudget never sees the spend. The EVENT
+  // keys off having something to show: emitting `sources: []` would force every client to
+  // re-check a length, when "a web event arrived" is otherwise exactly "the box searched".
+  const searched = grounding !== null
+    && (grounding.queries.length > 0 || grounding.sources.length > 0);
+  // The wire shape, not `grounding.sources` (WebSource[], no `type` key): both clients declare
+  // the `web` event's `sources` as WebCitation[] and reach it through an unchecked cast, and
+  // `chat_messages.citations` below already gets this exact shape. One concept, one shape, on
+  // both channels -- emitting the AI client's internal WebSource[] here would make the clients'
+  // declared type a lie that only an unchecked cast was hiding.
   const webCitations: WebCitation[] = (grounding?.sources ?? [])
     .map((s) => ({ type: "web" as const, url: s.url, title: s.title }));
 
-  if (grounding && grounding.sources.length > 0) {
+  // Keyed off the same array this yields, not off `grounding` directly -- `webCitations` is
+  // exactly `[]` when there is nothing to show, whatever shape `grounding` itself is in.
+  if (webCitations.length > 0) {
     yield {
       type: "web",
-      sources: grounding.sources,
-      queries: grounding.queries,
-      ...(grounding.entryPoint !== undefined ? { entryPoint: grounding.entryPoint } : {}),
+      sources: webCitations,
+      queries: grounding?.queries ?? [],
+      ...(grounding?.entryPoint !== undefined ? { entryPoint: grounding.entryPoint } : {}),
     };
   }
 

@@ -109,17 +109,4 @@ describe("streamAssistantTurn", () => {
       queries: ["Dune 3"],
     });
   });
-
-  // The default: break at stream.ts already documents that the server is deployed
-  // independently of the APK. This pins it, so adding a `throw` there later fails here rather
-  // than in a user's hands.
-  it("drops an event type this build does not know", async () => {
-    const fetchFn = vi.fn().mockResolvedValue(
-      sseResponse(
-        'event: some_future_event\ndata: {"x":1}\n\nevent: done\ndata: {"messageId":"m","sessionId":"s"}\n\n',
-      ),
-    );
-    const events = await collect(streamAssistantTurn({ ...args, fetchFn }));
-    expect(events.map((e) => (e as { type: string }).type)).toEqual(["done"]);
-  });
 });

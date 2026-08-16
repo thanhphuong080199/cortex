@@ -11,9 +11,10 @@ export function priceUsd(model: string, inputTokens: number, outputTokens: numbe
 
 /**
  * Writes one usage_ledger row per model call. `kind` is deliberately the fixed vocabulary
- * usage_ledger's CHECK constraint permits (00007_integrations_ops.sql:
- * `kind in ('embed','chat','tag','digest','memory','transcribe')`), not a richer pipeline-stage
- * label -- there is no 'extract' in that list, only 'tag' (extractNote's call also writes
+ * usage_ledger's CHECK constraint permits (00007_integrations_ops.sql, extended by
+ * 00029_usage_kind_grounding.sql: `kind in ('embed','chat','tag','digest','memory',
+ * 'transcribe','grounding')`), not a richer pipeline-stage label -- there is no 'extract' in
+ * that list, only 'tag' (extractNote's call also writes
  * domain/domain_meta from the same model output, but 'tag' is the closest fit the schema has).
  *
  * NOTE for whoever reads usage_ledger later: embedNote's inputTokens is a chars/4 ESTIMATE
