@@ -11,12 +11,12 @@
 # Coming back here first makes every following DOWN scroll correct by construction: nothing on
 # this screen sits above the capture box.
 #
-# The capture box's testID rather than its "Capture a thought" placeholder: the placeholder is
+# The assistant box's testID rather than its placeholder text: the placeholder is
 # gone the moment anything is typed into the box, and half the flows type into it.
 appId: ${APP_ID}
 ---
 - scrollUntilVisible:
     element:
-      id: "capture-input"
+      id: "box-input"
     direction: UP
     timeout: 30000

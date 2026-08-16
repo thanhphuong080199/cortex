@@ -21,9 +21,16 @@ import { NOW_ISO } from "./sql";
  * the way up -- `createWithId` inserts only id, content, title, domain and domain_meta -- so
  * they are here for local fidelity, not to instruct the server.
  */
+
+/**
+ * `?` for the id, not `uuid()`. The PowerSync core extension's `uuid()` generates a perfectly
+ * good id but never tells the caller what it was, and the assistant box has to name this note
+ * in a request that goes out before PowerSync has uploaded anything. Same reason logCheckin
+ * has always generated client-side: the caller needs the id back.
+ */
 export const CAPTURE_NOTE_SQL = `INSERT INTO notes (id, content, title, domain, domain_meta, lifecycle,
                     source_type, pinned, created_at, updated_at)
-     VALUES (uuid(), ?, NULL, ?, '{}', 'inbox', 'quick', 0,
+     VALUES (?, ?, NULL, ?, '{}', 'inbox', 'quick', 0,
              ${NOW_ISO}, ${NOW_ISO})`;
 
 export interface CaptureInput {
@@ -43,9 +50,13 @@ export interface CaptureTarget {
  * from a bug once it has synced. The stored content is trimmed for the same reason the check
  * is: what was rejected as empty must not be what gets written.
  */
-export async function captureNote(db: CaptureTarget, input: CaptureInput): Promise<boolean> {
+export async function captureNote(
+  db: CaptureTarget,
+  input: CaptureInput,
+  id: string,
+): Promise<boolean> {
   const content = input.content.trim();
   if (!content) return false;
-  await db.execute(CAPTURE_NOTE_SQL, [content, input.domain]);
+  await db.execute(CAPTURE_NOTE_SQL, [id, content, input.domain]);
   return true;
 }

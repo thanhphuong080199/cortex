@@ -10,6 +10,7 @@ interface Extraction {
   domain: string | null;
   domain_meta: Record<string, unknown>;
   tags: { name: string; confidence: number }[];
+  mood?: unknown;
 }
 
 const RESPONSE_SCHEMA = {
@@ -31,8 +32,11 @@ const RESPONSE_SCHEMA = {
         required: ["name", "confidence"],
       },
     },
+    // 1..5, matching the checkins_mood_or_energy CHECK (00013). Nullable and usually null:
+    // the prompt below only allows it when the text SAYS how the person feels.
+    mood: { type: "integer", nullable: true },
   },
-  required: ["intent", "complexity", "domain", "domain_meta", "tags"],
+  required: ["intent", "complexity", "domain", "domain_meta", "tags", "mood"],
 };
 
 /**
@@ -75,6 +79,12 @@ function buildPrompt(contentText: string, vocabulary: string[]): string {
     "- 3 to 5 tags total. Lowercase, hyphenated, no '#'.",
     "- domain must be one of: " + noteDomain.options.join(", ") + ", or null when none fits.",
     "- domain_meta holds only what the text actually states. Omit anything you are guessing.",
+    "- when domain is \"media\", domain_meta.pending_item is REQUIRED and looks like",
+    "  {\"kind\": \"movie\"|\"book\"|\"show\"|\"game\"|\"album\", \"title\": \"...\", \"year\": 2010}.",
+    "  Use the work's own title as the person wrote it. Omit year when the text does not say.",
+    "- mood is 1 to 5, and ONLY when the note says how the writer feels — \"mệt\", \"vui\",",
+    "  \"chán\". A note about a difficult topic is not a bad mood. Return null if you are",
+    "  inferring rather than reading.",
     "",
     "Write tags in the SAME LANGUAGE the note is written in. Do not translate: a note in",
     "Vietnamese gets Vietnamese tags. Tag vocabularies that mix languages split one idea across two",
@@ -99,6 +109,8 @@ export async function extractNote(
   tags: number;
   tagNames: string[];
   domain: string | null;
+  domainMeta: Record<string, unknown>;
+  mood: number | null;
   intent: "question" | "statement";
   complexity: "simple" | "complex";
 }> {
@@ -246,6 +258,15 @@ export async function extractNote(
   );
   if (markErr) throw markErr;
 
+  // The schema is a REQUEST, not a guarantee -- the same reason intent and complexity are
+  // defaulted below. A mood outside 1..5 would be rejected by the checkins CHECK constraint
+  // and fail an extraction that was otherwise fine, so it is dropped here instead.
+  const rawMood = value.mood;
+  const mood =
+    typeof rawMood === "number" && Number.isInteger(rawMood) && rawMood >= 1 && rawMood <= 5
+      ? rawMood
+      : null;
+
   // intent and complexity are DEFAULTED rather than trusted. `required` in a responseSchema is a
   // request, not a guarantee, and an absent intent must not throw away an otherwise good
   // extraction: "statement" is the safe branch, because it never spends the reasoning model.
@@ -253,6 +274,11 @@ export async function extractNote(
     tags: accepted.length,
     tagNames: accepted,
     domain,
+    // The meta that was just written to the row. Returned rather than re-read: the box has to
+    // be able to say WHAT it filed ("Inception (2010) · 8.5/10"), and turn.ts hardcoded `{}`
+    // here, which made that impossible.
+    domainMeta: meta,
+    mood,
     intent: value.intent === "question" ? "question" : "statement",
     complexity: value.complexity === "complex" ? "complex" : "simple",
   };

@@ -98,8 +98,18 @@ export async function recordUsage(
  * hours. The SQL function implements the identical UTC-month boundary the original TS version
  * used (`Date.UTC(year, month, 1)`), just computed server-side now.
  */
-export async function monthToDateUsd(db: SupabaseClient, userId: string): Promise<number> {
-  const { data, error } = await db.rpc("usage_month_to_date_usd", { p_user_id: userId });
+export async function monthToDateUsd(
+  db: SupabaseClient,
+  userId: string,
+  source?: UsageSource,
+): Promise<number> {
+  const { data, error } = await db.rpc("usage_month_to_date_usd", {
+    p_user_id: userId,
+    // Explicit null rather than an omitted key: PostgREST resolves an overload by the argument
+    // NAMES it is given, and omitting this would look for a one-argument function that 00028
+    // drops.
+    p_source: source ?? null,
+  });
   if (error) throw error;
   return Number(data ?? 0);
 }
@@ -116,8 +126,13 @@ export async function monthToDateUsd(db: SupabaseClient, userId: string): Promis
  * an outage in exactly the query that enforces the spending cap turn into unlimited spend
  * during that outage, which is the more dangerous failure to hide.
  */
-export async function isOverBudget(db: SupabaseClient, userId: string, limitUsd: number): Promise<boolean> {
-  return (await monthToDateUsd(db, userId)) > limitUsd;
+export async function isOverBudget(
+  db: SupabaseClient,
+  userId: string,
+  limitUsd: number,
+  source?: UsageSource,
+): Promise<boolean> {
+  return (await monthToDateUsd(db, userId, source)) > limitUsd;
 }
 
 /**

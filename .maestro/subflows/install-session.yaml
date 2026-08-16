@@ -27,9 +27,10 @@ appId: ${APP_ID}
 # screen -- not the route's own text -- is the signal that the session took. Waiting on the
 # route's "E2E session ready" would race the redirect.
 #
-# "How are you?" (CheckinWidget) rather than "Signed in as": the latter lives in the list's
-# ListFooterComponent, which sits below every seeded note and is off-screen on a populated
-# account. This one is in the header, so it is on screen the moment the list renders.
+# The box's own testID (assistant-box.tsx) rather than "Signed in as": the latter lives in the
+# list's ListFooterComponent, which sits below every seeded note and is off-screen on a populated
+# account. The box is in the header, so it is on screen the moment the list renders.
 - extendedWaitUntil:
-    visible: "How are you?"
+    visible:
+      id: "box-input"
     timeout: 30000

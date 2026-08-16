@@ -1,8 +1,21 @@
 # Cortex — AI Second Brain: Full Product & Architecture Design
 
 **Date:** 2026-07-31
-**Status:** Draft for review (planning only — no implementation yet)
+**Status:** Living document. Phases 0, 1a, 1b, 1c, 2 and stage C1 are built and merged;
+stage C2 is specced. **Amended 2026-08-15** — see §5.1–§5.3 (how a note is actually created and
+what happens to it afterwards), §9's amendment (enrichment is a cron sweep, not the event-driven
+queue described below), and §13's amendments.
 **Author:** Claude (Fable 5), directed by Thanh Phuong Le
+
+**Where the current truth lives.** This document is the product and architecture picture. When it
+disagrees with a stage spec, the stage spec wins, and the amendment notes below say so explicitly:
+
+| Area | Current spec |
+|---|---|
+| Mobile offline sync | `2026-08-02-phase-1b-mobile-offline-sync-design.md` |
+| Life domains, Gemini-only providers | `2026-08-01-life-domains-web-search-design.md` |
+| The assistant box (web) | `2026-08-12-stage-c1-assistant-box-design.md` |
+| The assistant box (mobile), mood + media by AI | `2026-08-15-stage-c2-mobile-box-design.md` |
 
 ---
 
@@ -83,48 +96,211 @@ These are the places I think your spec is wrong or needs a decision changed. Eve
 | 7 | "Full completeness from the start" (implicitly: build everything) | Two features have poor cost/benefit **at the start**: contradiction detection (needs months of notes to be non-trivial) and codebase integration (you marked it nice-to-have). | Both stay in the plan (§13 phases 7 and 10) but late, where they have data to work with. Also added, because "complete" requires it: **cost controls and observability** for LLM spend (per-user budgets, dead-letter queue) — a real product has these. |
 | 8 | Web offline as co-equal with mobile | PowerSync's web SDK (OPFS/wa-sqlite) works, but browsers evict storage, multiple tabs complicate things, and iOS Safari is hostile. | **Web is online-only** (decided in review, 2026-07-31): web reads/writes via Supabase client + API directly (RLS-enforced), with Supabase Realtime for live updates. PowerSync runs on **mobile only** — offline-first is a mobile capability. Cuts sync complexity roughly in half. |
 
-Model choices for AI workloads (current lineup, verified against the Claude API reference):
-- **Reasoning tasks** (RAG chat, digests, memory updates, auto-drafting): `claude-opus-5` ($5/$25 per MTok), adaptive thinking, effort tuned per task (`high` for chat/memory, `medium` for digests).
-- **High-volume classification** (auto-tagging, task extraction): `claude-opus-5` by default; `claude-haiku-4-5` ($1/$5) is the cost lever if tagging volume ever matters — your call, at 2-3 users it likely never does.
-- **Background jobs** (digests, memory sweeps, backfills): run through the **Batches API — 50% off** all token usage. Digests are the textbook batch workload.
-- **Prompt caching**: the memory-profile preamble (§10) is designed to be byte-stable specifically so it caches (~90% cheaper on reads).
+Model choices for AI workloads — **superseded 2026-08-07, corrected here 2026-08-15.** The
+original text of this list named `claude-opus-5`, `claude-haiku-4-5`, the Anthropic Batches API
+and Anthropic prompt caching. §13's 2026-08-07 amendment claimed the body had been "corrected in
+place"; it had not been, and this list stayed wrong for eight days. The built lineup, from
+`packages/shared/src/enums.ts` where every id carries the date it was verified against Google's
+model docs:
+
+| Workload | Constant | Model |
+|---|---|---|
+| Embeddings (1536-dim, pinned by `00012` and asserted by `packages/db`'s embedding-dims test) | `EMBEDDING_MODEL` | `gemini-embedding-001` |
+| Classification — domain, `domain_meta`, tags, intent (and mood, from stage C2) | `CLASSIFY_MODEL` | `gemini-3.5-flash-lite` |
+| Answering a question from the user's notes | `ANSWER_MODEL` | `gemini-3.1-pro-preview` |
+
+There is **no Anthropic dependency in the running system.** Batch pricing and prompt caching are
+not used; the cost controls that were actually built are `usage_ledger` (one row per model call,
+with the model id, so a price change never rewrites history) and the monthly budget circuit
+breakers in `packages/core/src/enrich/budget.ts`. Note the ids are family-versioned and move:
+treat "Gemini 3 Pro" anywhere in this repo's older documents as a family name, never as something
+to call the API with.
 
 ---
 
 ## 5. System architecture overview
 
+Solid lines are built. Dashed lines are planned and named in §7/§12 but not implemented.
+
+```mermaid
+flowchart TB
+  subgraph clients[Clients]
+    mobile["Expo mobile — Android only<br/>local SQLite + FTS5, SQLCipher"]
+    web["Next.js web<br/>online only, supabase-js + API"]
+    clipper["Web clipper"]
+    mcp["Claude Desktop / Code"]
+  end
+
+  ps["PowerSync service<br/>sync rules: one bucket per user_id"]
+  api["NestJS on Railway<br/>REST API + pg-boss sweep worker"]
+  pg[("Supabase Postgres + pgvector<br/>RLS on every table")]
+  gemini["Gemini<br/>embed / classify / answer"]
+
+  mobile -- "local writes → CRUD queue" --> ps
+  ps -- "POST /sync/upload" --> api
+  web -- "REST, user JWT" --> api
+  web -- "reads + Realtime, RLS" --> pg
+  clipper -.-> api
+  mcp -.-> api
+
+  api -- "writes as the user, RLS enforced" --> pg
+  api -- "sweep + assistant turns" --> gemini
+  pg -- "logical replication, bypasses RLS" --> ps
+  ps -- "sync stream" --> mobile
 ```
-┌─────────────┐   ┌─────────────┐   ┌──────────────┐  ┌──────────────┐
-│ Expo mobile │   │ Next.js web │   │ Web clipper  │  │ Claude       │
-│ (SQLite via │   │ (online-only│   │ (extension)  │  │ Desktop/Code │
-│  PowerSync) │   │  supabase-js│   └──────┬───────┘  │ (OPTIONAL)   │
-└──────┬──────┘   │  + Realtime)│          │ REST     └──────┬───────┘
-       │          └──────┬──────┘          ▼                 │ MCP (HTTP)
-       │  sync stream    │ RLS reads/writes + API            ▼
-       ▼                 ▼          ┌─────────────────────────────────┐
-┌─────────────────────────┐  writes │  NestJS service (Railway/Fly)   │
-│  PowerSync Service      │────────▶│  • REST API  • MCP endpoint     │
-│  (managed; sync rules   │ uploads │  • pg-boss workers (AI jobs)    │
-│   scope by user_id)     │         │  • inbound: Telegram, email     │
-└───────────┬─────────────┘         └───────┬─────────────┬───────────┘
-            │ logical replication          │             │
-            ▼                              ▼             ▼
-┌──────────────────────────────┐   ┌─────────────┐ ┌───────────────┐
-│ Supabase Postgres + pgvector │   │ Claude API  │ │ Gemini        │
-│ (RLS on every table)         │   │ (Opus 5,    │ │ (embeddings)  │
-│ + Supabase Auth (Google)     │   │  Batches)   │ │ Groq Whisper  │
-│ + Supabase Storage (audio,   │   └─────────────┘ │ (transcribe)  │
-│   clips, attachments)        │                   └───────────────┘
-└──────────────────────────────┘
-```
+
+The two arrows into Postgres are the whole isolation story, and they are not the same mechanism.
+Everything through the API executes with the caller's JWT, so **RLS** is the enforcement. Logical
+replication into PowerSync **bypasses RLS entirely**, so isolation there is the sync rules plus a
+publication scoped to six tables by name. Both are tested independently — §15.5.
 
 Data-flow principles:
 
 1. **Mobile reads are local.** The mobile app queries its local SQLite replica — lists, note bodies, tags, tasks, review queue all offline-capable and instant. **Web is online-only**: it reads/writes via supabase-js (RLS) and the API, with Supabase Realtime subscriptions for live updates.
 2. **Mobile writes are local, then uploaded.** PowerSync queues local mutations; its `uploadData` hook posts them to the NestJS API, which writes to Postgres **as the user** (Supabase client with the user's JWT → RLS enforced on the write path). Web writes hit the same path directly (supabase-js or API), no sync queue.
-3. **AI is server-side and asynchronous.** Note commits enqueue enrichment jobs (embed → tag → link → extract tasks). Results sync back down as ordinary rows — the client never calls an LLM directly.
+3. **AI is server-side.** The client never calls an LLM directly, and results arrive as ordinary rows. Enrichment is a sweep over the `notes` table rather than jobs enqueued at commit time (§9's amendment); the assistant turn is the one synchronous exception, and it streams (§5.1).
 4. **Online-only features degrade gracefully.** Semantic search, RAG chat, and digest generation require the server; the UI falls back to local FTS when offline.
 5. **One core, many faces.** REST API, MCP tools, Telegram bot, and job workers all call the same `packages/core` services. No reimplementation anywhere.
+
+### 5.1 How a note is created on web
+
+Web has no local database. The box saves first and asks for an answer second, as two requests, so
+that "nothing was saved — your text is still here" and "saved, but no answer" stay distinguishable
+on screen.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant B as AssistantBox — web
+  participant A as NestJS API
+  participant P as Postgres
+  participant G as Gemini
+
+  U->>B: types, presses Send
+  B->>A: POST /notes { content }
+  A->>P: NoteService.create (user JWT, RLS)
+  P-->>A: { id }
+  A-->>B: { id }
+  Note over B: only now is the box cleared
+
+  B->>A: POST /assistant { noteId } — SSE
+  A->>P: read content_text by id
+  A->>P: resolve session, write the user turn
+  par classify (4s deadline)
+    A->>G: CLASSIFY_MODEL → domain, meta, tags, intent
+  and retrieve
+    A->>G: embed the query
+    A->>P: search_notes (hybrid FTS + vector)
+  end
+  A-->>B: event: attached
+  A-->>B: event: citations
+  A->>G: ANSWER_MODEL or CLASSIFY_MODEL, streaming
+  loop each chunk
+    G-->>A: text
+    A-->>B: event: token
+  end
+  A->>P: chat_messages (assistant) + usage_ledger
+  A-->>B: event: done
+```
+
+If the budget circuit breaker trips, `declined` replaces the answer — after `attached` and
+`citations` have already been sent, deliberately: a spending limit costs the answer, never the
+filing.
+
+### 5.2 How a note is created on mobile
+
+Mobile inverts the order. The local INSERT is the deliverable and everything else is a bonus, so
+the note is durable before any network exists. This is the stage C2 design; until it ships, mobile
+capture is the same first two steps without the assistant.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant B as AssistantBox — mobile
+  participant L as local SQLite + FTS5
+  participant S as PowerSync
+  participant A as NestJS API
+  participant P as Postgres
+
+  U->>B: types, presses Send
+  B->>B: id = randomUUID()
+  B->>L: INSERT INTO notes (id, ...)
+  L-->>B: ok
+  Note over B: box cleared here — before any network
+
+  alt offline, or any online failure
+    B->>L: notes_fts MATCH toFtsQuery(text)
+    L-->>B: 3 snippets
+    Note over B: "no connection — N of your notes match"
+  else online
+    B->>A: POST /assistant { noteId, content, createdAt } — SSE
+    A->>P: notes.createWithId — get-or-create
+    Note over A,P: the note exists on the server before PowerSync has uploaded anything
+    A-->>B: attached / citations / token …
+    opt the text states a mood
+      A->>P: checkins.createWithId
+      A-->>B: event: mood { checkinId }
+      B->>L: INSERT the same row locally, same id
+      Note over B,L: so Undo's local DELETE has something to delete
+    end
+  end
+
+  S->>A: POST /sync/upload — PUT notes
+  A->>P: notes.createWithId → 23505 → returns existing
+  Note over A,P: create-if-absent, never overwrite: the upload cannot clobber the enrichment
+  P->>S: logical replication
+  S->>L: the enriched row comes back down
+  L->>L: FTS triggers reindex
+```
+
+### 5.3 What happens to a note after it exists
+
+Nothing enqueues enrichment from a controller. Notes arrive by three write paths today
+(`POST /notes`, `POST /sync/upload`, `POST /assistant`) and phase 4 adds four more; a sweep whose
+source of truth is the `notes` table cannot miss one, and phase 1b missed the second write path
+three separate times before this was settled.
+
+```mermaid
+flowchart TD
+  created["a row exists in notes"] --> claim
+
+  subgraph sweep["pg-boss cron, every 60s — one instance holds a lock"]
+    claim["claim_notes_for_enrichment<br/>un-enriched or hash changed, attempts &lt; 5<br/>oldest first, 20 at a time"]
+    claim --> budget{"user over<br/>ENRICH_MONTHLY_BUDGET_USD?"}
+    budget -- yes --> skip["skipped, user excluded, next user claimed"]
+    budget -- no --> embed["embedNote — skipped if embedded_hash still matches"]
+    embed --> chunks[("note_chunks — 1536-dim vectors")]
+    embed --> extract["extractNote — skipped if extracted_hash still matches"]
+    extract --> applied["notes.domain, domain_meta, enriched_at<br/>note_tags (status: suggested)<br/>tags created at most one per run"]
+    extract --> media{"domain_meta.pending_item?"}
+    media -- yes --> items[("media_items — findOrCreate by kind + lower(title)")]
+    extract --> reset["attempts reset to 0"]
+  end
+
+  extract -. "every model call" .-> ledger[("usage_ledger — model, tokens, cost, source, request_id")]
+  embed -.-> ledger
+
+  embed -. "on error" .-> fail
+  extract -. "on error" .-> fail
+  fail["a step throws — work already committed stays committed"] --> attempts["attempts += 1, last_error stored<br/>counted against the text it failed on"]
+  attempts --> dead{"5 attempts on<br/>the same text?"}
+  dead -- yes --> tomb["left alone until the note is edited"]
+  dead -- no --> claim
+
+  chunks --> search["search_notes: hybrid FTS + vector"]
+  search --> uses["POST /search, and the assistant's retrieval"]
+
+  viaBox["captured through the assistant box"] --> inline["extract already ran inline during the turn<br/>and stamped the honest content hash"]
+  inline --> claim
+  inline -.-> note1["so the sweep skips extraction<br/>and only embeds — the call is not paid twice"]
+```
+
+Two hashes, not one, and that is what makes each step independently skippable: `embedded_hash` and
+`extracted_hash` are compared separately against the note's current content hash, so editing a
+note re-runs both, and a note whose extraction was already paid for by an assistant turn is only
+embedded by the sweep.
 
 ---
 
@@ -365,6 +541,22 @@ All inbound channels write to `ingest_inbox` first (idempotency by `(channel, ex
 
 ## 9. Background jobs
 
+> **Amendment 2026-08-15 — enrichment is a cron sweep, not the event-driven job below.**
+> The `note.enrich` row in the first table (enqueued by the API at commit time, debounced 90s)
+> describes a design that was deliberately not built. What runs is a pg-boss cron on `* * * * *`
+> calling `claim_notes_for_enrichment`, a SQL predicate over the `notes` table — see §5.3 for the
+> flow and `apps/api/src/enrich/enrich.service.ts` for the reasoning. The reason is the one this
+> section argued against: notes arrive by several write paths, and *"the API enqueues"* means every
+> new write path must remember to. Phase 1b forgot `POST /sync/upload` three times (`9f7088d`,
+> `445139d`, `867d3b1`). A sweep reading the notes table has no path to miss.
+>
+> The cost is the one this section predicted — enrichment is up to 60 seconds late rather than
+> near-real-time. Stage C1 bought the responsiveness back where it is actually visible: the
+> assistant box runs extraction *inline* during the turn, under a 4-second deadline, and stamps
+> the content hash so the sweep does not pay for the same call again.
+>
+> Everything else in this section (the cron table, digests, memory sweeps) is still unbuilt plan.
+
 **Queue: pg-boss** (Postgres-backed job queue inside the same Supabase DB — no Redis, no extra service, exactly-once-ish with retries, dead-letter after N attempts, cron support). Workers run inside the NestJS process (separate `worker` entrypoint if load ever requires splitting).
 
 **Event-driven** (enqueued by the API at commit time, not by DB triggers — keeps logic in TypeScript):
@@ -553,15 +745,40 @@ clients" should be read that way until an iOS phase is specced. Phase 1b also na
 §6.7's sync scope to the tables that have services and UI, and adds §15's device-security
 controls.
 
+**Amendment 2026-08-15 — where the phases actually stand, and how phase 3 changed shape.**
+
+| Phase | State |
+|---|---|
+| 0 Foundations | merged |
+| 1a web notes, 1c life domains, 1b mobile offline sync | merged, Android only |
+| 2 AI enrichment v1 | merged — as a cron sweep, see §9's amendment |
+| 3 RAG chat | **reshaped and renamed.** It did not ship as a chat screen |
+| 4–10 | unbuilt |
+
+Phase 3 is worth recording properly, because the product changed rather than slipped. "Chat
+sessions with a message list" became **one box**: a single input that captures a thought and
+answers a question, with the intent classified server-side so the user never chooses a mode. The
+stages are specced in `2026-08-10-phase-2-3-assistant-design.md` §1 — **C1** the box on web
+(merged, PR #15), **C2** the box on mobile, where it also replaces the check-in and media-log
+widgets and the AI writes those rows itself (specced 2026-08-15), **C3** web grounding, **D**
+accept/reject chips.
+
+The knock-on for §7's capture table: quick capture, the check-in widget and the media log form
+are three inputs there, and after C2 they are one. Structured rows still get written — the AI
+writes them from the sentence instead of the user filling a form.
+
 **Amendment 2026-08-07 — the AI provider is Gemini, everywhere.** The switch from
 Claude + Voyage + Groq to Gemini alone was decided in
 `docs/superpowers/specs/2026-08-01-life-domains-web-search-design.md` §1, which supersedes
 §4's model table. It has been true in code since `00012_embedding_dims_gemini.sql`:
 `packages/shared/src/enums.ts` exports `EMBEDDING_DIM = 1536` and
 `EMBEDDING_MODEL = "gemini-embedding-001"`, and `packages/db/src/test/embedding-dims.test.ts`
-pins the constant to the width the columns actually declare. The body above has been corrected
-in place; the completed phase-0 and phase-1c plan documents keep their original text, because
-they are execution records and `00012`'s own comment is the account of the change.
+pins the constant to the width the columns actually declare. ~~The body above has been corrected
+in place~~ — it had not been. §4's model list still named `claude-opus-5` and the Anthropic
+Batches API until 2026-08-15, when this was caught while diagramming §5; it is corrected there
+now, with the discrepancy left visible. The completed phase-0 and phase-1c plan documents keep
+their original text, because they are execution records and `00012`'s own comment is the account
+of the change.
 
 ---
 

@@ -46,7 +46,7 @@ function rows() {
 
 describe("captureNote", () => {
   it("writes one note that SQLite actually accepts", async () => {
-    const wrote = await captureNote(target(db), { content: "a thought", domain: null });
+    const wrote = await captureNote(target(db), { content: "a thought", domain: null }, randomUUID());
 
     expect(wrote).toBe(true);
     const [row] = rows();
@@ -66,7 +66,7 @@ describe("captureNote", () => {
    * matched -- so sort order is now the whole of what this format protects.)
    */
   it("stores timestamps as ISO-8601 UTC with milliseconds", async () => {
-    await captureNote(target(db), { content: "x", domain: null });
+    await captureNote(target(db), { content: "x", domain: null }, randomUUID());
 
     const [row] = rows();
     const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -77,7 +77,7 @@ describe("captureNote", () => {
   });
 
   it("writes a timestamp byte-comparable with the one replication delivers", async () => {
-    await captureNote(target(db), { content: "local", domain: null });
+    await captureNote(target(db), { content: "local", domain: null }, randomUUID());
     const local = rows()[0].created_at as string;
 
     // A server row one second OLDER than the capture, in the format replication delivers.
@@ -103,12 +103,12 @@ describe("captureNote", () => {
   });
 
   it("stores the chosen domain", async () => {
-    await captureNote(target(db), { content: "x", domain: "health" });
+    await captureNote(target(db), { content: "x", domain: "health" }, randomUUID());
     expect(rows()[0].domain).toBe("health");
   });
 
   it("writes the column defaults the server will echo back", async () => {
-    await captureNote(target(db), { content: "x", domain: null });
+    await captureNote(target(db), { content: "x", domain: null }, randomUUID());
 
     // Migration 00002: source_type 'quick', lifecycle 'inbox', pinned false. A local row that
     // disagrees visibly changes under the user when replication delivers the server's version.
@@ -118,20 +118,26 @@ describe("captureNote", () => {
     expect(row.pinned).toBe(0);
   });
 
-  it("gives every note a distinct id", async () => {
-    await captureNote(target(db), { content: "one", domain: null });
-    await captureNote(target(db), { content: "two", domain: null });
+  it("writes the id it was given", async () => {
+    const id = randomUUID();
+    await captureNote(target(db), { content: "a thought", domain: null }, id);
 
-    const ids = rows().map((r) => r.id);
-    expect(new Set(ids).size).toBe(2);
-    // The id is what makes the local optimistic row and the server row the same row, so it
-    // has to be a real uuid rather than anything SQLite would coerce.
-    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
+    // Red the moment the SQL goes back to uuid(): the row exists but under a different id,
+    // and the caller's copy names a note the server will never see.
+    expect(rows()[0].id).toBe(id);
+  });
+
+  it("does not write at all when the content is whitespace, even with an id", async () => {
+    const write = vi.fn();
+    const wrote = await captureNote({ execute: write }, { content: "  \n ", domain: null }, randomUUID());
+
+    expect(wrote).toBe(false);
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("refuses to write a note that is only whitespace", async () => {
     const write = vi.fn();
-    const wrote = await captureNote({ execute: write }, { content: "   \n\t ", domain: null });
+    const wrote = await captureNote({ execute: write }, { content: "   \n\t ", domain: null }, randomUUID());
 
     expect(wrote).toBe(false);
     // Not written, not merely reported false -- an empty note is indistinguishable from a bug
@@ -140,7 +146,7 @@ describe("captureNote", () => {
   });
 
   it("stores the trimmed content, not the raw input", async () => {
-    await captureNote(target(db), { content: "  padded  ", domain: null });
+    await captureNote(target(db), { content: "  padded  ", domain: null }, randomUUID());
     // What was rejected as empty must not be what gets written.
     expect(rows()[0].content).toBe("padded");
   });
@@ -148,11 +154,11 @@ describe("captureNote", () => {
   it("binds content and domain in the order the columns expect", async () => {
     // A swapped pair still inserts cleanly on SQLite's dynamic typing and only surfaces as a
     // note whose body is "health" once it has synced.
-    await captureNote(target(db), { content: "body text", domain: "finance" });
+    await captureNote(target(db), { content: "body text", domain: "finance" }, randomUUID());
 
     const [row] = rows();
     expect(row.content).toBe("body text");
     expect(row.domain).toBe("finance");
-    expect(CAPTURE_NOTE_SQL.match(/\?/g)).toHaveLength(2);
+    expect(CAPTURE_NOTE_SQL.match(/\?/g)).toHaveLength(3);
   });
 });

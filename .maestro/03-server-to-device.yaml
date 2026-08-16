@@ -123,7 +123,8 @@ appId: ${APP_ID}
       visible: "DEVELOPMENT SERVERS"
     file: subflows/dismiss-dev-launcher.yaml
 - extendedWaitUntil:
-    visible: "How are you?"
+    visible:
+      id: "box-input"
     timeout: 30000
 # Asked of the search index rather than of the screen. A relaunch opens at the top of the list,
 # where no row is on screen at all, so a bare assertNotVisible here would pass whether the note

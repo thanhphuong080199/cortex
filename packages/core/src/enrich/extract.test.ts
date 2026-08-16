@@ -308,6 +308,82 @@ describe("extractNote", () => {
     expect(data!.request_id).toBeNull();
   });
 
+  it("returns the mood the model reported", async () => {
+    const note = await seedNote("hôm nay mệt quá");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [], mood: 2 });
+
+    // Red the moment `mood` is dropped from the returned object while the schema still asks
+    // for it: the model is paid for the token and nothing ever writes the check-in.
+    expect((await extractNote({ db, ai }, note)).mood).toBe(2);
+  });
+
+  it("returns null when the model reports no mood", async () => {
+    const note = await seedNote("giá vé máy bay tháng sau");
+    const ai = aiReturning({ domain: null, domain_meta: {}, tags: [], mood: null });
+
+    expect((await extractNote({ db, ai }, note)).mood).toBeNull();
+  });
+
+  /**
+   * checkins_mood_or_energy (00013) constrains mood to 1..5. A responseSchema is a request,
+   * not a guarantee -- the same reason intent and complexity are defaulted -- and a mood of 0
+   * would be rejected by the CHECK, failing an extraction that was otherwise fine. Red when
+   * the clamp is removed.
+   */
+  it("drops a mood outside 1..5 rather than passing it on", async () => {
+    for (const bad of [0, 6, 4.5, "good", null]) {
+      const note = await seedNote(`body ${String(bad)}`);
+      const ai = aiReturning({ domain: null, domain_meta: {}, tags: [], mood: bad });
+      expect((await extractNote({ db, ai }, note)).mood).toBeNull();
+    }
+  });
+
+  /**
+   * The prompt is the only thing that makes mood appear at all, and a prompt regression is
+   * otherwise invisible until a user notices their moods stopped being recorded.
+   * `aiCapturingPrompt` hands back what the model was actually shown.
+   */
+  it("tells the model when it may fill mood", async () => {
+    const note = await seedNote("body");
+    const { seen, ai } = aiCapturingPrompt({ domain: null, domain_meta: {}, tags: [], mood: null });
+    await extractNote({ db, ai }, note);
+
+    expect(seen[0]).toContain("mood is 1 to 5");
+  });
+
+  /**
+   * The prompt is the ONLY thing that makes pending_item appear. Without it the model returns
+   * {rating, status}, resolveNoteMediaLink sees no pending_item and returns null, and the
+   * library never learns the film exists -- silently.
+   */
+  it("tells the model to name the work when the domain is media", async () => {
+    const note = await seedNote("vừa xem xong Inception, 8.5/10");
+    const { seen, ai } = aiCapturingPrompt({ domain: null, domain_meta: {}, tags: [], mood: null });
+    await extractNote({ db, ai }, note);
+
+    expect(seen[0]).toContain("pending_item");
+  });
+
+  /**
+   * domainMetaSchemas.media accepts pending_item, so a model that fills it must have it
+   * STORED rather than dropped by the meta validation -- it is the only thing a resolver or a
+   * retry can work from. Red if the meta parse is ever narrowed to strip it.
+   */
+  it("stores a pending_item the model supplied", async () => {
+    const note = await seedNote("vừa xem xong Inception");
+    const ai = aiReturning({
+      domain: "media", tags: [], mood: null,
+      // rating: 4, not 8.5 -- domainMetaSchemas.media.rating is an integer 1-5 (packages/shared/
+      // src/dto/domains.ts). 8.5 would fail the whole object's .strict() parse and drop
+      // pending_item along with it, passing this test for the wrong reason.
+      domain_meta: { rating: 4, pending_item: { kind: "movie", title: "Inception", year: 2010 } },
+    });
+    const out = await extractNote({ db, ai }, note);
+
+    expect((out.domainMeta as Record<string, unknown>).pending_item)
+      .toMatchObject({ title: "Inception" });
+  });
+
   it("stamps extracted_hash", async () => {
     const note = await seedNote("body");
     await extractNote({ db, ai: aiReturning({ domain: null, domain_meta: {}, tags: [] }) }, note);
@@ -368,7 +444,7 @@ describe("extractNote — intent, complexity and language", () => {
     expect(schemas).toHaveLength(1);
     const props = (schemas[0]!.properties ?? {}) as Record<string, unknown>;
     expect(Object.keys(props).sort())
-      .toEqual(["complexity", "domain", "domain_meta", "intent", "tags"]);
+      .toEqual(["complexity", "domain", "domain_meta", "intent", "mood", "tags"]);
   });
 
   // Cortex's users write Vietnamese. A prompt that says nothing about language gets tags back

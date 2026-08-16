@@ -4,11 +4,9 @@ import { ActivityIndicator, Button, Text, View } from "react-native";
 import { signInWithGoogle, signOut } from "@/lib/auth";
 import { createInFlightGuard } from "@/lib/in-flight";
 import { supabase } from "@/lib/supabase";
-import { CheckinWidget } from "@/screens/checkin-widget";
 import { ExportButton } from "@/screens/export-button";
-import { MediaLogForm } from "@/screens/media-log-form";
 import { NoteList } from "@/screens/note-list";
-import { QuickCapture } from "@/screens/quick-capture";
+import { AssistantBox } from "@/screens/assistant-box";
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
@@ -70,13 +68,7 @@ export default function Home() {
         // screen looked exactly as though the user had no notes at all.
         <View style={{ flex: 1, alignSelf: "stretch" }}>
           <NoteList
-            header={
-              <>
-                <QuickCapture />
-                <CheckinWidget />
-                <MediaLogForm />
-              </>
-            }
+            header={<AssistantBox />}
             footer={
               <View style={{ alignItems: "center", gap: 8, padding: 16 }}>
                 <ExportButton />

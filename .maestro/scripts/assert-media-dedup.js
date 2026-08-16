@@ -9,6 +9,12 @@
 // runScript executes on the HOST, not on the device, which is the property that makes this file
 // -- and the offline flows later -- possible at all: the emulator's network can be off while
 // these requests still reach Supabase.
+//
+// NOT CURRENTLY INVOKED by any automated flow: media logging depends on a real model call to
+// resolve `pending_item`, and e2e-mobile.yml pins GEMINI_API_KEY to a dummy value on purpose
+// (no E2E run may reach the real Gemini API), so that extraction can never succeed in CI. See
+// the "media dedup: not exercised here" note in 02-online-basics.yaml. This file is left in
+// place because it is still correct, for whenever a real key becomes available to some flow.
 
 var REST = SUPABASE_URL + "/rest/v1";
 

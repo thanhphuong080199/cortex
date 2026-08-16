@@ -3,7 +3,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
 
-const NOTE = { id: "n1", user_id: "u1", content_text: "hôm nay tôi chạy bộ ở công viên" };
+const NOTE = {
+  id: "n1", user_id: "u1",
+  content_text: "hôm nay tôi chạy bộ ở công viên",
+  created_at: "2026-08-14T01:02:03.000Z",
+};
 
 interface HistoryRow {
   role: string;
@@ -30,7 +34,13 @@ interface HistoryRow {
  * anything looser (e.g. table name alone) would let a fixture written for one chain silently
  * satisfy the other -- exactly the failure mode this double exists to avoid.
  */
-function dbs(opts: { over?: boolean; history?: HistoryRow[] } = {}) {
+function dbs(
+  opts: {
+    over?: boolean; history?: HistoryRow[]; note?: typeof NOTE | null;
+    failInsertOn?: string;
+    mediaItem?: { id: string; title: string; kind: string };
+  } = {},
+) {
   const inserted: Record<string, Record<string, unknown>[]> = {};
 
   function chain(resolve: () => { data: unknown; error: unknown }) {
@@ -38,6 +48,7 @@ function dbs(opts: { over?: boolean; history?: HistoryRow[] } = {}) {
       eq: () => self,
       is: () => self,
       ilike: () => self,
+      filter: () => self,
       order: () => self,
       limit: () => self,
       select: () => self,
@@ -53,13 +64,21 @@ function dbs(opts: { over?: boolean; history?: HistoryRow[] } = {}) {
 
   const insertChain = (name: string, row: Record<string, unknown>) => {
     (inserted[name] ??= []).push(row);
-    return chain(() => ({ data: { id: `${name}-1` }, error: null }));
+    // Spread the row back, not just a placeholder id: NoteService.createWithId reads
+    // `.content`/`.created_at` off what insert().select().single() resolves to, and a
+    // bare `{ id }` would leave those undefined, crashing the md5 hash a few lines later
+    // in runTurn instead of failing the assertion the test actually wrote.
+    return chain(() =>
+      opts.failInsertOn === name
+        ? { data: null, error: { code: "23514", message: "check constraint" } }
+        : { data: { id: `${name}-1`, ...row }, error: null },
+    );
   };
 
   const table = (name: string) => ({
     select: (cols?: string) => {
-      if (name === "notes" && cols === "id, content_text") {
-        return chain(() => ({ data: NOTE, error: null }));
+      if (name === "notes" && cols === "id, content_text, created_at") {
+        return chain(() => ({ data: opts.note === undefined ? NOTE : opts.note, error: null }));
       }
       if (name === "notes" && cols === "domain") {
         return chain(() => ({ data: { domain: null }, error: null }));
@@ -92,12 +111,54 @@ function dbs(opts: { over?: boolean; history?: HistoryRow[] } = {}) {
       if (name === "note_tags" && cols === "tag_id") {
         return chain(() => ({ data: [], error: null }));
       }
+      // MediaService.findLiveByTitle: awaited bare (no .single()), so the shape is always an
+      // array -- empty drives findOrCreate into its insert branch, one entry is a "found" hit.
+      if (name === "media_items") {
+        return chain(() => ({
+          data: opts.mediaItem ? [mediaItemRow()] : [],
+          error: null,
+        }));
+      }
       throw new Error(`dbs() double: unhandled select on "${name}" (cols: ${String(cols)})`);
     },
     insert: (row: Record<string, unknown>) => insertChain(name, row),
-    update: () => chain(() => ({ data: null, error: null })),
+    update: (row: Record<string, unknown> = {}) => {
+      // MediaService.reconcileYear's backfill (`.update({ year }).eq().eq().select().single()`)
+      // when the fixture item is missing the year `pending_item` supplies. Spread the row back,
+      // same trick insertChain uses above -- the caller reads the UPDATED item off this, not a
+      // placeholder.
+      if (name === "media_items") {
+        return chain(() => (
+          opts.mediaItem ? { data: { ...mediaItemRow(), ...row }, error: null } : { data: null, error: null }
+        ));
+      }
+      // resolveNoteMediaLink's link write (`.update({ media_item_id, domain_meta })...
+      // .select("id").maybeSingle()`). A null noteId row (this suite's "note not found" fixtures
+      // never carry domain: "media", so this branch is otherwise unreached) falls through to the
+      // generic case below rather than crashing on `.id`.
+      if (name === "notes" && "media_item_id" in row) {
+        const noteRow = opts.note === undefined ? NOTE : opts.note;
+        return chain(() => (
+          noteRow ? { data: { id: noteRow.id }, error: null } : { data: null, error: null }
+        ));
+      }
+      return chain(() => ({ data: null, error: null }));
+    },
     upsert: () => chain(() => ({ data: null, error: null })),
   });
+
+  // A full MediaItem row (packages/core/src/media/service.ts's interface), defaulted the way a
+  // real media_items row would be, merged with the fixture's `id`/`title`/`kind`. `year: null`
+  // rather than omitted -- reconcileYear branches on `item.year !== null`, and `undefined !==
+  // null` would wrongly take the "year already set, and it conflicts" throw instead of the
+  // "backfill it" update this fixture is built to exercise.
+  function mediaItemRow(): Record<string, unknown> {
+    return {
+      user_id: "u1", year: null, creator: null, external_meta: {},
+      created_at: "2020-01-01T00:00:00.000Z", deleted_at: null,
+      ...opts.mediaItem,
+    };
+  }
 
   const client = {
     from: (n: string) => table(n),
@@ -116,11 +177,12 @@ const collect = async (gen: AsyncGenerator<AssistantEvent>) => {
   return out;
 };
 
-const ai = () =>
+const ai = (value: Record<string, unknown> = {}) =>
   createFakeAi({
     generateJson: async () => ({
-      value: { intent: "statement", complexity: "simple", domain: "health", domain_meta: {}, tags: [] },
-      inputTokens: 5, outputTokens: 2, model: "fake-classify",
+      value: { intent: "statement", complexity: "simple", domain: null,
+               domain_meta: {}, tags: [], mood: null, ...value },
+      inputTokens: 10, outputTokens: 5, model: "fake-classify",
     }),
     generateStream: async () => ({
       chunks: (async function* () { yield { text: "Đã " }; yield { text: "lưu." }; })(),
@@ -328,5 +390,156 @@ describe("runTurn", () => {
     await collect(runTurn({ userDb: client, serviceDb: client, ai: capturing },
       { userId: "u1", noteId: "n1", budgetUsd: 100 }));
     expect(seen).not.toContain("TRUNCATED-EARLIER-ANSWER");
+  });
+
+  /**
+   * The mobile case. The device wrote the note into its own SQLite and PowerSync has not
+   * uploaded it, so the server has never seen the id. Red the moment the create branch is
+   * removed: the first event becomes `error: note not found`.
+   */
+  it("creates the note when it is missing and content was supplied", async () => {
+    const { client, inserted } = dbs({ note: null });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", content: "ghi chú chưa từng lên server", budgetUsd: 100 },
+    ));
+
+    expect(events.map((e) => e.type)).not.toContain("error");
+    expect(inserted.notes?.[0]).toMatchObject({
+      id: "n1", user_id: "u1", content: "ghi chú chưa từng lên server",
+    });
+  });
+
+  it("still reports note not found when the id is unknown and no content was sent", async () => {
+    const { client } = dbs({ note: null });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(events[0]).toEqual({ type: "error", message: "note not found" });
+  });
+
+  /**
+   * Red when the hardcoded `domainMeta: {}` comes back: the box loses the ability to say what
+   * it filed, which Task 8 depends on entirely.
+   */
+  it("puts the extraction's real domain_meta on the attached event", async () => {
+    const { client } = dbs();
+    // rating: 4, not 8.5 -- domainMetaSchemas.media (packages/shared/src/dto/domains.ts)
+    // caps rating at an integer 1-5. A value outside that range would fail
+    // validateDomainMeta's safeParse and get dropped to `{}` by extractNote, which would
+    // make this test pass for the wrong reason (silently exercising the "invalid meta
+    // dropped" branch instead of the "real meta carried through" one it is meant to pin).
+    const scripted = ai({ domain: "media", domain_meta: { rating: 4 } });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: scripted },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    const attached = events.find((e) => e.type === "attached");
+    expect(attached).toMatchObject({ domainMeta: { rating: 4 } });
+  });
+
+  /**
+   * Red when turn.ts reads the mood but never calls createWithId: the model has already been
+   * paid for the token and nothing is written.
+   */
+  it("writes a check-in when the extraction reports a mood", async () => {
+    const { client, inserted } = dbs();
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai({ mood: 4 }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(inserted.checkins?.[0]).toMatchObject({ user_id: "u1", mood: 4 });
+    const mood = events.find((e) => e.type === "mood");
+    expect(mood).toMatchObject({ mood: 4 });
+    // The id the client will mirror the row under. Without it, undo has nothing to name.
+    expect((mood as { checkinId: string }).checkinId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("writes no check-in and emits no mood event when the extraction reports none", async () => {
+    const { client, inserted } = dbs();
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai({ mood: null }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(inserted.checkins).toBeUndefined();
+    expect(events.map((e) => e.type)).not.toContain("mood");
+  });
+
+  /**
+   * The check-in belongs to the moment the thought was captured, which offline can be hours
+   * before the turn runs. Red when createdAt is omitted and the row lands at now().
+   */
+  it("dates the check-in from the note, not from the turn", async () => {
+    const { client, inserted } = dbs();
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai({ mood: 3 }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    // NOTE.created_at, set in Task 5's fixture.
+    expect(inserted.checkins?.[0]).toMatchObject({ created_at: "2026-08-14T01:02:03.000Z" });
+  });
+
+  /**
+   * A failed check-in must not cost the user their answer. Red if the try/catch is removed:
+   * the generator throws and the token stream never arrives.
+   */
+  it("still answers when the check-in write fails", async () => {
+    const { client } = dbs({ failInsertOn: "checkins" });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai({ mood: 4 }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(events.map((e) => e.type)).toContain("token");
+  });
+
+  /**
+   * Red when the resolver call site is removed from the turn: the note is filed under "media"
+   * with a rating and no media_item_id, and the box has nothing to name.
+   */
+  it("links a media note and names the item on the attached event", async () => {
+    const { client } = dbs({ mediaItem: { id: "mi1", title: "Inception", kind: "movie" } });
+    const scripted = ai({
+      domain: "media",
+      // rating: 4, not 8.5 -- domainMetaSchemas.media.rating is an integer 1-5. 8.5 would fail
+      // extractNote's own meta parse and drop pending_item along with it, so the resolver would
+      // never see it and this test would pass without exercising the link at all.
+      domain_meta: { rating: 4, pending_item: { kind: "movie", title: "Inception", year: 2010 } },
+    });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: scripted },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(events.find((e) => e.type === "attached")).toMatchObject({ mediaTitle: "Inception" });
+  });
+
+  /**
+   * A failed link must not cost the answer -- the note and its tags are already the
+   * deliverable. Red if the try/catch around the resolver is removed.
+   */
+  it("still answers when the media link fails", async () => {
+    const { client } = dbs({ failInsertOn: "media_items" });
+    const scripted = ai({
+      domain: "media",
+      // year: 1900, not 1 -- pendingMediaItem.year is an integer 1000-2200 (packages/shared/
+      // src/dto/media.ts). year: 1 fails that check, which fails domainMetaSchemas.media's
+      // .strict() parse for the WHOLE object and drops pending_item too -- resolveNoteMediaLink
+      // would then see no pending_item and return null without ever reaching the failing
+      // insert this test means to exercise.
+      domain_meta: { pending_item: { kind: "movie", title: "Unknown", year: 1900 } },
+    });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: scripted },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(events.map((e) => e.type)).toContain("token");
   });
 });

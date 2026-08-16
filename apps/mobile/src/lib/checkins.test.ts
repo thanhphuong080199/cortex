@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("expo-crypto", () => ({ randomUUID: () => randomUUID() }));
 
-const { LOG_CHECKIN_SQL, UNDO_CHECKIN_SQL, logCheckin, undoCheckin } =
+const { LOG_CHECKIN_SQL, UNDO_CHECKIN_SQL, logCheckin, logCheckinWithId, undoCheckin } =
   await import("./checkins.js");
 type CheckinTarget = Parameters<typeof logCheckin>[0];
 
@@ -76,6 +76,32 @@ describe("logCheckin", () => {
     // `mood between 1 and 5` check only after it has synced.
     expect(rows()[0].mood).toBe(2);
     expect(rows()[0].id).toBe(id);
+  });
+});
+
+describe("logCheckinWithId", () => {
+  it("writes a check-in under an id the server chose", async () => {
+    const id = randomUUID();
+    await logCheckinWithId(target(db), id, 4);
+
+    const [row] = db.prepare("SELECT * FROM checkins").all() as Record<string, unknown>[];
+    expect(row.id).toBe(id);
+    expect(row.mood).toBe(4);
+  });
+
+  /**
+   * The whole reason the mirror exists. The server created the row and replication is a beat
+   * slower than a thumb; undo against a local database that has not received it yet matches
+   * nothing, PowerSync queues no operation, and the check-in the user just undid reappears.
+   *
+   * Red if logCheckinWithId writes a fresh uuid instead of the one it was given.
+   */
+  it("makes undo effective for a row the server created", async () => {
+    const serverId = randomUUID();
+    await logCheckinWithId(target(db), serverId, 2);
+    await undoCheckin(target(db), serverId);
+
+    expect(db.prepare("SELECT * FROM checkins").all()).toHaveLength(0);
   });
 });
 

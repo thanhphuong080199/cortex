@@ -8,6 +8,19 @@ export const assistantInput = z
   .object({
     noteId: z.string().uuid(),
     sessionId: z.string().uuid().optional(),
+    /**
+     * Present when the caller has a note the server may not have yet -- mobile writes to local
+     * SQLite first and PowerSync uploads on its own schedule, so the first turn about a note
+     * always races the upload. The turn creates it if it is missing (get-or-create) and
+     * otherwise ignores this: once the row exists, the text comes from `content_text` in the
+     * database and never from the caller's copy of it.
+     *
+     * The cap matches createNoteInput's 100_000. Restating it as a smaller number here would
+     * make the same note acceptable through POST /notes and rejected through here.
+     */
+    content: z.string().min(1).max(100_000).optional(),
+    /** An offline capture's real timestamp, not the reconnect time. Same field NoteService takes. */
+    createdAt: z.string().datetime().optional(),
   })
   .strict();
 
