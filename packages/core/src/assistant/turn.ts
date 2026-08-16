@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ANSWER_MODEL, CLASSIFY_MODEL } from "@cortex/shared";
-import type { AiClient } from "../ai/client.js";
+import { ANSWER_MODEL, CLASSIFY_MODEL, type WebCitation } from "@cortex/shared";
+import type { AiClient, GroundingResult, WebSource } from "../ai/client.js";
 import { isOverBudget, recordUsage } from "../enrich/budget.js";
 import { extractNote } from "../enrich/extract.js";
 import { errorMessage } from "../errors.js";
@@ -16,6 +16,7 @@ export type AssistantEvent =
   | { type: "attached"; domain: string | null; domainMeta: Record<string, unknown>;
       tags: string[]; degraded?: boolean; mediaTitle?: string }
   | { type: "citations"; citations: Citation[]; degraded?: boolean }
+  | { type: "web"; sources: WebSource[]; queries: string[]; entryPoint?: string }
   | { type: "mood"; checkinId: string; mood: number }
   | { type: "token"; text: string }
   | { type: "declined"; reason: "budget" }
@@ -245,19 +246,46 @@ export async function* runTurn(
   let answer = "";
   let incomplete = false;
   let streamUsage: { inputTokens: number; outputTokens: number; model: string } | null = null;
+  let grounding: GroundingResult | null = null;
   try {
-    const stream = await ai.generateStream({ prompt, model, signal: args.signal });
+    const stream = await ai.generateStream({
+      prompt, model, signal: args.signal,
+      // The whole enablement decision. Never unconditional: see the acknowledge-path test.
+      grounding: isQuestion,
+    });
     try {
       for await (const chunk of stream.chunks) {
         answer += chunk.text;
         yield { type: "token", text: chunk.text };
       }
     } finally {
+      // Both reads live in the `finally` for the same reason: an aborted answer has still been
+      // billed and has still been searched, and neither fact survives if it is only read on the
+      // success path.
       streamUsage = stream.usage();
+      grounding = stream.grounding?.() ?? null;
     }
   } catch (err) {
     incomplete = true;
     yield { type: "error", message: errorMessage(err).slice(0, 200) };
+  }
+
+  // `searched` and "has sources" are different facts and are used for different things. Google
+  // billed the turn the moment the model issued a query, even if every chunk came back
+  // unusable -- so the ledger row (Task 6) keys off `searched`. The EVENT keys off having
+  // something to show: emitting `sources: []` would force every client to re-check a length,
+  // when "a web event arrived" is otherwise exactly "the box searched".
+  const searched = grounding !== null && grounding.queries.length > 0;
+  const webCitations: WebCitation[] = (grounding?.sources ?? [])
+    .map((s) => ({ type: "web" as const, url: s.url, title: s.title }));
+
+  if (grounding && grounding.sources.length > 0) {
+    yield {
+      type: "web",
+      sources: grounding.sources,
+      queries: grounding.queries,
+      ...(grounding.entryPoint !== undefined ? { entryPoint: grounding.entryPoint } : {}),
+    };
   }
 
   // Billed whether or not it finished. An abandoned answer is still money spent, and this is
@@ -277,7 +305,9 @@ export async function* runTurn(
 
   const { data: message } = await userDb.from("chat_messages").insert({
     user_id: args.userId, session_id: sessionId, role: "assistant", content: answer,
-    citations, retrieval_meta: { requestId, incomplete },
+    // `citations` already carries `type: "note"` from retrieve.ts, so no mapping happens here.
+    citations: [...citations, ...webCitations],
+    retrieval_meta: { requestId, incomplete },
   }).select("id").single();
 
   if (!incomplete) {

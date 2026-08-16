@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { GroundingResult } from "../ai/client.js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
 
@@ -541,5 +542,99 @@ describe("runTurn", () => {
     ));
 
     expect(events.map((e) => e.type)).toContain("token");
+  });
+
+  // A scripted stream that reports grounding, for the tests below.
+  const groundedAi = (g: GroundingResult | null, intent = "question") => createFakeAi({
+    generateJson: async () => ({
+      value: { intent, complexity: "simple", domain: null, domain_meta: {}, tags: [], mood: null },
+      inputTokens: 5, outputTokens: 2, model: "fake-classify",
+    }),
+    generateStream: async (args) => {
+      seenArgs = args;
+      return {
+        chunks: (async function* () { yield { text: "câu trả lời" }; })(),
+        usage: () => ({ inputTokens: 30, outputTokens: 8, model: "fake-answer" }),
+        grounding: () => g,
+      };
+    },
+  });
+  let seenArgs: { grounding?: boolean } | undefined;
+
+  it("declares grounding on the answer path", async () => {
+    const { client } = dbs();
+    seenArgs = undefined;
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: groundedAi(null) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seenArgs?.grounding).toBe(true);
+  });
+
+  // The acknowledge branch runs CLASSIFY_MODEL and files a statement. Searching the web to
+  // acknowledge "hôm nay mình ngủ 5 tiếng" spends money on nothing AND sends a private sentence
+  // to Google for nothing -- two costs, neither recoverable. Turns red the moment `grounding`
+  // is passed unconditionally instead of as `isQuestion`.
+  it("does NOT declare grounding on the acknowledge path", async () => {
+    const { client } = dbs();
+    seenArgs = undefined;
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: groundedAi(null, "statement") },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seenArgs?.grounding).toBeFalsy();
+  });
+
+  it("emits a web event carrying the sources and the queries", async () => {
+    const { client } = dbs();
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: groundedAi({
+          sources: [{ url: "https://a.example", title: "a" }],
+          queries: ["Dune 3"], entryPoint: "<div>chips</div>",
+        }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 },
+    ));
+    expect(events.find((e) => e.type === "web")).toEqual({
+      type: "web",
+      sources: [{ url: "https://a.example", title: "a" }],
+      queries: ["Dune 3"],
+      entryPoint: "<div>chips</div>",
+    });
+  });
+
+  // "Did this turn search the web" is exactly "did a web event arrive", with no second flag to
+  // keep in step. An unconditional yield destroys that property: a notes-only turn would emit
+  // `sources: []` and every client would need to re-check the length.
+  it("emits no web event at all when nothing was searched", async () => {
+    const { client } = dbs();
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: groundedAi(null) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 },
+    ));
+    expect(events.some((e) => e.type === "web")).toBe(false);
+  });
+
+  // It cannot ride in `citations` (yielded at turn.ts:222, before generateStream at 249 -- the
+  // metadata does not exist yet), and it must not arrive after `done`, which is the clients'
+  // end-of-turn signal.
+  it("emits web after the last token and before done", async () => {
+    const { client } = dbs();
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: groundedAi({
+          sources: [{ url: "https://a.example", title: "a" }], queries: ["q"],
+        }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 },
+    ));
+    const types = events.map((e) => e.type);
+    expect(types.lastIndexOf("token")).toBeLessThan(types.indexOf("web"));
+    expect(types.indexOf("web")).toBeLessThan(types.indexOf("done"));
+  });
+
+  it("persists web sources alongside note citations", async () => {
+    const { client, inserted } = dbs();
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: groundedAi({
+          sources: [{ url: "https://a.example", title: "a" }], queries: ["q"],
+        }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 },
+    ));
+    const msg = (inserted.chat_messages ?? []).find((r) => r.role === "assistant");
+    expect(msg!.citations).toContainEqual({ type: "web", url: "https://a.example", title: "a" });
   });
 });
