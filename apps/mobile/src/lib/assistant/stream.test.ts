@@ -91,4 +91,35 @@ describe("streamAssistantTurn", () => {
     );
     expect(await collect(streamAssistantTurn({ ...args, fetchFn }))).toEqual([{ type: "done" }]);
   });
+
+  it("yields a web event with its sources and queries", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      sseResponse(
+        'event: token\ndata: {"text":"ừ"}\n\n' +
+        'event: web\ndata: {"sources":[{"type":"web","url":"https://a.example","title":"a"}],' +
+        '"queries":["Dune 3"]}\n\n' +
+        'event: done\ndata: {"messageId":"m1","sessionId":"s1"}\n\n',
+      ),
+    );
+
+    const events = await collect(streamAssistantTurn({ ...args, fetchFn }));
+    expect(events).toContainEqual({
+      type: "web",
+      sources: [{ type: "web", url: "https://a.example", title: "a" }],
+      queries: ["Dune 3"],
+    });
+  });
+
+  // The default: break at stream.ts already documents that the server is deployed
+  // independently of the APK. This pins it, so adding a `throw` there later fails here rather
+  // than in a user's hands.
+  it("drops an event type this build does not know", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      sseResponse(
+        'event: some_future_event\ndata: {"x":1}\n\nevent: done\ndata: {"messageId":"m","sessionId":"s"}\n\n',
+      ),
+    );
+    const events = await collect(streamAssistantTurn({ ...args, fetchFn }));
+    expect(events.map((e) => (e as { type: string }).type)).toEqual(["done"]);
+  });
 });
