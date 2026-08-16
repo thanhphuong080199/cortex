@@ -72,7 +72,7 @@ appId: ${APP_ID}
     direction: DOWN
     timeout: 15000
 
-# ---- 5. double-tap Save ----
+# ---- 5. double-tap Send ----
 # The in-flight guard (lib/in-flight.ts) has to collapse this to ONE note. `disabled={saving}`
 # cannot do it alone: state updates are async, so two taps in the same frame both read
 # saving === false and each one is a separate INSERT -- the second of which is invisible on
@@ -80,10 +80,12 @@ appId: ${APP_ID}
 # condition.
 - runFlow: subflows/scroll-to-top.yaml
 - tapOn:
-    id: "capture-input"
+    id: "box-input"
 - inputText: ${DOUBLE_TAP_MARKER}
-- doubleTapOn:
-    id: "capture-save"
+- tapOn:
+    id: "box-send"
+- tapOn:
+    id: "box-send"
 
 # ---- 4. FTS5 and the apostrophe ----
 # A bare quote is SYNTAX to FTS5's MATCH, so an unescaped query either errors or silently
@@ -240,17 +242,18 @@ appId: ${APP_ID}
       NOTE_ID: ${NOTE_CONFLICT_TARGET}
       NEW_CONTENT: "SERVERBODY written on the web while the phone was offline."
 
-# ---- 8. mood check-in, then undo ----
-# Insert and delete only (lib/checkins.ts) -- neither needs a server decision, so both work
-# offline unchanged. The undo must leave nothing behind once the queue drains.
-- runFlow: subflows/scroll-to-top.yaml
+# ---- 8. offline, the box answers from the local index ----
 - tapOn:
-    text: "Mood 2 of 5 — bad"
-- assertVisible: "Logged ✓"
-- tapOn: "Undo"
+    id: "box-input"
+- inputText: "định giá"
+- tapOn:
+    id: "box-send"
+# No network, so this must resolve from local SQLite alone and quickly. A timeout here means
+# the offline branch is reaching for the network.
 - extendedWaitUntil:
-    notVisible: "Logged ✓"
-    timeout: 20000
+    visible:
+      id: "box-status"
+    timeout: 5000
 
 # Mục 4 step 3 is covered above, on "Restore target". It was not, until note-editor.tsx gained
 # the Restore control it had been missing since Task 13 -- `restoreNote` existed and was

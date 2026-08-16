@@ -37,26 +37,22 @@ appId: ${APP_ID}
 # No network involved: capture is one local INSERT and the list is a reactive query over the
 # same local database (screens/quick-capture.tsx), so this must be instant even offline.
 - tapOn:
-    id: "capture-input"
+    id: "box-input"
 - inputText: "vorpal blade went snicker snack"
 - tapOn:
-    id: "capture-save"
-# NOT `assertVisible: "Saved ✓"`. That label is on the Save button for exactly 1500ms
-# (quick-capture.tsx: `setTimeout(() => setSaved(false), 1500)`), while a single Maestro command
-# on this emulator costs 3-6s -- so the badge is usually gone before the first hierarchy dump
-# even lands. It passed by luck until run 31139453992, whose hierarchy at the failed assertion
-# showed capture-save reading "Save" and capture-input already back to its placeholder: the note
-# had been written and only the timer had fired. No flow can win that race; asserting a 1.5s
-# animation is the defect, not the emulator being slow.
-#
-# The box clearing is the DURABLE half of the same branch. `save()` reaches setContent("") only
-# when captureNote returned truthy -- the identical condition that sets `saved` -- so this proves
-# the write path without depending on a timer. The row assertion below is the other half.
+    id: "box-send"
+# The box clears on the LOCAL insert, before any network -- so the cleared field is the
+# capture confirmation, exactly as it was for quick capture. Not `assertVisible` on a badge:
+# there is no 1500ms "Saved ✓" label any more.
+- assertVisible:
+    id: "box-input"
+    text: ""
+# The online half of the turn: an answer actually streams back. This is the assertion the
+# whole SSE path exists for, and no vitest suite can make it -- they all inject a fake fetch.
 - extendedWaitUntil:
     visible:
-      id: "capture-input"
-      text: "Capture a thought"
-    timeout: 15000
+      id: "box-answer"
+    timeout: 30000
 # The new note is the newest, so it is row 1 -- but row 1 still sits below the whole header.
 # scrollUntilVisible retries until its timeout, so this keeps the "appears immediately" meaning.
 - scrollUntilVisible:
@@ -129,12 +125,21 @@ appId: ${APP_ID}
     direction: DOWN
     timeout: 15000
 
-# ---- mood check-in ----
-# The widget is in the header, above the rows the previous step scrolled to.
-- runFlow: subflows/scroll-to-top.yaml
+# ---- mood, written by the assistant from the sentence ----
 - tapOn:
-    text: "Mood 4 of 5 — good"
-- assertVisible: "Logged ✓"
+    id: "box-input"
+- inputText: "hôm nay mình thấy vui"
+- tapOn:
+    id: "box-send"
+# Online only, and it is a model call, so it needs a real timeout rather than the default.
+- extendedWaitUntil:
+    visible:
+      id: "box-mood"
+    timeout: 30000
+- tapOn:
+    id: "box-mood-undo"
+- assertNotVisible:
+    id: "box-mood"
 
 # ---- media log, colliding case, must reuse the seeded item ----
 # The seed logged "Dune"; this logs "dune". The find-or-create key is

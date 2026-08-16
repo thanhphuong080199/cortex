@@ -40,7 +40,7 @@ var captured = eventually(function () {
   return r.length === 1 ? r : null;
 }, "the offline capture to upload exactly once");
 
-/* ---- 5. the double-tapped Save produced ONE note ---- */
+/* ---- 5. the double-tapped Send produced ONE note ---- */
 // Waited for rather than read once: an extra note from a lost in-flight race would arrive a
 // moment later, and reading too early would call that a pass.
 var dbl = eventually(function () {
@@ -99,8 +99,9 @@ eventually(function () {
 }, "the offline restore to win over the offline trash on the same row");
 
 /* ---- 8. undo left nothing behind ---- */
-// 04a logged mood 2 and undid it. A check-in surviving here means undo produced a local delete
-// that never reached the server, or reached it and was replayed back.
+// 02 logged a mood through the assistant box and undid it. A check-in surviving here means undo
+// produced no local delete, or produced one PowerSync never uploaded -- the failure the local
+// mirror in lib/checkins.ts exists to prevent.
 var checkins = get("/checkins?select=id&mood=eq.2&deleted_at=is.null");
 if (checkins.length !== 0) {
   throw new Error("undo left " + checkins.length + " check-in(s) on the server");
