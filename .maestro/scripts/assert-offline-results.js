@@ -102,7 +102,13 @@ eventually(function () {
 // 02 logged a mood through the assistant box and undid it. A check-in surviving here means undo
 // produced no local delete, or produced one PowerSync never uploaded -- the failure the local
 // mirror in lib/checkins.ts exists to prevent.
-var checkins = get("/checkins?select=id&mood=eq.2&deleted_at=is.null");
+//
+// No mood=eq.N filter: the mood value is model-inferred from a sentence now, not a fixed input
+// a human picked on a widget, and extract.ts's prompt gives it no numeric anchoring. Pinning to
+// one value would make this assertion pass vacuously whenever the model picked a different
+// number -- the check has to cover "any live check-in," not one exact mood. Mood-logging happens
+// exactly once per full run (02's mood section), so this filter cannot pick up an unrelated row.
+var checkins = get("/checkins?select=id&deleted_at=is.null");
 if (checkins.length !== 0) {
   throw new Error("undo left " + checkins.length + " check-in(s) on the server");
 }

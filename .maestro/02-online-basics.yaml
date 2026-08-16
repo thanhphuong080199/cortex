@@ -142,22 +142,22 @@ appId: ${APP_ID}
     id: "box-mood"
 
 # ---- media log, colliding case, must reuse the seeded item ----
-# The seed logged "Dune"; this logs "dune". The find-or-create key is
+# The seed logged "Dune"; this logs "dune", written by the assistant from a sentence, the same
+# way the mood section above logs a check-in. The find-or-create key is
 # (user_id, kind, lower(title)), so this must land on the SAME media_items row and leave two
 # notes pointing at it. Asserted server-side below, because the device cannot see the join.
-- scrollUntilVisible:
-    element:
-      id: "media-title"
-    direction: DOWN
+# There is no rating extraction any more -- extract.ts's prompt fills domain_meta.pending_item
+# with {kind, title, year?} and nothing else, so the old star-rating tap has no equivalent.
+- tapOn:
+    id: "box-input"
+- inputText: "mình vừa xem lại phim dune tối qua"
+- tapOn:
+    id: "box-send"
+# Online only, and it is a model call, so it needs a real timeout rather than the default.
+- extendedWaitUntil:
+    visible:
+      id: "box-attached"
     timeout: 30000
-- tapOn:
-    id: "media-title"
-- inputText: "dune"
-# The stars and the save button sit BELOW the title box, which is where the keyboard now is.
-- hideKeyboard
-- tapOn: "5 of 5 stars"
-- tapOn:
-    id: "media-save"
 
 # The write goes to the local database, then uploads. Wait for the note to come back before
 # asking the server what it made of it.

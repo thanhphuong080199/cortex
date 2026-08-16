@@ -56,17 +56,13 @@ appId: ${APP_ID}
 # One local INSERT and nothing else (screens/quick-capture.tsx), so this must be
 # indistinguishable from the online case -- no spinner, no pending badge.
 - tapOn:
-    id: "capture-input"
+    id: "box-input"
 - inputText: ${CAPTURE_MARKER}
 - tapOn:
-    id: "capture-save"
-# The cleared box rather than "Saved ✓", for the reason spelled out in 02: the badge is a 1500ms
-# timer and the emulator is slower than that. Same branch of save(), no race.
-- extendedWaitUntil:
-    visible:
-      id: "capture-input"
-      text: "Capture a thought"
-    timeout: 15000
+    id: "box-send"
+- assertVisible:
+    id: "box-input"
+    text: ""
 - scrollUntilVisible:
     element: ${CAPTURE_MARKER}
     direction: DOWN
