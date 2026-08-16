@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { readEvents, type Citation } from "@cortex/shared";
 import { api } from "@/lib/api";
 
@@ -10,7 +10,16 @@ type Attached = {
   degraded?: boolean;
 };
 
-export function AssistantBox({ token }: { token: string }) {
+type Message = { id: string; content: string };
+
+/**
+ * The one chat box (see memory: Cortex's UI target is a single ChatGPT-style thread, not
+ * the domain forms). Past captures render as user bubbles above the composer; mood, media
+ * and domain/tag are attached by the assistant itself rather than picked in this UI --
+ * the sidebar's widgets exist only as accelerators, never as the primary path.
+ */
+export function AssistantBox({ token, initialMessages }: { token: string; initialMessages?: Message[] }) {
+  const [messages, setMessages] = useState<Message[]>(initialMessages ?? []);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -22,6 +31,7 @@ export function AssistantBox({ token }: { token: string }) {
   const [citations, setCitations] = useState<Citation[]>([]);
   const [answer, setAnswer] = useState("");
   const [online, setOnline] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setOnline(navigator.onLine);
@@ -31,6 +41,15 @@ export function AssistantBox({ token }: { token: string }) {
     window.addEventListener("offline", down);
     return () => { window.removeEventListener("online", up); window.removeEventListener("offline", down); };
   }, []);
+
+  // Keeps the newest turn in view -- messages, the reply bubble and errors all land at the
+  // bottom of an ever-growing thread, exactly the case a chat UI has to autoscroll for.
+  useEffect(() => {
+    // `scrollTop =` rather than `.scrollTo(...)`: it's a plain property every DOM
+    // implementation (including jsdom, where this component's tests run) supports, with
+    // no smooth-scroll API surface to be missing.
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, attached, citations, answer, status, error]);
 
   async function submit() {
     if (!text.trim() || busy) return;
@@ -53,7 +72,9 @@ export function AssistantBox({ token }: { token: string }) {
       return;
     }
 
-    // Cleared only after createNote resolves -- a capture box never loses a thought.
+    // Appended only after createNote resolves -- a capture box never loses a thought, and
+    // never shows a bubble for a message that was never actually saved.
+    setMessages((prev) => [...prev, { id: note.id, content: text }]);
     setText("");
 
     try {
@@ -87,45 +108,66 @@ export function AssistantBox({ token }: { token: string }) {
     return <div className="banner" role="status">Offline — capture is disabled until the connection returns.</div>;
   }
 
+  const hasReply = attached !== null || citations.length > 0 || answer !== "" || status !== null;
+
   return (
-    <div className="assistant-box">
-      <textarea
-        rows={3}
-        value={text}
-        placeholder="What are you thinking?"
-        aria-label="What are you thinking?"
-        disabled={busy}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void submit(); }}
-      />
-      <button type="button" disabled={busy} onClick={() => void submit()}>Send</button>
+    <div className="chat-pane">
+      <div className="chat-scroll" ref={scrollRef}>
+        {messages.length === 0 && !hasReply && (
+          <p className="chat-empty">What are you thinking?</p>
+        )}
 
-      {/* attached and citations are separate pieces of state: the server emits them
-          concurrently, and either can arrive first. */}
-      {attached && (
-        <p className="attached">
-          {attached.domain ? `Filed under: ${attached.domain}` : "Not filed under a domain"}
-          {attached.tags.length > 0 ? ` — tagged ${attached.tags.join(", ")}` : ""}
-        </p>
-      )}
+        {messages.map((m) => (
+          <div key={m.id} className="bubble user"><p>{m.content}</p></div>
+        ))}
 
-      {citations.length > 0 && (
-        <ul className="citations">
-          {citations.map((c) => (
-            <li key={c.noteId}>{c.title ?? "Untitled"}</li>
-          ))}
-        </ul>
-      )}
+        {hasReply && (
+          <div className="bubble assistant">
+            {/* attached and citations are separate pieces of state: the server emits them
+                concurrently, and either can arrive first. */}
+            {attached && (
+              <p className="attached">
+                {attached.domain ? `Filed under: ${attached.domain}` : "Not filed under a domain"}
+                {attached.tags.length > 0 ? ` — tagged ${attached.tags.join(", ")}` : ""}
+              </p>
+            )}
 
-      {answer && <p className="answer">{answer}</p>}
+            {citations.length > 0 && (
+              <ul className="citations">
+                {citations.map((c) => (
+                  <li key={c.noteId}>{c.title ?? "Untitled"}</li>
+                ))}
+              </ul>
+            )}
 
-      {error ? (
-        <p className="error" role="alert">
+            {answer && <p className="answer">{answer}</p>}
+
+            {!error && status && <p className="hint" role="status">{status}</p>}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p className="error chat-error" role="alert">
           {error} <button type="button" onClick={() => void submit()}>Retry</button>
         </p>
-      ) : (
-        status && <p className="hint" role="status">{status}</p>
       )}
+
+      <form
+        className="chat-composer"
+        onSubmit={(e) => { e.preventDefault(); void submit(); }}
+      >
+        <textarea
+          rows={1}
+          value={text}
+          placeholder="What are you thinking?"
+          aria-label="What are you thinking?"
+          disabled={busy}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void submit(); }}
+        />
+        <button type="submit" disabled={busy}>Send</button>
+      </form>
     </div>
   );
 }
