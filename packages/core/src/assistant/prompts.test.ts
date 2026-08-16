@@ -46,10 +46,11 @@ describe("buildAnswerPrompt", () => {
     expect(p).toContain("[1] Giấc ngủ: ngủ 5 tiếng");
   });
 
-  it("says plainly what to do when there is nothing to answer from", () => {
+  it("tells the model there are no matching notes, and that it may answer from general knowledge instead", () => {
     const empty = buildAnswerPrompt({ question: "q", citations: [], history: [] });
-    expect(empty).toMatch(/say so/i);
     expect(empty).toMatch(/no notes matching/i);
+    expect(empty).toMatch(/general knowledge/i);
+    expect(empty).toMatch(/say plainly/i);
     // The other half of the branch. Without it, inverting the ternary in the renderer only
     // shows up as a missing citation, and a prompt that tells the model there is nothing to
     // read WHILE handing it notes is the harder failure to spot in an eval.

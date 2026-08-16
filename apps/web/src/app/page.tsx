@@ -1,15 +1,10 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { noteDomain } from "@cortex/shared";
-import {
-  NOTE_VIEWS, VIEW_LABELS, applyNoteFilters, noteSelect, parseNoteFilters,
-} from "@/lib/note-views";
+import { applyNoteFilters, noteSelect, parseNoteFilters } from "@/lib/note-views";
+import { AppShell } from "./app-shell";
 import { AssistantBox } from "./assistant-box";
-import { CheckinWidget } from "./checkin-widget";
-import { ExportButton } from "./export-button";
-import { MediaLogPanel } from "./media-log-panel";
-import { NoteList, type NoteRow } from "./note-list";
+import { Sidebar } from "./sidebar";
+import type { NoteRow } from "./note-list";
 
 export default async function Home(
   { searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> },
@@ -54,50 +49,24 @@ export default async function Home(
     return `/?${sp.toString()}`;
   };
 
+  // Chat reads top-to-bottom, oldest first; the note list beside it (in the sidebar) is the
+  // same rows in the opposite, most-recent-first order the query already fetched them in.
+  const messages = [...notes].reverse().map((n) => ({ id: n.id, content: n.content }));
+
   return (
-    <main className="wrap">
-      <div className="topbar">
-        <h1>Cortex</h1>
-        <span className="spacer" />
-        <Link className="btn" href="/search">Search</Link>
-        <ExportButton token={session.access_token} />
-        <form action="/auth/signout" method="post"><button>Sign out</button></form>
-      </div>
-
-      {/* Above capture on purpose: a check-in must be reachable without scrolling past a
-          textarea, which is the friction that kills mood logging (spec §3). */}
-      <CheckinWidget token={session.access_token} />
-
-      <AssistantBox token={session.access_token} />
-
-      <MediaLogPanel token={session.access_token} />
-
-      <nav className="views">
-        {NOTE_VIEWS.map((v) => (
-          <Link key={v} href={href(v)} className={v === view ? "on" : ""}>{VIEW_LABELS[v]}</Link>
-        ))}
-      </nav>
-
-      <nav className="domains" aria-label="Filter by domain">
-        {noteDomain.options.map((d) => (
-          <Link key={d} href={domainHref(d)} className={d === domain ? "on" : ""}
-                aria-current={d === domain ? "true" : undefined}>
-            {d}
-          </Link>
-        ))}
-      </nav>
-
-      <form className="search" action="/" method="get">
-        <input type="hidden" name="view" value={view} />
-        {tag && <input type="hidden" name="tag" value={tag} />}
-        {domain && <input type="hidden" name="domain" value={domain} />}
-        <input type="text" name="q" defaultValue={q} placeholder="Search notes…" aria-label="Search notes" />
-        <button type="submit">Search</button>
-        {(q || tag || domain) && <Link className="btn" href={`/?view=${view}`}>Clear</Link>}
-      </form>
-
-      <NoteList initialNotes={notes} filters={filters}
-                userId={user.id} token={session.access_token} />
-    </main>
+    <AppShell
+      sidebar={
+        <Sidebar
+          token={session.access_token}
+          userId={user.id}
+          notes={notes}
+          filters={filters}
+          href={href}
+          domainHref={domainHref}
+        />
+      }
+    >
+      <AssistantBox token={session.access_token} initialMessages={messages} />
+    </AppShell>
   );
 }
