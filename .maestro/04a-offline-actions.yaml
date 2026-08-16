@@ -62,7 +62,7 @@ appId: ${APP_ID}
     id: "box-send"
 - assertVisible:
     id: "box-input"
-    text: ""
+    text: "Bạn đang nghĩ gì?"
 - scrollUntilVisible:
     element: ${CAPTURE_MARKER}
     direction: DOWN
@@ -78,9 +78,7 @@ appId: ${APP_ID}
 - tapOn:
     id: "box-input"
 - inputText: ${DOUBLE_TAP_MARKER}
-- tapOn:
-    id: "box-send"
-- tapOn:
+- doubleTapOn:
     id: "box-send"
 
 # ---- 4. FTS5 and the apostrophe ----
@@ -239,6 +237,7 @@ appId: ${APP_ID}
       NEW_CONTENT: "SERVERBODY written on the web while the phone was offline."
 
 # ---- 8. offline, the box answers from the local index ----
+- runFlow: subflows/scroll-to-top.yaml
 - tapOn:
     id: "box-input"
 - inputText: "định giá"

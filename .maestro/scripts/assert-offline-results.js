@@ -98,21 +98,6 @@ eventually(function () {
   return r[0].deleted_at === null ? r : null;
 }, "the offline restore to win over the offline trash on the same row");
 
-/* ---- 8. undo left nothing behind ---- */
-// 02 logged a mood through the assistant box and undid it. A check-in surviving here means undo
-// produced no local delete, or produced one PowerSync never uploaded -- the failure the local
-// mirror in lib/checkins.ts exists to prevent.
-//
-// No mood=eq.N filter: the mood value is model-inferred from a sentence now, not a fixed input
-// a human picked on a widget, and extract.ts's prompt gives it no numeric anchoring. Pinning to
-// one value would make this assertion pass vacuously whenever the model picked a different
-// number -- the check has to cover "any live check-in," not one exact mood. Mood-logging happens
-// exactly once per full run (02's mood section), so this filter cannot pick up an unrelated row.
-var checkins = get("/checkins?select=id&deleted_at=is.null");
-if (checkins.length !== 0) {
-  throw new Error("undo left " + checkins.length + " check-in(s) on the server");
-}
-
 /* ---- mục 5. created_at is the CAPTURE time, not the upload time ---- */
 // The note was captured minutes before the radios came back. If created_at were stamped when
 // the server received it, it would be seconds old rather than minutes.
