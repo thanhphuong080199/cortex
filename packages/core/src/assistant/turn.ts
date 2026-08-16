@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ANSWER_MODEL, CLASSIFY_MODEL, type WebCitation } from "@cortex/shared";
+import { ANSWER_MODEL, CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, type WebCitation } from "@cortex/shared";
 import type { AiClient, GroundingResult, WebSource } from "../ai/client.js";
 import { isOverBudget, recordUsage } from "../enrich/budget.js";
 import { extractNote } from "../enrich/extract.js";
@@ -300,6 +300,24 @@ export async function* runTurn(
       });
     } catch (err) {
       console.error(`[assistant] usage_ledger write failed: ${errorMessage(err)}`);
+    }
+  }
+
+  // A SECOND row, not a field on the chat row. Grounding is priced per query while the answer
+  // is priced per token, and folding a per-query charge into a per-token row makes both
+  // unreadable. `source: 'assistant'` is what puts it inside the existing circuit breaker --
+  // isOverBudget sums by source, so no new budget is introduced.
+  if (searched) {
+    try {
+      await recordUsage(serviceDb, {
+        userId: args.userId, kind: "grounding", model,
+        inputTokens: 0, outputTokens: 0,
+        costUsd: GROUNDING_USD_PER_QUERY,
+        source: "assistant", noteId: args.noteId, requestId,
+        latencyMs: Date.now() - classifyStarted, contentChars: text.length,
+      });
+    } catch (err) {
+      console.error(`[assistant] grounding usage_ledger write failed: ${errorMessage(err)}`);
     }
   }
 

@@ -30,7 +30,7 @@ export async function recordUsage(
   db: SupabaseClient,
   u: {
     userId: string;
-    kind: "embed" | "tag" | "chat";
+    kind: "embed" | "tag" | "chat" | "grounding";
     model: string;
     inputTokens: number;
     outputTokens: number;
@@ -40,6 +40,14 @@ export async function recordUsage(
     attempt?: number;
     latencyMs?: number;
     contentChars?: number;
+    /**
+     * An explicit price, for a call priceUsd cannot compute. Grounding is billed per QUERY, so
+     * its row carries 0 tokens and priceUsd would return 0 -- the row would land free and the
+     * ledger would under-report the most expensive per-unit thing in the system. Used by that
+     * one call site and no other; everything else must keep pricing from tokens, or a caller
+     * can quietly set its own bill.
+     */
+    costUsd?: number;
   },
 ): Promise<void> {
   // `source` is REQUIRED, not optional with a default. A default would put every new call
@@ -55,7 +63,7 @@ export async function recordUsage(
     model: u.model,
     input_tokens: u.inputTokens,
     output_tokens: u.outputTokens,
-    cost_usd: priceUsd(u.model, u.inputTokens, u.outputTokens),
+    cost_usd: u.costUsd ?? priceUsd(u.model, u.inputTokens, u.outputTokens),
     source: u.source,
   };
   if (u.noteId !== undefined) row.note_id = u.noteId;

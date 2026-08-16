@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { GROUNDING_USD_PER_QUERY } from "@cortex/shared";
 import type { GroundingResult } from "../ai/client.js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
@@ -636,5 +637,40 @@ describe("runTurn", () => {
     ));
     const msg = (inserted.chat_messages ?? []).find((r) => r.role === "assistant");
     expect(msg!.citations).toContainEqual({ type: "web", url: "https://a.example", title: "a" });
+  });
+
+  it("bills a grounded turn against the assistant budget", async () => {
+    const { client, inserted } = dbs();
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: groundedAi({
+          sources: [{ url: "https://a.example", title: "a" }], queries: ["Dune 3"],
+        }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 },
+    ));
+    const row = (inserted.usage_ledger ?? []).find((r) => r.kind === "grounding");
+    expect(row, "no grounding row was written").toBeDefined();
+    expect(row!.cost_usd).toBeCloseTo(GROUNDING_USD_PER_QUERY, 6);
+    // `source: 'assistant'` is what makes isOverBudget see it -- that function sums by SOURCE,
+    // not by kind, so any other value here means grounding spend never declines a later turn.
+    expect(row!.source).toBe("assistant");
+  });
+
+  // The model searched and every chunk came back unusable. Google still billed the query.
+  it("bills a turn that searched and got no usable sources", async () => {
+    const { client, inserted } = dbs();
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: groundedAi({ sources: [], queries: ["gì đó"] }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 },
+    ));
+    expect((inserted.usage_ledger ?? []).some((r) => r.kind === "grounding")).toBe(true);
+  });
+
+  it("writes no grounding row when the model did not search", async () => {
+    const { client, inserted } = dbs();
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: groundedAi(null) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 },
+    ));
+    expect((inserted.usage_ledger ?? []).some((r) => r.kind === "grounding")).toBe(false);
   });
 });
