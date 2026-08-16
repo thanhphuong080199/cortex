@@ -351,6 +351,39 @@ describe("extractNote", () => {
     expect(seen[0]).toContain("mood is 1 to 5");
   });
 
+  /**
+   * The prompt is the ONLY thing that makes pending_item appear. Without it the model returns
+   * {rating, status}, resolveNoteMediaLink sees no pending_item and returns null, and the
+   * library never learns the film exists -- silently.
+   */
+  it("tells the model to name the work when the domain is media", async () => {
+    const note = await seedNote("vừa xem xong Inception, 8.5/10");
+    const { seen, ai } = aiCapturingPrompt({ domain: null, domain_meta: {}, tags: [], mood: null });
+    await extractNote({ db, ai }, note);
+
+    expect(seen[0]).toContain("pending_item");
+  });
+
+  /**
+   * domainMetaSchemas.media accepts pending_item, so a model that fills it must have it
+   * STORED rather than dropped by the meta validation -- it is the only thing a resolver or a
+   * retry can work from. Red if the meta parse is ever narrowed to strip it.
+   */
+  it("stores a pending_item the model supplied", async () => {
+    const note = await seedNote("vừa xem xong Inception");
+    const ai = aiReturning({
+      domain: "media", tags: [], mood: null,
+      // rating: 4, not 8.5 -- domainMetaSchemas.media.rating is an integer 1-5 (packages/shared/
+      // src/dto/domains.ts). 8.5 would fail the whole object's .strict() parse and drop
+      // pending_item along with it, passing this test for the wrong reason.
+      domain_meta: { rating: 4, pending_item: { kind: "movie", title: "Inception", year: 2010 } },
+    });
+    const out = await extractNote({ db, ai }, note);
+
+    expect((out.domainMeta as Record<string, unknown>).pending_item)
+      .toMatchObject({ title: "Inception" });
+  });
+
   it("stamps extracted_hash", async () => {
     const note = await seedNote("body");
     await extractNote({ db, ai: aiReturning({ domain: null, domain_meta: {}, tags: [] }) }, note);

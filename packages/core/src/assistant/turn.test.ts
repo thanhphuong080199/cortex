@@ -38,6 +38,7 @@ function dbs(
   opts: {
     over?: boolean; history?: HistoryRow[]; note?: typeof NOTE | null;
     failInsertOn?: string;
+    mediaItem?: { id: string; title: string; kind: string };
   } = {},
 ) {
   const inserted: Record<string, Record<string, unknown>[]> = {};
@@ -47,6 +48,7 @@ function dbs(
       eq: () => self,
       is: () => self,
       ilike: () => self,
+      filter: () => self,
       order: () => self,
       limit: () => self,
       select: () => self,
@@ -109,12 +111,54 @@ function dbs(
       if (name === "note_tags" && cols === "tag_id") {
         return chain(() => ({ data: [], error: null }));
       }
+      // MediaService.findLiveByTitle: awaited bare (no .single()), so the shape is always an
+      // array -- empty drives findOrCreate into its insert branch, one entry is a "found" hit.
+      if (name === "media_items") {
+        return chain(() => ({
+          data: opts.mediaItem ? [mediaItemRow()] : [],
+          error: null,
+        }));
+      }
       throw new Error(`dbs() double: unhandled select on "${name}" (cols: ${String(cols)})`);
     },
     insert: (row: Record<string, unknown>) => insertChain(name, row),
-    update: () => chain(() => ({ data: null, error: null })),
+    update: (row: Record<string, unknown> = {}) => {
+      // MediaService.reconcileYear's backfill (`.update({ year }).eq().eq().select().single()`)
+      // when the fixture item is missing the year `pending_item` supplies. Spread the row back,
+      // same trick insertChain uses above -- the caller reads the UPDATED item off this, not a
+      // placeholder.
+      if (name === "media_items") {
+        return chain(() => (
+          opts.mediaItem ? { data: { ...mediaItemRow(), ...row }, error: null } : { data: null, error: null }
+        ));
+      }
+      // resolveNoteMediaLink's link write (`.update({ media_item_id, domain_meta })...
+      // .select("id").maybeSingle()`). A null noteId row (this suite's "note not found" fixtures
+      // never carry domain: "media", so this branch is otherwise unreached) falls through to the
+      // generic case below rather than crashing on `.id`.
+      if (name === "notes" && "media_item_id" in row) {
+        const noteRow = opts.note === undefined ? NOTE : opts.note;
+        return chain(() => (
+          noteRow ? { data: { id: noteRow.id }, error: null } : { data: null, error: null }
+        ));
+      }
+      return chain(() => ({ data: null, error: null }));
+    },
     upsert: () => chain(() => ({ data: null, error: null })),
   });
+
+  // A full MediaItem row (packages/core/src/media/service.ts's interface), defaulted the way a
+  // real media_items row would be, merged with the fixture's `id`/`title`/`kind`. `year: null`
+  // rather than omitted -- reconcileYear branches on `item.year !== null`, and `undefined !==
+  // null` would wrongly take the "year already set, and it conflicts" throw instead of the
+  // "backfill it" update this fixture is built to exercise.
+  function mediaItemRow(): Record<string, unknown> {
+    return {
+      user_id: "u1", year: null, creator: null, external_meta: {},
+      created_at: "2020-01-01T00:00:00.000Z", deleted_at: null,
+      ...opts.mediaItem,
+    };
+  }
 
   const client = {
     from: (n: string) => table(n),
@@ -449,6 +493,50 @@ describe("runTurn", () => {
     const { client } = dbs({ failInsertOn: "checkins" });
     const events = await collect(runTurn(
       { userDb: client, serviceDb: client, ai: ai({ mood: 4 }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(events.map((e) => e.type)).toContain("token");
+  });
+
+  /**
+   * Red when the resolver call site is removed from the turn: the note is filed under "media"
+   * with a rating and no media_item_id, and the box has nothing to name.
+   */
+  it("links a media note and names the item on the attached event", async () => {
+    const { client } = dbs({ mediaItem: { id: "mi1", title: "Inception", kind: "movie" } });
+    const scripted = ai({
+      domain: "media",
+      // rating: 4, not 8.5 -- domainMetaSchemas.media.rating is an integer 1-5. 8.5 would fail
+      // extractNote's own meta parse and drop pending_item along with it, so the resolver would
+      // never see it and this test would pass without exercising the link at all.
+      domain_meta: { rating: 4, pending_item: { kind: "movie", title: "Inception", year: 2010 } },
+    });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: scripted },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+
+    expect(events.find((e) => e.type === "attached")).toMatchObject({ mediaTitle: "Inception" });
+  });
+
+  /**
+   * A failed link must not cost the answer -- the note and its tags are already the
+   * deliverable. Red if the try/catch around the resolver is removed.
+   */
+  it("still answers when the media link fails", async () => {
+    const { client } = dbs({ failInsertOn: "media_items" });
+    const scripted = ai({
+      domain: "media",
+      // year: 1900, not 1 -- pendingMediaItem.year is an integer 1000-2200 (packages/shared/
+      // src/dto/media.ts). year: 1 fails that check, which fails domainMetaSchemas.media's
+      // .strict() parse for the WHOLE object and drops pending_item too -- resolveNoteMediaLink
+      // would then see no pending_item and return null without ever reaching the failing
+      // insert this test means to exercise.
+      domain_meta: { pending_item: { kind: "movie", title: "Unknown", year: 1900 } },
+    });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: scripted },
       { userId: "u1", noteId: "n1", budgetUsd: 100 },
     ));
 

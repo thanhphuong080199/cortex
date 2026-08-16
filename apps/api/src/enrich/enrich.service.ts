@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  type AiClient, embedNote, errorMessage, extractNote, isOverBudget,
+  type AiClient, embedNote, errorMessage, extractNote, isOverBudget, MediaService,
 } from "@cortex/core";
 
 export interface SweepDeps {
@@ -100,7 +100,20 @@ export async function runSweep(deps: SweepDeps): Promise<SweepResult> {
         // Two independent steps, each skipping itself when its own hash already matches. If
         // extraction throws, the embedding work above it is already committed.
         await embedNote({ db, ai }, note);
-        await extractNote({ db, ai }, note);
+        const extracted = await extractNote({ db, ai }, note);
+        // The sweep's half of the same call site (spec §6.3). A note captured on web, or one
+        // whose assistant turn died before this point, still needs its media identity resolved
+        // -- and this is the only path that will ever run for it.
+        if (extracted.domain === "media") {
+          try {
+            await new MediaService(db, row.user_id)
+              .resolveNoteMediaLink(row.note_id, extracted.domainMeta);
+          } catch (err) {
+            // Never fails the enrichment: the note and its tags are already committed, and a
+            // raise here would burn one of the note's five attempts on a link.
+            console.error(`[enrich] note ${row.note_id} media link failed: ${errorMessage(err).slice(0, 500)}`);
+          }
+        }
         const { error: resetErr } = await db.from("note_enrichment")
           // attempts_hash goes back to null with the count (00023). Not strictly required -- a
           // row at attempts 0 satisfies the claim's `attempts < 5` disjunct whatever hash sits

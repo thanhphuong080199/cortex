@@ -135,7 +135,11 @@ export function AssistantBox() {
 
       {attached ? (
         <Text testID="box-attached">
-          {attached.domain ? `Đã xếp vào: ${attached.domain}` : "Chưa xếp vào nhóm nào"}
+          {attached.mediaTitle
+            ? `Đã ghi vào thư viện: ${attached.mediaTitle}`
+            : attached.domain
+              ? `Đã xếp vào: ${attached.domain}`
+              : "Chưa xếp vào nhóm nào"}
           {attached.tags.length > 0 ? ` — thẻ ${attached.tags.join(", ")}` : ""}
         </Text>
       ) : null}

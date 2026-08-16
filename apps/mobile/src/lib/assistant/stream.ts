@@ -11,7 +11,7 @@ export class StreamUnavailableError extends Error {
 
 export type BoxEvent =
   | { type: "attached"; domain: string | null; domainMeta: Record<string, unknown>;
-      tags: string[]; degraded?: boolean }
+      tags: string[]; degraded?: boolean; mediaTitle?: string }
   | { type: "citations"; citations: Citation[] }
   | { type: "token"; text: string }
   | { type: "mood"; checkinId: string; mood: number }
@@ -66,6 +66,7 @@ export async function* streamAssistantTurn(args: {
           domainMeta: (d.domainMeta as Record<string, unknown>) ?? {},
           tags: (d.tags as string[]) ?? [],
           ...(d.degraded === true ? { degraded: true } : {}),
+          ...(typeof d.mediaTitle === "string" ? { mediaTitle: d.mediaTitle } : {}),
         };
         break;
       case "citations":

@@ -6,6 +6,7 @@ import { isOverBudget, recordUsage } from "../enrich/budget.js";
 import { extractNote } from "../enrich/extract.js";
 import { errorMessage } from "../errors.js";
 import { CheckinService } from "../checkins/service.js";
+import { MediaService } from "../media/service.js";
 import { NoteService } from "../notes/service.js";
 import { isStale, selectContext, type ThreadTurn } from "./context.js";
 import { buildAcknowledgePrompt, buildAnswerPrompt } from "./prompts.js";
@@ -13,7 +14,7 @@ import { retrieve, type Citation } from "./retrieve.js";
 
 export type AssistantEvent =
   | { type: "attached"; domain: string | null; domainMeta: Record<string, unknown>;
-      tags: string[]; degraded?: boolean }
+      tags: string[]; degraded?: boolean; mediaTitle?: string }
   | { type: "citations"; citations: Citation[]; degraded?: boolean }
   | { type: "mood"; checkinId: string; mood: number }
   | { type: "token"; text: string }
@@ -165,9 +166,27 @@ export async function* runTurn(
     console.error(`[assistant] extraction timed out after ${EXTRACT_DEADLINE_MS}ms (request ${requestId})`);
   }
   const extracted = extraction.status === "fulfilled" ? extraction.value : null;
+
+  // Resolution runs AFTER extractNote returns, deliberately NOT inside it: in this file that
+  // call is wrapped in withDeadline(..., EXTRACT_DEADLINE_MS), and a slow findOrCreate would
+  // turn into `attached: degraded` -- trading the classification for a link.
+  //
+  // A throw is logged and swallowed. The note and its tags are already the deliverable, and
+  // media_unresolved exists for the sync path, not for this one.
+  let mediaTitle: string | undefined;
+  if (extracted?.domain === "media") {
+    try {
+      const item = await new MediaService(userDb, args.userId)
+        .resolveNoteMediaLink(args.noteId, extracted.domainMeta);
+      if (item) mediaTitle = item.title;
+    } catch (err) {
+      console.error(`[assistant] media link failed (request ${requestId}): ${errorMessage(err)}`);
+    }
+  }
+
   yield extracted
     ? { type: "attached", domain: extracted.domain, domainMeta: extracted.domainMeta,
-        tags: extracted.tagNames }
+        tags: extracted.tagNames, ...(mediaTitle !== undefined ? { mediaTitle } : {}) }
     : { type: "attached", domain: null, domainMeta: {}, tags: [], degraded: true };
 
   // Written by the TURN, not by extractNote, and the distinction matters: the 60-second sweep

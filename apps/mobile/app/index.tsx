@@ -5,7 +5,6 @@ import { signInWithGoogle, signOut } from "@/lib/auth";
 import { createInFlightGuard } from "@/lib/in-flight";
 import { supabase } from "@/lib/supabase";
 import { ExportButton } from "@/screens/export-button";
-import { MediaLogForm } from "@/screens/media-log-form";
 import { NoteList } from "@/screens/note-list";
 import { AssistantBox } from "@/screens/assistant-box";
 
@@ -69,12 +68,7 @@ export default function Home() {
         // screen looked exactly as though the user had no notes at all.
         <View style={{ flex: 1, alignSelf: "stretch" }}>
           <NoteList
-            header={
-              <>
-                <AssistantBox />
-                <MediaLogForm />
-              </>
-            }
+            header={<AssistantBox />}
             footer={
               <View style={{ alignItems: "center", gap: 8, padding: 16 }}>
                 <ExportButton />
