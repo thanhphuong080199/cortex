@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-16-stage-c4-c5-conversation-design.md` (stage C4 is §2–§7; §8–§15 are C5 and are **not** in this plan)
 
+**Runs before:** `2026-08-16-temporal-context.md`, which rewrites `search_notes` again as migration `00032` starting from this plan's `00031`. Run them in the other order and that plan's SQL has to be reconciled by hand.
+
 ---
 
 ## Spec corrections — read these before Task 1
@@ -63,8 +65,9 @@ So the brief's premise was right and §1's refutation of it is wrong. The conseq
 - `packages/core/src/assistant/turn.test.ts` — a `lastMessage` option on the `dbs()` double, plus the session and chitchat turn tests (Tasks 1, 4).
 - `packages/core/src/assistant/prompts.ts` — `buildChitchatPrompt` (Task 4).
 - `packages/core/src/assistant/prompts.test.ts` — its tests (Task 4).
-- `packages/core/src/enrich/extract.ts` — `INTENTS`, the schema enum, the prompt rule, the three-way default (Task 2).
-- `packages/core/src/enrich/extract.test.ts` — the intent tests (Task 2).
+- `packages/core/src/enrich/extract.ts` — `INTENTS`, the schema enum, the intent definitions, the conversation window, the three-way default (Task 2).
+- `packages/core/src/enrich/extract.test.ts` — the intent and conversation-window tests (Task 2).
+- `packages/core/src/enrich/embed.ts` — `EnrichTarget` gains `history?` (Task 2).
 - `packages/core/src/notes/filters-equivalence.test.ts` — a chitchat row in the fixture corpus (Task 5).
 - `packages/db/src/test/search-notes.test.ts` — chitchat is not retrievable (Task 6).
 - `apps/api/test/search.e2e.test.ts` — chitchat is not in `/search` results (Task 6).
@@ -72,7 +75,7 @@ So the brief's premise was right and §1's refutation of it is wrong. The conseq
 - `apps/web/src/app/page.tsx` — the transcript query replaces the derived `messages` (Task 7).
 - `apps/web/src/app/assistant-box.tsx` — `initialTurns`, the transcript render, the hand-off on `done` (Task 7).
 - `apps/web/src/app/assistant-box.test.tsx` — the transcript tests (Task 7).
-- `apps/web/src/app/globals.css` — the interrupted-turn marker (Task 7).
+- `apps/web/src/app/globals.css` — the interrupted-turn marker and the thinking indicator (Task 7).
 - `e2e/scripts/seed.mjs` — a seeded session and a seeded chitchat note (Task 7).
 - `apps/web/e2e/assistant-box.spec.ts` — the pane-versus-list split, end to end (Task 7).
 
@@ -330,19 +333,33 @@ git commit -m "refactor(assistant): one shared answer to which session is curren
 
 ---
 
-### Task 2: `chitchat`, the third intent
+### Task 2: The classifier — three intents, defined, and able to see the conversation
 
-The classifier's binary forces "hello", "haha ok" and "1111" into `question` or `statement`, and neither is right: the model either searches the user's notes for an answer to "what?", or replies as though this were journaling. This task adds the value. Nothing branches on it yet — Task 4 does that.
+Three defects in one function, all of them the same defect: `intent` is the field the whole turn branches on, and the classifier is given neither a definition of it nor the context needed to apply one.
+
+**2a. The binary is wrong.** "hello", "haha ok", "1111" are forced into `question` or `statement`, and neither is right: the model either searches the user's notes for an answer to "what?", or replies as though this were journaling.
+
+**2b. `intent` has never been defined anywhere.** `buildPrompt` (`extract.ts:74-103`) carries rules for tags, for `domain`, for `pending_item` and for `mood` — and **not one word about intent**. The model sees a schema key with two values and infers what they mean. Adding a third value to an undefined field makes an undefined field worse.
+
+**2c. The classifier cannot see the conversation, so follow-up questions are misread.** Observed 2026-08-16: "RAG là gì" answered correctly; the next turn, "Hmmm, ok còn gì khác không", came back as *"Tôi đã lưu ghi chú này và xếp vào mục no domain..."* — `buildAcknowledgePrompt` verbatim, which means the classifier returned `statement`. The session was fine and the history *did* reach the answer model (`renderHistory` had both prior turns); the acknowledge prompt then told it, at `prompts.ts:90`, *"The user did not ask a question. Do not answer one"*, and it obeyed. The conversation did not break — the classification did, and it broke because `extractNote` receives `contentText` alone. "Còn gì khác không" is genuinely unclassifiable in isolation.
+
+2c is the one that decides the outcome: no amount of definition rescues a model that cannot see the turn being followed up on.
 
 **Files:**
-- Modify: `packages/core/src/enrich/extract.ts:7-14, 16-40, 74-104, 111-122, 279-291`
+- Modify: `packages/core/src/enrich/extract.ts:1-14, 16-40, 74-104, 111-122, 141-144, 279-291`
+- Modify: `packages/core/src/enrich/embed.ts:7-19` (`EnrichTarget` gains `history?`)
+- Modify: `packages/core/src/assistant/turn.ts:147-157` (the turn passes the last two turns)
 - Test: `packages/core/src/enrich/extract.test.ts`
+- Test: `packages/core/src/assistant/turn.test.ts`
 
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
   - `export const INTENTS = ["question", "statement", "chitchat"] as const`
   - `export type Intent = (typeof INTENTS)[number]`
+  - `export const CLASSIFIER_HISTORY_TURNS = 2`
+  - `buildPrompt(contentText: string, vocabulary: string[], history?: ThreadTurn[]): string`
+  - `EnrichTarget` gains `history?: ThreadTurn[]` — optional, and the 60-second sweep never passes it
   - `extractNote(...)` returns `intent: Intent` (was `"question" | "statement"`)
 
 - [ ] **Step 1: Write the failing tests**
@@ -350,7 +367,8 @@ The classifier's binary forces "hello", "haha ok" and "1111" into `question` or 
 Add to `packages/core/src/enrich/extract.test.ts`:
 
 ```ts
-import { INTENTS, buildPrompt } from "./extract.js";
+import { CLASSIFIER_HISTORY_TURNS, INTENTS, buildPrompt } from "./extract.js";
+import type { ThreadTurn } from "../assistant/context.js";
 
 describe("the intent vocabulary", () => {
   // The schema enum is what the model is allowed to return; the prompt is the only place it
@@ -366,6 +384,54 @@ describe("the intent vocabulary", () => {
 
   it("offers exactly the three intents and no more", () => {
     expect([...INTENTS]).toEqual(["question", "statement", "chitchat"]);
+  });
+
+  // THE OBSERVED BUG (2026-08-16). Before this, buildPrompt said nothing about intent at all --
+  // no definition, no examples -- and the model inferred the field's meaning from a schema key.
+  // A short follow-up is the case that inference gets wrong, so the rule has to name it.
+  it("tells the model a short follow-up is still a question", () => {
+    expect(buildPrompt("bất kỳ", [])).toMatch(/follow-up|còn gì|tiếp/i);
+  });
+});
+
+describe("the classification prompt's conversation window", () => {
+  const history: ThreadTurn[] = [
+    { role: "user", content: "RAG là gì", createdAt: "2026-08-16T10:00:00Z" },
+    { role: "assistant", content: "RAG là retrieval augmented generation...", createdAt: "2026-08-16T10:00:05Z" },
+  ];
+
+  // Without this, "Hmmm, ok còn gì khác không" reaches the classifier as an isolated sentence
+  // and comes back `statement` -- which routes it to the acknowledge prompt, whose first rule
+  // is "The user did not ask a question. Do not answer one." The conversation then dies while
+  // every other part of the system is working correctly.
+  it("shows the model the turns being followed up on", () => {
+    const prompt = buildPrompt("Hmmm, ok còn gì khác không", [], history);
+    expect(prompt).toContain("RAG là gì");
+    expect(prompt).toContain("retrieval augmented generation");
+  });
+
+  // The sweep calls extractNote too, and there is no conversation there. Absent history must
+  // render NOTHING -- an empty "Earlier in this conversation:" header is a heading the model
+  // then has to interpret, on every note in the corpus.
+  it("renders no conversation section when there is none", () => {
+    const prompt = buildPrompt("một ghi chú bình thường", []);
+    expect(prompt).not.toMatch(/earlier|conversation|trước đó/i);
+  });
+
+  // A COST CEILING, not a preference. This prompt runs on EVERY capture, so history here is a
+  // per-note tax forever. A follow-up depends on the exchange immediately before it, not on
+  // turn 40 -- and the 2000-token window selectContext builds for the ANSWER prompt would
+  // roughly double this call's input for nothing.
+  it("keeps only the last two turns", () => {
+    const long: ThreadTurn[] = Array.from({ length: 10 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant", content: `turn-${i}`,
+      createdAt: `2026-08-16T10:0${i}:00Z`,
+    }));
+    const prompt = buildPrompt("tiếp đi", [], long);
+    expect(prompt).toContain("turn-9");
+    expect(prompt).toContain("turn-8");
+    expect(prompt).not.toContain("turn-7");
+    expect(CLASSIFIER_HISTORY_TURNS).toBe(2);
   });
 });
 ```
@@ -430,18 +496,61 @@ Change the `Extraction` interface (line 8) and the schema (line 21):
     intent: { type: "string", enum: [...INTENTS] },
 ```
 
-- [ ] **Step 4: Teach the prompt what the three mean**
+- [ ] **Step 4: Define the three intents, and show the model the conversation**
 
-`buildPrompt` currently says nothing about `intent` — the model infers it from the schema key alone, which was survivable for a binary and is not for a three-way. Add to the `Rules:` list, after the `mood` rule:
+`buildPrompt` says nothing about `intent` today — the model infers it from a schema key. That was survivable for a binary and is not for a three-way, and it is half of why a follow-up question is read as a statement.
+
+Change the signature and add the conversation section:
 
 ```ts
-    "- intent is \"question\" when they are asking you something; \"chitchat\" for greetings,",
-    "  reactions and noise with nothing to file (\"hello\", \"haha ok\", \"1111\"); otherwise",
-    "  \"statement\". Chitchat is still saved as a note -- you are labelling the turn, not",
+/**
+ * How many prior turns the CLASSIFIER sees. Two, not selectContext's 2000-token window: this
+ * prompt runs on every capture, so history here is a per-note cost forever, and a follow-up
+ * depends on the exchange immediately before it rather than on turn 40. Truncation lives here
+ * rather than at the call site so the ceiling holds for every caller -- including a future one
+ * that hands over a whole session by mistake.
+ */
+export const CLASSIFIER_HISTORY_TURNS = 2;
+
+export function buildPrompt(
+  contentText: string,
+  vocabulary: string[],
+  history?: ThreadTurn[],
+): string {
+  const recent = (history ?? []).slice(-CLASSIFIER_HISTORY_TURNS);
+  return [
+    ...
+```
+
+Add `import type { ThreadTurn } from "../assistant/context.js";` at the top. (`context.ts` imports nothing from `enrich/`, so this introduces no cycle.)
+
+Add to the `Rules:` list, after the `mood` rule:
+
+```ts
+    "- intent labels THIS TURN, not the note's worth:",
+    "  \"question\" — they want an answer. A short follow-up counts: \"còn gì nữa\",",
+    "    \"tại sao\", \"ví dụ đi\", \"ok còn gì khác không\" are questions when the",
+    "    conversation below shows what they follow up ON.",
+    "  \"chitchat\" — greetings, reactions and noise with nothing to file: \"hello\",",
+    "    \"haha ok\", \"1111\".",
+    "  \"statement\" — anything else: something they are recording.",
+    "  Every one of the three is still SAVED as a note. You are labelling the turn, not",
     "  deciding whether it is worth keeping.",
 ```
 
-The last sentence is load-bearing: without it the model reads "nothing to file" as an instruction to discard, and §4.3 is explicit that the note is created first, before classification, and is never gated on it.
+and, immediately before the `"The note:"` line, the conversation section:
+
+```ts
+    // Rendered only when there is one. The sweep calls extractNote with no history, and an
+    // empty "Earlier in this conversation:" heading is a heading the model has to interpret,
+    // on every note in the corpus.
+    recent.length > 0
+      ? "Earlier in this conversation:\n" +
+        recent.map((t) => `${t.role === "user" ? "User" : "You"}: ${t.content}`).join("\n") + "\n"
+      : "",
+```
+
+Two sentences here are load-bearing and neither is decoration. *"Every one of the three is still SAVED"* stops the model reading "nothing to file" as an instruction to discard — §4.3 is explicit that the note is created first, before classification, and is never gated on it. *"A short follow-up counts"* plus the conversation section is the pair that fixes the observed bug; the rule alone cannot, because without the section there is nothing for "follow up ON" to refer to.
 
 - [ ] **Step 5: Return it without a cast**
 
@@ -459,21 +568,104 @@ and widen the declared return type on line 120:
   intent: Intent;
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 6: Carry history through `EnrichTarget`**
 
-Run: `pnpm turbo run test --filter=@cortex/core -- extract`
+`extractNote`'s second parameter is an `EnrichTarget`, which already carries two fields only the live turn ever sets — `source` and `requestId`, whose doc comment (`embed.ts:12-18`) states exactly that pattern. `history` is the third.
+
+In `packages/core/src/enrich/embed.ts`:
+
+```ts
+  source?: UsageSource;
+  requestId?: string;
+  /**
+   * The conversation so far, for classification only. Optional and absent in the sweep, which
+   * is the point: a note being re-extracted an hour later by the 60-second sweep has no
+   * conversation around it, and inventing one would classify it against turns it was never
+   * part of. `embedNote` never reads this, the same way it never reads `source`.
+   *
+   * Truncated by buildPrompt to CLASSIFIER_HISTORY_TURNS, so a caller may hand over as much
+   * as it has without knowing the ceiling.
+   */
+  history?: ThreadTurn[];
+```
+
+with `import type { ThreadTurn } from "../assistant/context.js";`.
+
+In `packages/core/src/enrich/extract.ts`, pass it on (line 142):
+
+```ts
+    prompt: buildPrompt(note.contentText, vocabulary.map((t) => t.name), note.history),
+```
+
+- [ ] **Step 7: Let the turn hand it over**
+
+In `packages/core/src/assistant/turn.ts`, the `history` variable is already built at line 129 and `extractNote` is called at 147 — no reordering needed. Add the field to the call:
+
+```ts
+      extractNote({ db: serviceDb, ai }, {
+        noteId: args.noteId, userId: args.userId, contentText: text, contentHash,
+        // This call is the assistant's own classification spend, not the 60-second sweep's --
+        // filing it under "sweep" (extractNote's default) would make a live turn's cost
+        // indistinguishable from real sweep activity and unjoinable to this turn's requestId.
+        source: "assistant", requestId,
+        // Handed over whole; buildPrompt takes the last CLASSIFIER_HISTORY_TURNS. Without this
+        // the classifier sees "ok còn gì khác không" as an isolated sentence, returns
+        // `statement`, and the acknowledge prompt then refuses to answer -- observed
+        // 2026-08-16 and the reason this field exists.
+        history,
+      }),
+```
+
+Then add the turn-level test to `packages/core/src/assistant/turn.test.ts`:
+
+```ts
+// The wiring, end to end: what the turn reads out of chat_messages has to reach the classifier
+// prompt. Asserted on the prompt text itself, because a plumbing mistake here (passing nothing,
+// or passing it to the wrong call) is invisible in every other assertion -- the turn still
+// answers, just with the wrong branch.
+it("shows the classifier the conversation so far", async () => {
+  const { client } = dbs({
+    history: [
+      { role: "user", content: "RAG là gì", created_at: "2026-08-16T10:00:00Z", retrieval_meta: null },
+      { role: "assistant", content: "RAG là retrieval augmented generation.",
+        created_at: "2026-08-16T10:00:05Z", retrieval_meta: null },
+    ],
+  });
+  const prompts: string[] = [];
+  const recordingAi = createFakeAi({
+    generateJson: async (args) => {
+      prompts.push(args.prompt);
+      return {
+        value: { intent: "question", complexity: "simple", domain: null,
+                 domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      };
+    },
+  });
+
+  await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+    { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+  expect(prompts[0], "the classifier prompt").toContain("RAG là gì");
+});
+```
+
+`dbs({ history })` is the option the double already takes (`turn.test.ts:41`), and `createFakeAi` supplies a default `generateStream` when one is not given — check that before running; if it does not, add the same `generateStream` the file's `ai()` helper uses.
+
+- [ ] **Step 8: Run the tests to verify they pass**
+
+Run: `pnpm turbo run test --filter=@cortex/core -- extract assistant`
 Expected: PASS.
 
-- [ ] **Step 7: Run the whole package**
+- [ ] **Step 9: Run the whole package**
 
 Run: `pnpm turbo run test --filter=@cortex/core`
-Expected: PASS. `turn.ts` compares `extracted?.intent === "question"`, which still narrows correctly against the widened union.
+Expected: PASS. `turn.ts` compares `extracted?.intent === "question"`, which still narrows correctly against the widened union, and every existing `extractNote` caller omits `history`, which is optional.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add packages/core/src/enrich/extract.ts packages/core/src/enrich/extract.test.ts
-git commit -m "feat(enrich): classify small talk as a third intent"
+git add packages/core/src/enrich/ packages/core/src/assistant/
+git commit -m "feat(enrich): define the three intents and classify with the conversation in view"
 ```
 
 ---
@@ -1233,6 +1425,11 @@ The largest single item in C4, and the one the spec's §1 mis-scoped (see **Spec
 
 After this task the pane reads `chat_messages` for the current session. The split the requirement asked for then holds **by construction**: two tables, not two narrowings of one. `chat_messages` also holds the assistant's own replies, which are not notes and never will be, so no second narrowing exists to drift.
 
+**Two defects observed in real use on 2026-08-16 are folded in here**, because both live in the two files this task rewrites and fixing them separately would mean touching those files twice:
+
+- **There is no loading state at all.** `busy` only disables the textarea and the Send button. A grounded turn can sit for many seconds — the model searches the web before the first token — and the screen simply does not move. The box already receives `attached` and then `citations` before that first token, so there are three real phases to show; step 4 shows them.
+- **Every note citation renders "Untitled".** `title ?? "Untitled"` against notes captured through the chat box, which have `title = null` — five identical rows of nothing, presented as provenance. Step 3 falls back to the snippet's first line, the same way `note-list.tsx:16`'s `preview()` already does for the sidebar.
+
 **Files:**
 - Create: `apps/web/src/app/provenance.tsx`
 - Modify: `apps/web/src/app/page.tsx:27-33, 52-70`
@@ -1300,6 +1497,28 @@ describe("the transcript", () => {
     expect(screen.queryByText(/interrupted|bị gián đoạn/i)).toBeNull();
   });
 
+  // "Untitled" x5, observed 2026-08-16. Notes captured through the chat box have title = null,
+  // so every citation rendered the same placeholder -- five identical rows presented to the
+  // user as provenance. The snippet is right there and is what the sidebar already falls back
+  // to (note-list.tsx:16).
+  it("falls back to the snippet when a cited note has no title", () => {
+    render(<AssistantBox token="t" initialTurns={[turn({
+      citations: [{
+        type: "note", noteId: "n1", title: null,
+        snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng", score: 1, matchedBy: "fts",
+      }],
+    })]} />);
+    expect(screen.getByText(/Ngày mai có hẹn đi xem spiderman/)).toBeInTheDocument();
+    expect(screen.queryByText("Untitled")).toBeNull();
+  });
+
+  it("prefers a real title over the snippet", () => {
+    render(<AssistantBox token="t" initialTurns={[turn({
+      citations: [{ type: "note", noteId: "n1", title: "Dune", snippet: "body", score: 1, matchedBy: "fts" }],
+    })]} />);
+    expect(screen.getByText("Dune")).toBeInTheDocument();
+  });
+
   // The naive version double-renders the last turn: once from the box's streaming state and
   // once from the transcript it was just appended to. The box owns what is still streaming;
   // the transcript owns everything that is done.
@@ -1319,7 +1538,80 @@ describe("the transcript", () => {
     await waitFor(() => expect(screen.getAllByText("Đã lưu nhé.")).toHaveLength(1));
   });
 });
+
+describe("the loading phases", () => {
+  // A stream that opens and then stalls, which is what a grounded turn looks like from the
+  // client: `attached` and `citations` arrive, and then nothing for several seconds while the
+  // model searches the web. `web` is emitted only AFTER the stream completes (turn.ts:295), so
+  // this is exactly the state the box has to render something for -- and until now it rendered
+  // a frozen screen.
+  const stalling = (events: [string, unknown][]) =>
+    new Response(
+      new ReadableStream({
+        start(c) {
+          for (const [type, data] of events) {
+            c.enqueue(new TextEncoder().encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`));
+          }
+          // deliberately never closed
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+
+  const stubbed = (res: () => Response) => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : res()) as typeof fetch;
+  };
+
+  const send = async () => {
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+  };
+
+  it("says it is saving before anything comes back", async () => {
+    stubbed(() => stalling([]));
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await send();
+    expect(await screen.findByRole("status")).toHaveTextContent(/lưu|saving/i);
+  });
+
+  // THE ONE THE USER HIT. This is the multi-second grounding gap, and it is the whole reason
+  // this feature exists: the note is filed, the notes are searched, and the model has not said
+  // anything yet.
+  it("says it is working on an answer once the context has arrived", async () => {
+    stubbed(() => stalling([
+      ["attached", { domain: "media", domainMeta: {}, tags: ["phim"] }],
+      ["citations", { citations: [] }],
+    ]));
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await send();
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/tìm câu trả lời|answer/i));
+  });
+
+  // Tokens ARE the progress indicator. Leaving the label up beside a streaming answer says the
+  // box is still waiting for something it already has.
+  it("drops the indicator once tokens start arriving", async () => {
+    stubbed(() => stalling([
+      ["attached", { domain: null, domainMeta: {}, tags: [] }],
+      ["token", { text: "Theo notes của bạn" }],
+    ]));
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await send();
+    await screen.findByText(/Theo notes của bạn/);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("shows no indicator when nothing is in flight", () => {
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+});
 ```
+
+Note that `status` is already used by the existing `<p className="hint" role="status">` for post-turn messages ("Saved. No answer right now."), but that element only renders when `status !== null`, which is never true while `busy` — so `getByRole("status")` is unambiguous in all four cases above. Verify this holds when you write the render; if the two can ever coexist, give the indicator its own `aria-label` and query by that instead.
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -1343,6 +1635,19 @@ import type { AnyCitation } from "@cortex/shared";
  * The two blocks are NEVER merged into one list -- life-domains spec §6.2 requires the visible
  * split between what came from the user's own notes and what came from the open internet.
  */
+/**
+ * What to call a cited note. A note captured through the chat box has `title = null` -- which
+ * is most of them -- and rendering the placeholder gave five identical "Untitled" rows as
+ * provenance (observed 2026-08-16). Same fallback order note-list.tsx:16's `preview()` uses for
+ * the sidebar, so a note is named the same way wherever it appears. Truncated because a snippet
+ * is up to 240 characters (`left(n.content_text, 240)`, 00026) and this is a list item.
+ */
+const label = (c: { title: string | null; snippet: string }) => {
+  const text = c.title?.trim() || c.snippet.split("\n")[0]?.trim() || "";
+  if (text === "") return "Untitled";
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text;
+};
+
 export function Provenance(
   { citations, entryPoint }: { citations: AnyCitation[]; entryPoint?: string },
 ) {
@@ -1355,7 +1660,7 @@ export function Provenance(
         <section className="provenance">
           <h3>Từ notes của bạn</h3>
           <ul className="citations">
-            {notes.map((c) => <li key={c.noteId}>{c.title ?? "Untitled"}</li>)}
+            {notes.map((c) => <li key={c.noteId}>{label(c)}</li>)}
           </ul>
         </section>
       )}
@@ -1517,22 +1822,73 @@ Finally update `hasReply` — it no longer needs to consider the transcript:
     attached !== null || citations.length > 0 || web !== null || answer !== "" || status !== null;
 ```
 
-(unchanged, but confirm it still reads that way after the edits) and change the autoscroll dependency array's `messages` to `turns`.
+(unchanged, but confirm it still reads that way after the edits) and change the autoscroll dependency array's `messages` to `turns`, adding `phase` (below) so the indicator's own appearance scrolls into view.
 
-- [ ] **Step 5: Style the marker**
+- [ ] **Step 5: Show what the turn is doing**
+
+Derived, not stored: a second piece of state tracking the same thing the events already say is a second thing to keep in step.
+
+```tsx
+  /**
+   * What to tell the user while the turn is in flight, or null when nothing is.
+   *
+   * Three phases and no more, because three is how many the server actually reports. The long
+   * silence users hit is the middle one -- the model is searching the web, and the `web` event
+   * that would say so is emitted only AFTER the stream completes (turn.ts:295). So this says
+   * "looking for an answer" and not "searching the web": the box does not know whether this
+   * turn grounded, and printing a guess as a fact is worse than printing less.
+   *
+   * Once tokens arrive there is no label at all -- the tokens are the progress.
+   */
+  const phase: string | null =
+    !busy || answer !== ""
+      ? null
+      : attached === null && citations.length === 0
+        ? "Đang lưu…"
+        : "Đang tìm câu trả lời…";
+```
+
+Render it as the last thing in the scroll area, after the turns and the live bubble:
+
+```tsx
+        {phase && (
+          // aria-live="polite" and not "assertive": this is progress, and it must not interrupt
+          // a screen reader mid-sentence on a label that changes twice a turn.
+          <div className="bubble assistant thinking" role="status" aria-live="polite">
+            <p>{phase}<span className="dots" aria-hidden="true" /></p>
+          </div>
+        )}
+```
+
+- [ ] **Step 6: Style the marker and the indicator**
 
 In `apps/web/src/app/globals.css`, beside the other `.bubble.assistant` rules (~line 210):
 
 ```css
 .bubble.assistant .interrupted { margin: 0; font-size: 12.5px; color: var(--muted); font-style: italic; }
+.bubble.assistant.thinking p { color: var(--muted); font-size: 13.5px; }
+.bubble.assistant.thinking .dots::after {
+  content: "";
+  animation: thinking-dots 1.2s steps(4, end) infinite;
+}
+@keyframes thinking-dots {
+  0%   { content: ""; }
+  25%  { content: "."; }
+  50%  { content: ".."; }
+  75%  { content: "..."; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The label already says what is happening; the animation is decoration and is dropped. */
+  .bubble.assistant.thinking .dots::after { animation: none; content: "…"; }
+}
 ```
 
-- [ ] **Step 6: Run the component tests to verify they pass**
+- [ ] **Step 7: Run the component tests to verify they pass**
 
 Run: `pnpm turbo run test --filter=@cortex/web -- assistant-box`
 Expected: PASS.
 
-- [ ] **Step 7: Repoint the page at `chat_messages`**
+- [ ] **Step 8: Repoint the page at `chat_messages`**
 
 In `apps/web/src/app/page.tsx`, **delete line 54** (`const messages = [...notes].reverse()...`) and add, after the notes query:
 
@@ -1599,7 +1955,7 @@ and change the render:
       <AssistantBox token={session.access_token} initialTurns={turns} />
 ```
 
-- [ ] **Step 8: Seed a conversation and a chitchat note for E2E**
+- [ ] **Step 9: Seed a conversation and a chitchat note for E2E**
 
 In `e2e/scripts/seed.mjs`, add a PostgREST helper beside the existing `authFetch` (the file is dependency-free by design — this is plain HTTP with the service-role key, the same shape `authFetch` already uses):
 
@@ -1666,7 +2022,7 @@ and at the end of `seedCorpus`, before the `return`:
 
 `seedCorpus` currently takes only `token`; it needs the user id for these rows. Change its signature to `seedCorpus(token, userId)` and its one call site in `main()` to `await seedCorpus(session.access_token, session.user.id)`.
 
-- [ ] **Step 9: Write the failing E2E**
+- [ ] **Step 10: Write the failing E2E**
 
 Add to `apps/web/e2e/assistant-box.spec.ts`:
 
@@ -1701,7 +2057,7 @@ test("the transcript reads the conversation, and the list does not show chitchat
 
 Confirm the sidebar's list selector against `apps/web/src/app/sidebar.tsx` and `note-list.tsx:117` (`<ul className="notes">`) before running — if the markup differs, fix the selector, not the assertion.
 
-- [ ] **Step 10: Run the E2E**
+- [ ] **Step 11: Run the E2E**
 
 ```bash
 node e2e/scripts/seed.mjs --reset
@@ -1712,7 +2068,7 @@ pnpm turbo run test:e2e --filter=@cortex/web
 
 Expected: PASS, including the pre-existing grounding and capture specs.
 
-- [ ] **Step 11: Run every web gate**
+- [ ] **Step 12: Run every web gate**
 
 ```bash
 pnpm turbo run lint typecheck test --filter=@cortex/web
@@ -1720,7 +2076,7 @@ pnpm turbo run lint typecheck test --filter=@cortex/web
 
 Expected: PASS.
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 13: Commit**
 
 ```bash
 git add apps/web/src/app/ e2e/scripts/seed.mjs apps/web/e2e/assistant-box.spec.ts
@@ -1770,6 +2126,12 @@ Expected: `packages/shared/src/assistant/session.test.ts` and nothing else new. 
 
 `pnpm dev`, then in the browser: type "hello", then "hôm nay tôi chạy bộ", then "haha ok", then a question. Confirm the thread accumulates all four turns with replies; reload and confirm it comes back; confirm the sidebar shows the run and the question but neither piece of small talk; switch to `/?view=archived` and confirm the **thread is unchanged** — that is the split, and it is the one thing no test in this plan asserts through a real browser against a real API.
 
+Then the three defects observed on 2026-08-16, each against real models rather than a stub:
+
+- Ask a question that will ground (something current — a film release date). The indicator must read "Đang lưu…", then "Đang tìm câu trả lời…" through the whole grounding pause, and disappear the moment tokens start.
+- Check the citations under any answer: real note text, no "Untitled".
+- Ask a question, then follow up with **"còn gì nữa không"**. It must be answered, not acknowledged. If it comes back as *"Tôi đã lưu ghi chú này..."*, the classifier still returned `statement` — Task 2 did not land.
+
 - [ ] **Step 6: Open the PR**
 
 ```bash
@@ -1787,7 +2149,9 @@ A required check is a **literal job name**. If every visible check is green and 
 
 ## Self-Review
 
-**Spec coverage.** §2's "in" column → Tasks 1–7; its "out" column is named in Global Constraints and asserted nowhere, which is correct for a list of things not built. §3.1 → Task 7 steps 3, 4 and 7 (one query scoped by `session_id`, ordered by `created_at`, RLS as the isolation layer; `incomplete` rendered as interrupted; citations through the same component the live box uses). §3.2 → Task 1, relocated to `@cortex/shared` for the reason recorded in **Spec corrections**. §3.3 → Task 7's `done` hand-off and its "shows a finished turn exactly once" test. §4.1–§4.2 → Task 2 (the schema, the prompt rule, `CLASSIFY_MODEL` via Task 4's untouched `model` line, and the `statement` default as a comparison). §4.3 → nothing to build: `assistant-box.tsx` already creates the note first, awaited, before the assistant is called; Task 2 step 4's prompt wording protects the property from the classifier's side. §5.1 → Task 3. §5.2's four appliers → Tasks 5 (1, 2, 3) and 6 (4). §5.3 → Task 6, including the exclude-not-down-weight reasoning in the migration header. §6 → nothing is built; both "not doing" items are enforced by absence and named in Global Constraints. §7's eleven test rows → all covered: rows 1–2 in Task 5 step 1, row 3 in Task 5 step 1 (`matchesFilters` eviction), rows 4–5 in Task 6, rows 6–7 in Task 7 (the E2E's two halves and `resolveCurrentSession`'s staleness test), row 8 in Task 1, row 9 in Task 7, rows 10–11 in Tasks 4 and 2.
+**Spec coverage.** §2's "in" column → Tasks 1–7; its "out" column is named in Global Constraints and asserted nowhere, which is correct for a list of things not built. §3.1 → Task 7 steps 3, 4 and 7 (one query scoped by `session_id`, ordered by `created_at`, RLS as the isolation layer; `incomplete` rendered as interrupted; citations through the same component the live box uses). §3.2 → Task 1, relocated to `@cortex/shared` for the reason recorded in **Spec corrections**. §3.3 → Task 7's `done` hand-off and its "shows a finished turn exactly once" test. §4.1–§4.2 → Task 2 (the schema, the prompt rule, `CLASSIFY_MODEL` via Task 4's untouched `model` line, and the `statement` default as a comparison).
+
+**Three items in this plan are not in the spec.** All three were observed in real use on 2026-08-16, after the spec was written, and all three are defects in surfaces C4 already rewrites: the classifier's missing intent definitions and its blindness to the conversation (Task 2, §2b/§2c in that task's preamble), the absent loading state (Task 7 step 5), and "Untitled" citations (Task 7 step 3). The first is the most consequential — it made the assistant refuse to answer follow-up questions, which reads to a user as the thing C4 §3 is supposed to fix, and is not. §4.3 → nothing to build: `assistant-box.tsx` already creates the note first, awaited, before the assistant is called; Task 2 step 4's prompt wording protects the property from the classifier's side. §5.1 → Task 3. §5.2's four appliers → Tasks 5 (1, 2, 3) and 6 (4). §5.3 → Task 6, including the exclude-not-down-weight reasoning in the migration header. §6 → nothing is built; both "not doing" items are enforced by absence and named in Global Constraints. §7's eleven test rows → all covered: rows 1–2 in Task 5 step 1, row 3 in Task 5 step 1 (`matchesFilters` eviction), rows 4–5 in Task 6, rows 6–7 in Task 7 (the E2E's two halves and `resolveCurrentSession`'s staleness test), row 8 in Task 1, row 9 in Task 7, rows 10–11 in Tasks 4 and 2.
 
 **The one row whose test is weaker than the spec implies.** §7's "the pane and the turn pick the same session — turns red when the session logic is copied instead of shared". No test can catch a *correct* copy; Task 1 step 8 says so in the test's own comment and asserts the outcome instead. The real guard is structural: the arithmetic no longer exists in `turn.ts`.
 
