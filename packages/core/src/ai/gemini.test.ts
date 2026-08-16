@@ -182,6 +182,30 @@ describe("extractGrounding", () => {
     });
     expect(out!.sources).toEqual([{ url: "https://a.example", title: "https://a.example" }]);
   });
+
+  // Fix round 1: `?? []` only substitutes on null/undefined, so a field present but sent as a
+  // non-array shape used to sail through the cast and throw out of the following .map/.filter
+  // -- inside extractGrounding, which runs synchronously in handleEvent, that would have killed
+  // the whole answer stream rather than just dropping a citation. Array.isArray must degrade an
+  // unexpected shape to an empty list instead.
+  it("degrades to an empty source list rather than throwing when groundingChunks is not an array", () => {
+    const out = extractGrounding({
+      candidates: [{ groundingMetadata: { groundingChunks: "oops", webSearchQueries: ["q"] } }],
+    });
+    expect(out).toEqual({ sources: [], queries: ["q"] });
+  });
+
+  it("degrades to an empty query list rather than throwing when webSearchQueries is not an array", () => {
+    const out = extractGrounding({
+      candidates: [{
+        groundingMetadata: {
+          webSearchQueries: { not: "an array" },
+          groundingChunks: [{ web: { uri: "https://a", title: "a" } }],
+        },
+      }],
+    });
+    expect(out).toEqual({ sources: [{ url: "https://a", title: "a" }], queries: [] });
+  });
 });
 
 // createGeminiAi().generateStream is real HTTP-shape logic (the SSE tail-buffer, the

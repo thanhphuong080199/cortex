@@ -132,7 +132,15 @@ export function extractGrounding(obj: Record<string, unknown>): GroundingResult 
   const meta = candidates?.[0]?.groundingMetadata;
   if (!meta) return null;
 
-  const chunks = (meta.groundingChunks ?? []) as { web?: { uri?: string; title?: string } }[];
+  // `?? []` only substitutes on null/undefined -- a field present but sent as some other shape
+  // (a string, a bare object, a number) would sail through the cast and blow up the following
+  // .map/.filter with "chunks.map is not a function". extractGrounding runs synchronously
+  // inside handleEvent, so that throw would propagate out of iterate() and kill the WHOLE
+  // answer stream, not just drop a citation -- Array.isArray degrades an unexpected shape to an
+  // empty list instead. Do not revert to `?? []` here.
+  const chunks = (
+    Array.isArray(meta.groundingChunks) ? meta.groundingChunks : []
+  ) as { web?: { uri?: string; title?: string } }[];
   const sources: WebSource[] = chunks
     .map((c) => c.web)
     // A chunk with no `web` is a retrieved-context chunk, and a `web` with no `uri` is a
@@ -141,8 +149,10 @@ export function extractGrounding(obj: Record<string, unknown>): GroundingResult 
     .filter((w): w is { uri: string; title?: string } => typeof w?.uri === "string" && w.uri !== "")
     .map((w) => ({ url: w.uri, title: w.title && w.title !== "" ? w.title : w.uri }));
 
-  const queries = ((meta.webSearchQueries ?? []) as unknown[])
-    .filter((q): q is string => typeof q === "string");
+  // Same reasoning as `chunks` above: a non-array webSearchQueries must degrade to [], not throw.
+  const queries = (
+    Array.isArray(meta.webSearchQueries) ? meta.webSearchQueries : []
+  ).filter((q): q is string => typeof q === "string");
 
   const entry = (meta.searchEntryPoint as { renderedContent?: unknown } | undefined)?.renderedContent;
 
