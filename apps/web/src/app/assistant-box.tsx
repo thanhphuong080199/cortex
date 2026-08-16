@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { readEvents, type Citation } from "@cortex/shared";
+import { readEvents, type Citation, type WebCitation } from "@cortex/shared";
 import { api } from "@/lib/api";
 
 type Attached = {
@@ -11,6 +11,8 @@ type Attached = {
 };
 
 type Message = { id: string; content: string };
+
+type Web = { sources: WebCitation[]; queries: string[]; entryPoint?: string };
 
 /**
  * The one chat box (see memory: Cortex's UI target is a single ChatGPT-style thread, not
@@ -29,6 +31,7 @@ export function AssistantBox({ token, initialMessages }: { token: string; initia
   const [error, setError] = useState<string | null>(null);
   const [attached, setAttached] = useState<Attached | null>(null);
   const [citations, setCitations] = useState<Citation[]>([]);
+  const [web, setWeb] = useState<Web | null>(null);
   const [answer, setAnswer] = useState("");
   const [online, setOnline] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -49,7 +52,7 @@ export function AssistantBox({ token, initialMessages }: { token: string; initia
     // implementation (including jsdom, where this component's tests run) supports, with
     // no smooth-scroll API surface to be missing.
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, attached, citations, answer, status, error]);
+  }, [messages, attached, citations, web, answer, status, error]);
 
   async function submit() {
     if (!text.trim() || busy) return;
@@ -58,6 +61,7 @@ export function AssistantBox({ token, initialMessages }: { token: string; initia
     setError(null);
     setAttached(null);
     setCitations([]);
+    setWeb(null);
     setAnswer("");
 
     let note: { id: string };
@@ -93,6 +97,13 @@ export function AssistantBox({ token, initialMessages }: { token: string; initia
           setCitations((ev.data as unknown as { citations: Citation[] }).citations);
         } else if (ev.type === "token") {
           setAnswer((a) => a + String((ev.data as { text?: unknown }).text ?? ""));
+        } else if (ev.type === "web") {
+          const d = ev.data as { sources?: unknown; queries?: unknown; entryPoint?: unknown };
+          setWeb({
+            sources: (Array.isArray(d.sources) ? d.sources : []) as WebCitation[],
+            queries: (Array.isArray(d.queries) ? d.queries : []) as string[],
+            ...(typeof d.entryPoint === "string" ? { entryPoint: d.entryPoint } : {}),
+          });
         } else if (ev.type === "declined") setStatus("Saved. No answer right now (spending limit).");
         else if (ev.type === "error") setStatus("Saved. No answer right now.");
       }
@@ -108,7 +119,8 @@ export function AssistantBox({ token, initialMessages }: { token: string; initia
     return <div className="banner" role="status">Offline — capture is disabled until the connection returns.</div>;
   }
 
-  const hasReply = attached !== null || citations.length > 0 || answer !== "" || status !== null;
+  const hasReply =
+    attached !== null || citations.length > 0 || web !== null || answer !== "" || status !== null;
 
   return (
     <div className="chat-pane">
@@ -132,12 +144,43 @@ export function AssistantBox({ token, initialMessages }: { token: string; initia
               </p>
             )}
 
+            {/* The two blocks below are NEVER merged into one list -- life-domains spec §6.2
+                requires the visible split between what came from the user's own notes and
+                what came from the open internet. */}
             {citations.length > 0 && (
-              <ul className="citations">
-                {citations.map((c) => (
-                  <li key={c.noteId}>{c.title ?? "Untitled"}</li>
-                ))}
-              </ul>
+              <section className="provenance">
+                <h3>Từ notes của bạn</h3>
+                <ul className="citations">
+                  {citations.map((c) => (
+                    <li key={c.noteId}>{c.title ?? "Untitled"}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {web && web.sources.length > 0 && (
+              <section className="provenance web">
+                <h3>Từ web</h3>
+                <ul className="citations">
+                  {web.sources.map((s) => (
+                    <li key={s.url}>
+                      {/* rel="noopener noreferrer": these are URLs the model chose, not ones we vetted. */}
+                      <a href={s.url} target="_blank" rel="noopener noreferrer">{s.title}</a>
+                    </li>
+                  ))}
+                </ul>
+
+                {web.entryPoint && (
+                  // Google's own markup, rendered because Google's terms require the returned Search
+                  // Suggestions entry point to be displayed when grounding is used (life-domains §6.2). It is
+                  // HTML+CSS produced by Google for exactly this, which is why it is injected rather than
+                  // rebuilt -- the compliant path, and free on web.
+                  //
+                  // The source is the Gemini API response relayed by our own API, not user input and not a
+                  // third-party page. If that ever stops being true, this line is the thing to revisit.
+                  <div className="search-suggestions" dangerouslySetInnerHTML={{ __html: web.entryPoint }} />
+                )}
+              </section>
             )}
 
             {answer && <p className="answer">{answer}</p>}
