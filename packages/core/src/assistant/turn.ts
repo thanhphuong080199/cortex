@@ -9,7 +9,7 @@ import { CheckinService } from "../checkins/service.js";
 import { MediaService } from "../media/service.js";
 import { NoteService } from "../notes/service.js";
 import { resolveCurrentSession, selectContext, type ThreadTurn } from "./context.js";
-import { buildAcknowledgePrompt, buildAnswerPrompt } from "./prompts.js";
+import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
 import { retrieve, type Citation } from "./retrieve.js";
 
 export type AssistantEvent =
@@ -241,15 +241,25 @@ export async function* runTurn(
   }
 
   const isQuestion = extracted?.intent === "question";
-  if (isQuestion) {
-    await userDb.from("notes").update({ source_type: "chat" }).eq("id", args.noteId);
+  const isChitchat = extracted?.intent === "chitchat";
+  // A note that already exists, restamped after classification -- the shape 'chat' has used
+  // since C1. `statement` is the default branch and writes nothing: every ordinary capture
+  // keeps the 'quick' the row was created with.
+  if (isQuestion || isChitchat) {
+    await userDb.from("notes")
+      .update({ source_type: isQuestion ? "chat" : "chitchat" })
+      .eq("id", args.noteId);
   }
   const prompt = isQuestion
     ? buildAnswerPrompt({ question: text, citations: citationsForPrompt, history })
-    : buildAcknowledgePrompt({
-        note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
-        related: citationsForPrompt, history,
-      });
+    : isChitchat
+      ? buildChitchatPrompt({ text, history })
+      : buildAcknowledgePrompt({
+          note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
+          related: citationsForPrompt, history,
+        });
+  // Unchanged, and it is what keeps small talk cheap: only a question reaches ANSWER_MODEL,
+  // and only a question grounds (`grounding: isQuestion`, below).
   const model = isQuestion ? ANSWER_MODEL : CLASSIFY_MODEL;
 
   let answer = "";

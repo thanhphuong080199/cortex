@@ -93,3 +93,26 @@ export function buildAcknowledgePrompt(a: {
     `\n\nTheir note: ${a.note}`,
   ].join("\n");
 }
+
+/**
+ * The third branch, stage C4 §4. "hello", "haha ok", "1111" -- a turn with no question in it
+ * and nothing to file.
+ *
+ * Deliberately shorter than the other two and deliberately missing their framing. The
+ * acknowledge prompt announces a filing ("You filed it under ...") and the answer prompt asks
+ * for citations; applied to small talk, the first announces bookkeeping nobody asked about and
+ * the second searches the user's corpus for an answer to "what?". The note is still saved --
+ * that happens in assistant-box.tsx before this prompt exists -- so nothing here needs to
+ * mention it.
+ *
+ * History is included: "haha ok" means nothing without the turn before it.
+ */
+export function buildChitchatPrompt(a: { text: string; history: ThreadTurn[] }): string {
+  return [
+    "The user said something conversational -- a greeting, a reaction, or noise. Reply in one " +
+      "short, natural line. Do not ask a follow-up question and do not start a topic.",
+    LANGUAGE_RULE,
+    renderHistory(a.history),
+    `\n\nThey said: ${a.text}`,
+  ].join("\n");
+}

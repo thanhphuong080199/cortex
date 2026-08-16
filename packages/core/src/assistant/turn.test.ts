@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS } from "@cortex/shared";
+import { CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS } from "@cortex/shared";
 import type { GroundingResult } from "../ai/client.js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
@@ -45,6 +45,7 @@ function dbs(
   } = {},
 ) {
   const inserted: Record<string, Record<string, unknown>[]> = {};
+  const updated: Record<string, Record<string, unknown>[]> = {};
 
   function chain(resolve: () => { data: unknown; error: unknown }) {
     const self: Record<string, unknown> = {
@@ -127,6 +128,10 @@ function dbs(
     },
     insert: (row: Record<string, unknown>) => insertChain(name, row),
     update: (row: Record<string, unknown> = {}) => {
+      // Recorded for EVERY table before the branches below answer the call: an update whose
+      // response shape a test does not care about is still an update a test may need to assert.
+      // The 'chitchat' stamp is exactly that -- runTurn ignores what it resolves to.
+      (updated[name] ??= []).push(row);
       // MediaService.reconcileYear's backfill (`.update({ year }).eq().eq().select().single()`)
       // when the fixture item is missing the year `pending_item` supplies. Spread the row back,
       // same trick insertChain uses above -- the caller reads the UPDATED item off this, not a
@@ -172,7 +177,7 @@ function dbs(
         : { data: [], error: null },
   } as unknown as SupabaseClient;
 
-  return { client, inserted };
+  return { client, inserted, updated };
 }
 
 const collect = async (gen: AsyncGenerator<AssistantEvent>) => {
@@ -765,5 +770,59 @@ describe("runTurn", () => {
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
     expect(inserted.chat_sessions ?? []).toHaveLength(1);
     expect((inserted.chat_messages ?? []).some((r) => r.session_id === "s-old")).toBe(false);
+  });
+
+  it("stamps a chitchat turn's note as chitchat", async () => {
+    const { client, updated } = dbs();
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: ai({ intent: "chitchat" }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(updated.notes ?? []).toContainEqual(expect.objectContaining({ source_type: "chitchat" }));
+  });
+
+  it("stamps a question's note as chat, not chitchat", async () => {
+    const { client, updated } = dbs();
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: ai({ intent: "question" }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(updated.notes ?? []).toContainEqual(expect.objectContaining({ source_type: "chat" }));
+  });
+
+  // The three-way must stay three-way. A statement is the DEFAULT branch and is left alone at
+  // 'quick': stamping it would relabel every ordinary capture as something it is not.
+  it("leaves an ordinary statement's source_type alone", async () => {
+    const { client, updated } = dbs();
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: ai({ intent: "statement" }) },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect((updated.notes ?? []).some((r) => "source_type" in r)).toBe(false);
+  });
+
+  // Small talk does not need the reasoning model, and this is the assertion that keeps it from
+  // silently falling through into the question branch -- where it would spend ANSWER_MODEL and,
+  // since C3, ground against Google on "haha ok".
+  //
+  // A recorder ARRAY, not a nullable variable reassigned by the fake, for the reason spelled out
+  // at turn.test.ts:548: an early return inside createFakeAi that TS cannot see would leave a
+  // nullable `seen` undefined, and `seen?.model` then passes vacuously.
+  it("does not spend the answer model on chitchat", async () => {
+    const { client } = dbs();
+    const seen: { model?: string; grounding?: boolean }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "chitchat", complexity: "simple", domain: null,
+                 domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (args) => {
+        seen.push(args);
+        return {
+          chunks: (async function* () { yield { text: "hehe" }; })(),
+          usage: () => ({ inputTokens: 5, outputTokens: 2, model: "fake-classify" }),
+        };
+      },
+    });
+
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+    expect(seen[0]?.grounding).toBeFalsy();
   });
 });
