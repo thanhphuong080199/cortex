@@ -84,11 +84,17 @@ export function applyNoteFilters<T>(query: T, f: NoteFilters): T {
     not: (c: string, op: string, v: null) => typeof q;
     in: (c: string, v: string[]) => typeof q;
     eq: (c: string, v: string) => typeof q;
+    neq: (c: string, v: string) => typeof q;
     order: (c: string, o: { ascending: boolean }) => typeof q;
     textSearch: (c: string, v: string, o: Record<string, string>) => typeof q;
   };
 
   q = q.order("updated_at", { ascending: false });
+  // Applied to EVERY view including trash, and before the view branching so it cannot be
+  // reached around. Chitchat is saved (stage C4 §6) and never browsed: it is a turn of small
+  // talk, not a note. `neq` and not a null-tolerant form because notes.source_type is
+  // `not null default 'quick'` (00002) -- there is no null here to lose a row to.
+  q = q.neq("source_type", "chitchat");
   q = f.view === "trash" ? q.not("deleted_at", "is", null) : q.is("deleted_at", null);
   // One view over two lifecycle states: `active` and `evergreen` are both live working
   // notes. Trash spans every lifecycle, so it narrows on deleted_at alone.
@@ -121,9 +127,21 @@ export function applyNoteFilters<T>(query: T, f: NoteFilters): T {
  * shape is, and an undomained note simply has null there.
  */
 export function matchesFilters(
-  note: { lifecycle: string; deleted_at: string | null; domain?: string | null },
+  note: {
+    lifecycle: string; deleted_at: string | null;
+    /**
+     * REQUIRED, not optional. Realtime hands back the full row and `noteSelect` already
+     * returns "*", so the data is always there -- making it optional would only buy a caller
+     * the right to forget it, and forgetting it is silent: the SSR query excludes the note
+     * and this predicate patches it straight back in. That is E5's surviving half.
+     */
+    source_type: string;
+    domain?: string | null;
+  },
   f: NoteFilters,
 ): boolean {
+  // First, and above the trash branch: banter in the trash is still not a note anyone browses.
+  if (note.source_type === "chitchat") return false;
   if (f.domain && note.domain !== f.domain) return false;
   if (f.view === "trash") return note.deleted_at !== null;
   if (note.deleted_at !== null) return false;
@@ -207,6 +225,13 @@ export function noteFiltersToSql(f: NoteFilters): {
     return `$${params.length}`;
   };
 
+  // Parameterised like every other value here. Null-tolerant, unlike the Postgres side: the
+  // local replica is written by mobile's own capture path as well as by PowerSync, and a bare
+  // `!= 'chitchat'` evaluates to NULL -- and therefore excludes the row -- for any local row
+  // whose source_type was never set. Hiding a note the user just captured is the worse error
+  // by a distance. (capture.ts and media-log.ts both write 'quick' today, so this is a guard
+  // against a future write path, not a bug being papered over.)
+  clauses.push(`(n.source_type is null or n.source_type != ${p("chitchat")})`);
   clauses.push(f.view === "trash" ? "n.deleted_at is not null" : "n.deleted_at is null");
   if (f.view === "active") clauses.push(`n.lifecycle in (${p("active")}, ${p("evergreen")})`);
   else if (f.view !== "trash") clauses.push(`n.lifecycle = ${p(f.view)}`);
