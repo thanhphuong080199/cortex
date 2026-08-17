@@ -137,10 +137,14 @@ export function AssistantBox(
 
     // THE HAND-OFF, generalized. Both the normal "done" event and an interrupted stream that
     // ends without one migrate the live state into `turns` through this one path, so there is
-    // exactly one place that resets `attached`/`answer`/`citations`/`web` together. Before this,
-    // `done` cleared everything EXCEPT `attached` -- nothing else ever reset it, so a bare
-    // "Filed under: X" bubble (the live reply bubble with everything else empty) sat below the
-    // transcript forever, until the next submit() overwrote it. Reads the *Ref mirrors, not the
+    // exactly one place that resets `attached`/`answer`/`citations`/`web`/`status` together.
+    // Before this, `done` cleared everything EXCEPT `attached` -- nothing else ever reset it, so
+    // a bare "Filed under: X" bubble (the live reply bubble with everything else empty) sat below
+    // the transcript forever, until the next submit() overwrote it. `status` had the same bug on
+    // the interrupted path specifically: once that path started migrating the answer into
+    // `turns` too, the "Saved. No answer right now." hint set by the (now-removed) inline `error`
+    // handler was never cleared alongside it, so a second, decoupled bubble containing only that
+    // hint sat below the just-landed interrupted turn. Reads the *Ref mirrors, not the
     // `citations`/`web` state directly: this event loop is one long-lived async function whose
     // closure captured those at call time, so the state variables here are always their pre-turn
     // values (usually empty) -- same stale-closure trap `answerRef` exists for.
@@ -156,6 +160,7 @@ export function AssistantBox(
       setAnswer("");
       setCitations([]);
       setWeb(null);
+      setStatus(null);
     };
 
     // Set inside the `done` branch below. turn.ts:363 yields `done` only `if (!incomplete)` --
@@ -171,9 +176,25 @@ export function AssistantBox(
     // `citationsRef.current` is routinely non-empty by then) and then `declined`, and returns
     // BEFORE ever inserting a chat_messages row at all. Flushing that into `turns` would invent
     // a phantom turn with no row behind it. `declined` and `error` both also end the stream
-    // without `done`, so this flag is what tells the post-loop check apart from a genuine
-    // mid-answer interruption.
+    // without `done`, so this flag is what tells the settle step apart from a genuine mid-answer
+    // interruption.
     let declined = false;
+
+    // Called once, after the stream has ended one way or another (loop exhausted, or the read
+    // itself threw) without a `done` event. Decides between the two things a dead stream can
+    // mean: something was already produced and belongs in the transcript as an interrupted turn
+    // (the turn's own "interrupted" marker then carries the explanation, so a separate hint
+    // would be redundant), or nothing was produced yet and the hint is the ONLY thing telling the
+    // user their note is still safe. `declined` never reaches here with a message to show -- its
+    // own branch above already set one, and it must not be overwritten.
+    const settleWithoutDone = () => {
+      if (sawDone || declined) return;
+      if (answerRef.current !== "" || citationsRef.current.length > 0 || webRef.current) {
+        flushLiveIntoTurns(`local-${Date.now()}`, true);
+      } else {
+        setStatus("Saved. No answer right now.");
+      }
+    };
 
     try {
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/assistant`, {
@@ -207,7 +228,11 @@ export function AssistantBox(
         } else if (ev.type === "declined") {
           declined = true;
           setStatus("Saved. No answer right now (spending limit).");
-        } else if (ev.type === "error") setStatus("Saved. No answer right now.");
+        }
+        // "error" is intentionally NOT handled here. It always means the stream will end without
+        // a `done` -- but whether that deserves a status hint or an interrupted transcript row
+        // depends on whether anything was produced before it, which is only knowable once the
+        // stream has actually finished. settleWithoutDone(), below, makes that call once.
         else if (ev.type === "done") {
           sawDone = true;
           const d = ev.data as { messageId?: unknown };
@@ -218,28 +243,14 @@ export function AssistantBox(
         }
       }
 
-      // The stream closed without a `done` event and was not declined. If it produced anything
-      // worth keeping (a partial answer, citations already fetched, or a web result), the
-      // transcript must carry it forward as an interrupted turn instead of dropping it the
-      // moment the user sends another message.
-      if (
-        !sawDone && !declined &&
-        (answerRef.current !== "" || citationsRef.current.length > 0 || webRef.current)
-      ) {
-        flushLiveIntoTurns(`local-${Date.now()}`, true);
-      }
+      settleWithoutDone();
     } catch {
-      // The note was already saved above -- only the stream failed. Same rule as above: keep
-      // whatever was accumulated before the connection died, marked incomplete. `declined` can't
-      // be true here (its branch never throws), but the check stays for symmetry with the block
-      // above rather than relying on that.
-      if (
-        !sawDone && !declined &&
-        (answerRef.current !== "" || citationsRef.current.length > 0 || webRef.current)
-      ) {
-        flushLiveIntoTurns(`local-${Date.now()}`, true);
-      }
-      setStatus("Saved. No answer right now.");
+      // The note was already saved above -- only the stream failed (the read itself threw,
+      // rather than the server sending an orderly "error" event). Same rule: keep whatever was
+      // accumulated before the connection died, marked incomplete, or fall back to the hint if
+      // nothing was ever produced. `declined` can't be true here (its branch never throws), but
+      // settleWithoutDone() checks it anyway rather than this call site relying on that.
+      settleWithoutDone();
     } finally {
       setBusy(false);
     }

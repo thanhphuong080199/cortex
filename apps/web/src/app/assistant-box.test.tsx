@@ -313,6 +313,11 @@ describe("the transcript", () => {
     // in `answer`.
     await waitFor(() => expect(screen.getByText(/Theo notes của bạn thì/)).toBeInTheDocument());
     expect(screen.getByText(/interrupted|bị gián đoạn/i)).toBeInTheDocument();
+    // Second review finding: `status` (the "Saved. No answer right now." hint, role="status")
+    // must not survive alongside the just-landed interrupted turn -- the marker above already
+    // says what happened. A leftover hint bubble here would be the same "orphan live state"
+    // bug as finding 1, just on the interrupted/error path instead of the normal one.
+    expect(screen.queryByRole("status")).toBeNull();
 
     // Send a second turn. The naive bug clears `answer` at the top of THIS submit() and the
     // interrupted reply was never anywhere else, so it would disappear right here.
@@ -322,6 +327,31 @@ describe("the transcript", () => {
 
     expect(screen.getByText(/Theo notes của bạn thì/)).toBeInTheDocument();
     expect(screen.getByText(/interrupted|bị gián đoạn/i)).toBeInTheDocument();
+  });
+
+  // Review finding on adc349a: `flushLiveIntoTurns` reset `attached`/`answer`/`citations`/`web`
+  // but not `status`, and `status` is set by the exact same error/catch paths that also migrate
+  // an interrupted turn. Since `hasReply` includes `status !== null`, the live reply bubble kept
+  // rendering a second, decoupled "Saved. No answer right now." hint below the real transcript
+  // row until the next submit()'s top-of-function reset. A narrower, standalone check than the
+  // one folded into the test above: nothing else about the turn matters here, only that the hint
+  // is gone the moment the interrupted row lands.
+  it("clears the status hint once an interrupted turn has landed, not just the answer", async () => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([
+            ["token", { text: "một phần câu trả lời" }],
+            ["error", { message: "boom" }],
+          ])) as typeof fetch;
+
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(screen.getByText(/một phần câu trả lời/)).toBeInTheDocument());
+    expect(screen.queryByText(/saved\. no answer/i)).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });
 
