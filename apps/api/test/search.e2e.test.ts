@@ -106,6 +106,25 @@ describe("POST /search", () => {
     expect(noteIds.length).toBeGreaterThan(0); // alice's own note proves the query actually matches
     expect(noteIds).not.toContain(bobNote!.id);
   });
+
+  // The same clause, asserted over the HTTP path -- a separate assertion because it is a
+  // separate consumer: /search reaches search_notes through SearchController's service-role
+  // client, while retrieval reaches it through retrieve.ts. A regression that dropped the
+  // exclusion for one would drop it for both, and this is the half a user would notice.
+  it("never returns a chitchat note", async () => {
+    const marker = "quixotic-chitchat-marker";
+    await request(app.getHttpServer()).post("/notes")
+      .set(auth(alice.token)).send({ content: `${marker} a real note` }).expect(201);
+    const { data: chit } = await admin.from("notes")
+      .insert({ user_id: alice.id, content: `${marker} haha ok`, source_type: "chitchat" })
+      .select("id").single();
+
+    const res = await request(app.getHttpServer()).post("/search")
+      .set(auth(alice.token)).send({ q: marker }).expect(201);
+    // Not vacuous: the real note with the same marker must come back.
+    expect(res.body.results.length).toBeGreaterThan(0);
+    expect(res.body.results.map((r: { noteId: string }) => r.noteId)).not.toContain(chit!.id);
+  });
 });
 
 // Search spends money on every request (one Gemini embedding of the query) and, until this
