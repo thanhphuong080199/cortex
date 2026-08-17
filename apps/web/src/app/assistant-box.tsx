@@ -103,6 +103,15 @@ export function AssistantBox(
 
   async function submit() {
     if (!text.trim() || busy) return;
+    // Diagnostic only, temporary: one line per milestone on this turn, all relative to t0, with
+    // requestId correlating to the matching `[assistant:timing]` lines runTurn logs server-side.
+    const t0 = Date.now();
+    const requestId = Math.random().toString(36).slice(2, 8);
+    const mark = (label: string) =>
+      console.log(`[assistant-box:timing] ${requestId} ${label} +${Date.now() - t0}ms`);
+    mark("submit");
+
+    const pendingText = text;
     setBusy(true);
     setStatus(null);
     setError(null);
@@ -114,26 +123,36 @@ export function AssistantBox(
     citationsRef.current = [];
     webRef.current = null;
 
+    // Shown the INSTANT Send is pressed, before createNote is even awaited -- otherwise `busy`
+    // (and therefore `phase`'s "Đang lưu…") goes true a whole network round trip before this
+    // turn's own bubble exists, and the thread reads backwards: the assistant appears to be
+    // thinking about a message the user cannot see yet (observed 2026-08-17). A temp id keeps
+    // this reconcilable: swapped for the real note id on success below, removed entirely on
+    // failure, which is what keeps "never a bubble for a message that was never actually saved"
+    // true -- enforced by removal now instead of by delay.
+    const tempId = `pending-${t0}`;
+    setTurns((prev) => [...prev, {
+      id: tempId, role: "user", content: pendingText, citations: [], incomplete: false,
+    }]);
+    setText("");
+
     let note: { id: string };
     try {
-      // FIRST, and awaited, in its OWN try/catch. The note is the deliverable; the answer is
-      // a bonus. Nothing was saved if this throws, so it returns before ever touching `text`
-      // or the SSE fetch -- the retry button below just resubmits what's still in state.
-      note = await api.createNote(token, { content: text });
+      // Awaited in its OWN try/catch. The note is the deliverable; the answer is a bonus.
+      note = await api.createNote(token, { content: pendingText });
+      mark("note saved");
     } catch {
+      setTurns((prev) => prev.filter((t) => t.id !== tempId));
+      setText(pendingText);
       setError("Couldn't save — your text is still here.");
       setBusy(false);
+      mark("note save failed");
       return;
     }
 
-    // Appended only after createNote resolves -- a capture box never loses a thought, and never
-    // shows a bubble for a message that was never actually saved. The server writes the real
-    // chat_messages row inside runTurn; this is the optimistic twin of it, and a reload replaces
-    // it with the persisted one.
-    setTurns((prev) => [...prev, {
-      id: note.id, role: "user", content: text, citations: [], incomplete: false,
-    }]);
-    setText("");
+    // Reconciled to the server's real id -- a reload replaces this turn with the persisted one
+    // from chat_messages either way, so the id only has to be locally unique until then.
+    setTurns((prev) => prev.map((t) => (t.id === tempId ? { ...t, id: note.id } : t)));
 
     // THE HAND-OFF, generalized. Both the normal "done" event and an interrupted stream that
     // ends without one migrate the live state into `turns` through this one path, so there is
@@ -202,21 +221,28 @@ export function AssistantBox(
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
         body: JSON.stringify({ noteId: note.id }),
       });
+      mark(`fetch headers received (status ${res.status})`);
       if (!res.ok || !res.body) {
         setStatus("Saved. No answer right now.");
         return;
       }
+      let sawFirstToken = false;
       for await (const ev of readEvents(res.body)) {
-        if (ev.type === "attached") setAttached(ev.data as unknown as Attached);
+        if (ev.type === "attached") { mark("event: attached"); setAttached(ev.data as unknown as Attached); }
         else if (ev.type === "citations") {
+          mark("event: citations");
           const cs = (ev.data as unknown as { citations: Citation[] }).citations;
           citationsRef.current = cs;
           setCitations(cs);
         } else if (ev.type === "token") {
+          // First token only -- one line per streamed chunk would flood the console on a long
+          // answer and bury the milestone that actually matters (how long the silence was).
+          if (!sawFirstToken) { sawFirstToken = true; mark("event: first token"); }
           const chunk = String((ev.data as { text?: unknown }).text ?? "");
           answerRef.current += chunk;
           setAnswer((a) => a + chunk);
         } else if (ev.type === "web") {
+          mark("event: web");
           const d = ev.data as { sources?: unknown; queries?: unknown; entryPoint?: unknown };
           const w: Web = {
             sources: (Array.isArray(d.sources) ? d.sources : []) as WebCitation[],
@@ -226,6 +252,7 @@ export function AssistantBox(
           webRef.current = w;
           setWeb(w);
         } else if (ev.type === "declined") {
+          mark("event: declined");
           declined = true;
           setStatus("Saved. No answer right now (spending limit).");
         }
@@ -234,6 +261,7 @@ export function AssistantBox(
         // depends on whether anything was produced before it, which is only knowable once the
         // stream has actually finished. settleWithoutDone(), below, makes that call once.
         else if (ev.type === "done") {
+          mark("event: done");
           sawDone = true;
           const d = ev.data as { messageId?: unknown };
           flushLiveIntoTurns(
@@ -243,6 +271,7 @@ export function AssistantBox(
         }
       }
 
+      mark("stream loop exited");
       settleWithoutDone();
     } catch {
       // The note was already saved above -- only the stream failed (the read itself threw,
@@ -250,9 +279,11 @@ export function AssistantBox(
       // accumulated before the connection died, marked incomplete, or fall back to the hint if
       // nothing was ever produced. `declined` can't be true here (its branch never throws), but
       // settleWithoutDone() checks it anyway rather than this call site relying on that.
+      mark("stream threw");
       settleWithoutDone();
     } finally {
       setBusy(false);
+      mark("submit finished");
     }
   }
 

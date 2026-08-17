@@ -53,6 +53,29 @@ describe("AssistantBox", () => {
     expect(calls[1]).toMatch(/\/assistant$/);
   });
 
+  // Observed 2026-08-17: the loading indicator (driven by `busy`, set at the very top of
+  // submit()) appeared a whole network round trip BEFORE the user's own message did, because
+  // the bubble used to wait for createNote to resolve. The thread read backwards -- the
+  // assistant appeared to be "thinking" about a message nobody could see yet. `/notes` is left
+  // deliberately unresolved (a pending Promise, never settled in this test) so this assertion
+  // is checked in the one window where the bug was live: after Send, before the save returns.
+  it("shows the user's own message immediately, before the note is even saved", async () => {
+    let resolveNote!: (res: Response) => void;
+    const notePromise = new Promise<Response>((resolve) => { resolveNote = resolve; });
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes") ? notePromise : sse([["done", { messageId: "m1", sessionId: "s1" }]])) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ buổi sáng");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    // createNote has NOT resolved yet (resolveNote is still unsettled) -- the save is still in
+    // flight -- but the bubble must already be on screen.
+    expect(screen.getByText("chạy bộ buổi sáng")).toBeInTheDocument();
+
+    resolveNote(new Response(JSON.stringify({ id: "n1" }), { status: 201 }));
+  });
+
   // Checked mid-stream (`stalling`, not `sse`): once `done` lands, `attached` is deliberately
   // cleared (review finding on e226fea -- see "does not leave an orphan 'Filed under' bubble"
   // below), so asserting `/health/` is still onscreen AFTER completion would be asserting the
@@ -129,6 +152,14 @@ describe("AssistantBox", () => {
     // The stream must never be reached when the save itself never happened.
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatch(/\/notes$/);
+    // The optimistic bubble (added the instant Send was pressed, see the test below) must be
+    // rolled back on failure -- otherwise a save that never happened would still show a chat
+    // bubble for it, which is exactly the property this whole test exists to prevent. Scoped to
+    // `.bubble.user p`: a bare text match also matches the textarea itself, which legitimately
+    // still holds this same string (asserted above) -- React renders a controlled textarea's
+    // value as its DOM text content, so an unscoped query can't tell "still in the box" apart
+    // from "also a chat bubble".
+    expect(screen.queryByText("ghi chú chưa lưu", { selector: ".bubble.user p" })).toBeNull();
   });
 
   it("retrying re-submits the same text and can succeed the second time", async () => {
