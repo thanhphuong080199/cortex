@@ -17,6 +17,23 @@ const sse = (events: [string, unknown][]) =>
     { status: 200, headers: { "content-type": "text/event-stream" } },
   );
 
+// A stream that opens and then stalls -- never closed, so whatever state the events leave the
+// box in holds still for the assertion instead of racing a `done` (or the stream just ending)
+// that would immediately reset it. Module-scoped because both the "attached" hand-off test below
+// and "the loading phases" describe need a mid-stream snapshot, not an end-of-stream one.
+const stalling = (events: [string, unknown][]) =>
+  new Response(
+    new ReadableStream({
+      start(c) {
+        for (const [type, data] of events) {
+          c.enqueue(new TextEncoder().encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`));
+        }
+        // deliberately never closed
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+
 describe("AssistantBox", () => {
   it("saves the note before it opens the stream", async () => {
     const calls: string[] = [];
@@ -36,15 +53,19 @@ describe("AssistantBox", () => {
     expect(calls[1]).toMatch(/\/assistant$/);
   });
 
+  // Checked mid-stream (`stalling`, not `sse`): once `done` lands, `attached` is deliberately
+  // cleared (review finding on e226fea -- see "does not leave an orphan 'Filed under' bubble"
+  // below), so asserting `/health/` is still onscreen AFTER completion would be asserting the
+  // bug this file elsewhere proves was fixed. What has to hold is that BOTH pieces of state
+  // render correctly together while the turn is still live, regardless of arrival order.
   it("renders attached and citations whichever order they arrive in", async () => {
     globalThis.fetch = (async (url: string) =>
       String(url).endsWith("/notes")
         ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
-        : sse([
+        : stalling([
             ["citations", { citations: [{ type: "note", noteId: "x", title: "Older note", snippet: "s", score: 1, matchedBy: "fts" }] }],
             ["attached", { domain: "health", domainMeta: {}, tags: ["thể dục"] }],
             ["token", { text: "Đã lưu." }],
-            ["done", { messageId: "m1", sessionId: "s1" }],
           ])) as typeof fetch;
 
     render(<AssistantBox token="t" />);
@@ -227,27 +248,90 @@ describe("the transcript", () => {
 
     await waitFor(() => expect(screen.getAllByText("Đã lưu nhé.")).toHaveLength(1));
   });
+
+  // Review finding (e226fea follow-up): `done` reset `answer`/`citations`/`web` but never
+  // `attached`, and nothing else ever cleared it -- so the live reply bubble kept rendering
+  // forever after every completed turn, containing only the "Filed under" line with nothing
+  // else in it. Real note captures hit this on essentially every turn.
+  it("does not leave an orphan 'Filed under' bubble once the turn has landed", async () => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([
+            ["attached", { domain: "health", domainMeta: {}, tags: ["thể dục"] }],
+            ["token", { text: "Đã lưu." }],
+            ["done", { messageId: "m1", sessionId: "s1" }],
+          ])) as typeof fetch;
+
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    // The turn landed and carried the "Filed under" fact is still readable once, from the
+    // transcript's own copy -- this is not asserting the fact disappeared, only that the
+    // ephemeral live bubble stopped re-rendering it after hand-off.
+    await waitFor(() => expect(screen.getAllByText("Đã lưu.")).toHaveLength(1));
+    expect(screen.queryAllByText(/Filed under/)).toHaveLength(0);
+  });
+
+  // Review finding (e226fea follow-up): turn.ts:363 yields `done` only `if (!incomplete)`. A
+  // stream that dies mid-answer still gets its row written to chat_messages with
+  // `retrieval_meta.incomplete: true`, but the client never sees a `done` event for it. Before
+  // this fix the partial answer lived only in the ephemeral `answer` state, which the NEXT
+  // submit() resets at its very top -- so an interrupted reply vanished the moment the user sent
+  // another message, until a full reload re-read it from chat_messages. This is the client-side
+  // half of the brief's own "shown, never hidden" rule for `incomplete`.
+  it("keeps an interrupted answer visible after the stream ends without a done event, even past the next submit", async () => {
+    let call = 0;
+    globalThis.fetch = (async (url: string) => {
+      if (String(url).endsWith("/notes")) {
+        return new Response(JSON.stringify({ id: `n${++call}` }), { status: 201 });
+      }
+      // First turn: tokens arrive, then the stream simply closes -- no `done`, matching a
+      // server-side catch that already yielded `error` and inserted an incomplete row.
+      if (call === 1) {
+        return sse([
+          ["token", { text: "Theo notes của bạn thì" }],
+          ["error", { message: "boom" }],
+        ]);
+      }
+      // Second turn: a normal, complete reply.
+      return sse([
+        ["token", { text: "Đã lưu nhé." }],
+        ["done", { messageId: "m2", sessionId: "s1" }],
+      ]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    const textarea = screen.getByLabelText(/what are you thinking/i);
+    const send = screen.getByRole("button", { name: /send/i });
+
+    await userEvent.type(textarea, "câu hỏi đầu tiên");
+    await userEvent.click(send);
+
+    // The interrupted turn migrated into the transcript, marked interrupted -- not left behind
+    // in `answer`.
+    await waitFor(() => expect(screen.getByText(/Theo notes của bạn thì/)).toBeInTheDocument());
+    expect(screen.getByText(/interrupted|bị gián đoạn/i)).toBeInTheDocument();
+
+    // Send a second turn. The naive bug clears `answer` at the top of THIS submit() and the
+    // interrupted reply was never anywhere else, so it would disappear right here.
+    await userEvent.type(textarea, "câu hỏi thứ hai");
+    await userEvent.click(send);
+    await waitFor(() => expect(screen.getByText("Đã lưu nhé.")).toBeInTheDocument());
+
+    expect(screen.getByText(/Theo notes của bạn thì/)).toBeInTheDocument();
+    expect(screen.getByText(/interrupted|bị gián đoạn/i)).toBeInTheDocument();
+  });
 });
 
 describe("the loading phases", () => {
-  // A stream that opens and then stalls, which is what a grounded turn looks like from the
+  // `stalling` is module-scoped above (also used by "renders attached and citations..."): a
+  // stream that opens and then stalls, which is what a grounded turn looks like from the
   // client: `attached` and `citations` arrive, and then nothing for several seconds while the
   // model searches the web. `web` is emitted only AFTER the stream completes (turn.ts:295), so
   // this is exactly the state the box has to render something for -- and until now it rendered
   // a frozen screen.
-  const stalling = (events: [string, unknown][]) =>
-    new Response(
-      new ReadableStream({
-        start(c) {
-          for (const [type, data] of events) {
-            c.enqueue(new TextEncoder().encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`));
-          }
-          // deliberately never closed
-        },
-      }),
-      { status: 200, headers: { "content-type": "text/event-stream" } },
-    );
-
   const stubbed = (res: () => Response) => {
     globalThis.fetch = (async (url: string) =>
       String(url).endsWith("/notes")
