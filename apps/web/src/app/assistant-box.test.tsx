@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { AssistantBox } from "./assistant-box";
+import { AssistantBox, type TranscriptTurn } from "./assistant-box";
 
 const sse = (events: [string, unknown][]) =>
   new Response(
@@ -41,7 +41,7 @@ describe("AssistantBox", () => {
       String(url).endsWith("/notes")
         ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
         : sse([
-            ["citations", { citations: [{ noteId: "x", title: "Older note", snippet: "s", score: 1, matchedBy: "fts" }] }],
+            ["citations", { citations: [{ type: "note", noteId: "x", title: "Older note", snippet: "s", score: 1, matchedBy: "fts" }] }],
             ["attached", { domain: "health", domainMeta: {}, tags: ["thể dục"] }],
             ["token", { text: "Đã lưu." }],
             ["done", { messageId: "m1", sessionId: "s1" }],
@@ -138,5 +138,164 @@ describe("AssistantBox", () => {
     expect(calls.filter((u) => u.endsWith("/notes"))).toHaveLength(2);
     expect(calls.filter((u) => u.endsWith("/assistant"))).toHaveLength(1);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+const turn = (over: Partial<TranscriptTurn> = {}): TranscriptTurn => ({
+  id: "t1", role: "assistant", content: "Đã lưu.", citations: [], incomplete: false, ...over,
+});
+
+describe("the transcript", () => {
+  it("renders both sides of a past turn", () => {
+    render(<AssistantBox token="t" initialTurns={[
+      turn({ id: "u1", role: "user", content: "hôm nay tôi chạy bộ" }),
+      turn({ id: "a1", role: "assistant", content: "Đã lưu vào health." }),
+    ]} />);
+    expect(screen.getByText("hôm nay tôi chạy bộ")).toBeInTheDocument();
+    expect(screen.getByText("Đã lưu vào health.")).toBeInTheDocument();
+  });
+
+  // A reloaded turn must look like the turn did while it streamed -- same component, same
+  // split. Rendering a persisted turn's citations differently is how "did it remember?"
+  // becomes a question the user has to ask.
+  it("renders a past turn's note and web provenance in the same split blocks", () => {
+    render(<AssistantBox token="t" initialTurns={[turn({
+      citations: [
+        { type: "note", noteId: "n1", title: "Dune", snippet: "s", score: 1, matchedBy: "fts" },
+        { type: "web", url: "https://a.example", title: "a" },
+      ],
+    })]} />);
+    expect(screen.getByRole("heading", { name: "Từ notes của bạn" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Từ web" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "a" })).toHaveAttribute("href", "https://a.example");
+  });
+
+  // THE ONE THAT IS INVISIBLE OTHERWISE. retrieval_meta.incomplete marks an answer the stream
+  // never finished. It stays in the thread deliberately (it is already kept OUT of the prompt
+  // at turn.ts:134, because the model reads a truncated answer as a complete one) -- but in
+  // the `content` column alone, an interrupted answer and a short answer are the same string.
+  // Only the flag can tell them apart, and only the pane can say so.
+  it("marks an interrupted answer as interrupted", () => {
+    render(<AssistantBox token="t" initialTurns={[
+      turn({ content: "Theo notes của bạn thì", incomplete: true }),
+    ]} />);
+    expect(screen.getByText(/interrupted|bị gián đoạn/i)).toBeInTheDocument();
+  });
+
+  it("does not mark a complete answer", () => {
+    render(<AssistantBox token="t" initialTurns={[turn()]} />);
+    expect(screen.queryByText(/interrupted|bị gián đoạn/i)).toBeNull();
+  });
+
+  // "Untitled" x5, observed 2026-08-16. Notes captured through the chat box have title = null,
+  // so every citation rendered the same placeholder -- five identical rows presented to the
+  // user as provenance. The snippet is right there and is what the sidebar already falls back
+  // to (note-list.tsx:16).
+  it("falls back to the snippet when a cited note has no title", () => {
+    render(<AssistantBox token="t" initialTurns={[turn({
+      citations: [{
+        type: "note", noteId: "n1", title: null,
+        snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng", score: 1, matchedBy: "fts",
+      }],
+    })]} />);
+    expect(screen.getByText(/Ngày mai có hẹn đi xem spiderman/)).toBeInTheDocument();
+    expect(screen.queryByText("Untitled")).toBeNull();
+  });
+
+  it("prefers a real title over the snippet", () => {
+    render(<AssistantBox token="t" initialTurns={[turn({
+      citations: [{ type: "note", noteId: "n1", title: "Dune", snippet: "body", score: 1, matchedBy: "fts" }],
+    })]} />);
+    expect(screen.getByText("Dune")).toBeInTheDocument();
+  });
+
+  // The naive version double-renders the last turn: once from the box's streaming state and
+  // once from the transcript it was just appended to. The box owns what is still streaming;
+  // the transcript owns everything that is done.
+  it("shows a finished turn exactly once", async () => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([
+            ["token", { text: "Đã lưu nhé." }],
+            ["done", { messageId: "m1", sessionId: "s1" }],
+          ])) as typeof fetch;
+
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(screen.getAllByText("Đã lưu nhé.")).toHaveLength(1));
+  });
+});
+
+describe("the loading phases", () => {
+  // A stream that opens and then stalls, which is what a grounded turn looks like from the
+  // client: `attached` and `citations` arrive, and then nothing for several seconds while the
+  // model searches the web. `web` is emitted only AFTER the stream completes (turn.ts:295), so
+  // this is exactly the state the box has to render something for -- and until now it rendered
+  // a frozen screen.
+  const stalling = (events: [string, unknown][]) =>
+    new Response(
+      new ReadableStream({
+        start(c) {
+          for (const [type, data] of events) {
+            c.enqueue(new TextEncoder().encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`));
+          }
+          // deliberately never closed
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+
+  const stubbed = (res: () => Response) => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : res()) as typeof fetch;
+  };
+
+  const send = async () => {
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+  };
+
+  it("says it is saving before anything comes back", async () => {
+    stubbed(() => stalling([]));
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await send();
+    expect(await screen.findByRole("status")).toHaveTextContent(/lưu|saving/i);
+  });
+
+  // THE ONE THE USER HIT. This is the multi-second grounding gap, and it is the whole reason
+  // this feature exists: the note is filed, the notes are searched, and the model has not said
+  // anything yet.
+  it("says it is working on an answer once the context has arrived", async () => {
+    stubbed(() => stalling([
+      ["attached", { domain: "media", domainMeta: {}, tags: ["phim"] }],
+      ["citations", { citations: [] }],
+    ]));
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await send();
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/tìm câu trả lời|answer/i));
+  });
+
+  // Tokens ARE the progress indicator. Leaving the label up beside a streaming answer says the
+  // box is still waiting for something it already has.
+  it("drops the indicator once tokens start arriving", async () => {
+    stubbed(() => stalling([
+      ["attached", { domain: null, domainMeta: {}, tags: [] }],
+      ["token", { text: "Theo notes của bạn" }],
+    ]));
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await send();
+    await screen.findByText(/Theo notes của bạn/);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("shows no indicator when nothing is in flight", () => {
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });

@@ -50,17 +50,35 @@ async function authFetch(path, init = {}) {
   return res;
 }
 
-/** Deletes the user if present, so `--reset` really starts from nothing. */
+/**
+ * Deletes the user if present, so `--reset` really starts from nothing.
+ *
+ * PAGINATES. A single-page `?page=1&per_page=200` read looked sufficient until this ran against
+ * a local stack that had accumulated 5,000+ auth users over the project's history -- the e2e
+ * user sat on page ~27, page 1 never contained it, and `--reset` silently deleted nothing while
+ * still reporting success. createUser() then hit its normal 422-reuse path, so every run added a
+ * new corpus onto the SAME account (observed: 7 copies of "Zarquon note" and "Edit target" on
+ * this stack, which broke edit-persist.spec.ts and search-filter.spec.ts with `getByRole` strict
+ * mode violations -- both real duplicate DOM elements, not an auth or Kong-routing failure).
+ * Walking every page by email is the only way to find the row regardless of how large the
+ * unrelated user table has grown.
+ */
 async function deleteExistingUser() {
-  const res = await authFetch(`/admin/users?page=1&per_page=200`);
-  if (!res.ok) throw new Error(`listing users failed (${res.status})`);
-  const { users = [] } = await res.json();
-  for (const u of users.filter((u) => u.email === EMAIL)) {
-    // Cascades to every row the user owns: notes.user_id and friends are
-    // `references auth.users(id) on delete cascade` (00002_content.sql).
-    const del = await authFetch(`/admin/users/${u.id}`, { method: "DELETE" });
-    if (!del.ok) throw new Error(`deleting user ${u.id} failed (${del.status})`);
-    console.error(`[seed] deleted existing user ${u.id}`);
+  let page = 1;
+  for (;;) {
+    const res = await authFetch(`/admin/users?page=${page}&per_page=200`);
+    if (!res.ok) throw new Error(`listing users failed (${res.status})`);
+    const { users = [] } = await res.json();
+    if (users.length === 0) break;
+    for (const u of users.filter((u) => u.email === EMAIL)) {
+      // Cascades to every row the user owns: notes.user_id and friends are
+      // `references auth.users(id) on delete cascade` (00002_content.sql).
+      const del = await authFetch(`/admin/users/${u.id}`, { method: "DELETE" });
+      if (!del.ok) throw new Error(`deleting user ${u.id} failed (${del.status})`);
+      console.error(`[seed] deleted existing user ${u.id}`);
+    }
+    if (users.length < 200) break;
+    page++;
   }
 }
 
@@ -122,6 +140,35 @@ async function signIn() {
   return res.json();
 }
 
+/** Service-role PostgREST. Used only for rows no HTTP route can create (chat_messages). */
+async function restInsert(table, rows) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: "POST",
+    headers: {
+      apikey: SERVICE_ROLE,
+      Authorization: `Bearer ${SERVICE_ROLE}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(rows),
+  });
+  if (!res.ok) throw new Error(`insert ${table} -> ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+async function restPatch(table, query, body) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
+    method: "PATCH",
+    headers: {
+      apikey: SERVICE_ROLE,
+      Authorization: `Bearer ${SERVICE_ROLE}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`patch ${table} -> ${res.status}: ${await res.text()}`);
+}
+
 async function api(path, method, token, body) {
   const res = await fetch(`${API_URL}${path}`, {
     method,
@@ -139,7 +186,7 @@ async function api(path, method, token, body) {
  * The baseline corpus. Every string here is asserted somewhere, so they are deliberately
  * distinctive -- a search for "zarquon" must match exactly one note and nothing incidental.
  */
-async function seedCorpus(token) {
+async function seedCorpus(token, userId) {
   const notes = {};
 
   // Three notes so "the list has >= 3" is true and view-switching has something to show.
@@ -185,6 +232,36 @@ async function seedCorpus(token) {
     impression: "Seeded so the case-insensitivity check has something to collide with.",
   });
 
+  // Stage C4: a conversation for the transcript pane, and a chitchat note that must appear in
+  // the pane and NOT in the sidebar list. There is no HTTP route that writes chat_messages --
+  // runTurn does, and driving a real turn would need a live model -- so these go in directly.
+  //
+  // TIME-SENSITIVE BY CONSTRUCTION. The pane shows the CURRENT session, which is a rolling
+  // 4-hour idle window (SESSION_IDLE_RESET_MS). These rows are stamped now(), so the transcript
+  // assertions hold for four hours after a seed and then stop. If the pane renders empty
+  // locally, re-run this script; in CI the seed always runs immediately before the tests.
+  const chitchatNote = await api("/notes", "POST", token, {
+    content: "haha ok chitchat seeded turn",
+    title: "Chitchat seed",
+  });
+  await restPatch("notes", `id=eq.${chitchatNote.id}`, { source_type: "chitchat" });
+
+  const [chatSession] = await restInsert("chat_sessions", [{ user_id: userId }]);
+  // Both rows carry `citations` (even the user one, which never has any) because PostgREST's
+  // bulk insert requires every object in the array to have the SAME keys -- "All object keys
+  // must match" (PGRST102) otherwise. Observed against the live local stack, not a theoretical
+  // concern.
+  await restInsert("chat_messages", [
+    { user_id: userId, session_id: chatSession.id, role: "user",
+      content: "haha ok chitchat seeded turn", citations: [] },
+    // citations stays EMPTY on purpose: a seeded turn carrying note citations would render a
+    // second "Từ notes của bạn" heading on the home page, and assistant-box.spec.ts's grounding
+    // test matches that heading by role and name.
+    { user_id: userId, session_id: chatSession.id, role: "assistant",
+      content: "Hehe, seeded assistant reply.", citations: [] },
+  ]);
+  notes.chitchat = chitchatNote;
+
   return notes;
 }
 
@@ -193,7 +270,9 @@ async function main() {
   await allowEmail();
   await createUser();
   const session = await signIn();
-  const notes = process.argv.includes("--no-corpus") ? {} : await seedCorpus(session.access_token);
+  const notes = process.argv.includes("--no-corpus")
+    ? {}
+    : await seedCorpus(session.access_token, session.user.id);
 
   // stdout is the machine-readable channel; everything else above went to stderr so `jq` can
   // consume this cleanly.
