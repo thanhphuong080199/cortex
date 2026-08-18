@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { readEvents, type AnyCitation, type Citation, type WebCitation } from "@cortex/shared";
 import { api } from "@/lib/api";
 import { Provenance } from "./provenance";
+import { Markdown } from "./markdown";
 
 type Attached = {
   domain: string | null;
@@ -313,7 +314,7 @@ export function AssistantBox(
           ) : (
             <div key={t.id} className="bubble assistant">
               <Provenance citations={t.citations} />
-              {t.content && <p className="answer">{t.content}</p>}
+              {t.content && <div className="answer"><Markdown>{t.content}</Markdown></div>}
               {t.incomplete && (
                 // An interrupted answer and a short answer are the same string in `content`.
                 // Only retrieval_meta.incomplete tells them apart, and the user is the one who
@@ -340,7 +341,7 @@ export function AssistantBox(
               {...(web?.entryPoint !== undefined ? { entryPoint: web.entryPoint } : {})}
             />
 
-            {answer && <p className="answer">{answer}</p>}
+            {answer && <div className="answer"><Markdown>{answer}</Markdown></div>}
 
             {!error && status && <p className="hint" role="status">{status}</p>}
           </div>

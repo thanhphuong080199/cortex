@@ -4,6 +4,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantBox, type TranscriptTurn } from "./assistant-box";
 import { Provenance } from "./provenance";
+import { Markdown } from "./markdown";
 
 const sse = (events: [string, unknown][]) =>
   new Response(
@@ -424,6 +425,45 @@ describe("the loading phases", () => {
   it("shows no indicator when nothing is in flight", () => {
     render(<AssistantBox token="t" initialTurns={[]} />);
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+describe("Markdown", () => {
+  it("renders emphasis as elements rather than literal asterisks", () => {
+    const { container } = render(<Markdown>{"**Cá hồi** tốt cho mắt."}</Markdown>);
+    expect(container.querySelector("strong")).toHaveTextContent("Cá hồi");
+    expect(container.textContent).not.toContain("**");
+  });
+
+  it("renders a list as a list", () => {
+    const { container } = render(<Markdown>{"- cá hồi\n- rau xanh"}</Markdown>);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+  });
+
+  // NOT DECORATION. These URLs are chosen by the MODEL, from grounding results we did not vet
+  // -- exactly the case provenance.tsx:53 already hardens for. A rendered link without these
+  // hands the opener a window reference back into this tab.
+  it("hardens links the model produced", () => {
+    render(<Markdown>{"xem [ở đây](https://example.com/x)"}</Markdown>);
+    const link = screen.getByRole("link", { name: "ở đây" });
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noreferrer"));
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
+  // Raw HTML must NOT be rendered. react-markdown is safe by default (no rehype-raw), and this
+  // asserts that nobody adds it later for "richer" output -- model output is untrusted text and
+  // this component is the only place it becomes DOM.
+  it("does not render raw html from model output", () => {
+    const { container } = render(<Markdown>{"<img src=x onerror=alert(1)>"}</Markdown>);
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  // A half-written bold marker mid-stream must render as text, not swallow the rest of the
+  // answer. This is what every token between "**" and its closing pair looks like.
+  it("renders an unterminated marker as text while streaming", () => {
+    const { container } = render(<Markdown>{"**Cá h"}</Markdown>);
+    expect(container.textContent).toContain("Cá h");
   });
 });
 

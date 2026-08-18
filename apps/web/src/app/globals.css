@@ -197,7 +197,33 @@ a.back:hover { color: var(--text); }
 }
 
 .bubble { max-width: 78%; padding: 10px 14px; border-radius: 16px; }
+/* pre-wrap is still right for a USER bubble, which is raw text with real newlines in it.
+   Inside .markdown the block structure already carries the newlines, so keeping it there
+   renders every paragraph break twice. */
 .bubble p { margin: 0; white-space: pre-wrap; }
+.bubble .markdown p { white-space: normal; margin: 0 0 0.6em; }
+.bubble .markdown p:last-child { margin-bottom: 0; }
+.bubble .markdown ul,
+.bubble .markdown ol { margin: 0 0 0.6em; padding-left: 1.25em; }
+.bubble .markdown li { margin: 0.15em 0; }
+/* Deliberately small. A reply is a chat message, not a document -- an h1 the size of the page
+   title is exactly the "structured writeup" shape FORMAT_RULE (Task 8) exists to discourage. */
+.bubble .markdown h1,
+.bubble .markdown h2,
+.bubble .markdown h3 { font-size: 1em; font-weight: 600; margin: 0.8em 0 0.3em; }
+.bubble .markdown h1:first-child,
+.bubble .markdown h2:first-child,
+.bubble .markdown h3:first-child { margin-top: 0; }
+.bubble .markdown code { font-size: 0.9em; padding: 0.1em 0.3em; border-radius: 3px;
+  background: rgba(0, 0, 0, 0.06); }
+.bubble .markdown pre { overflow-x: auto; padding: 0.6em; border-radius: 4px;
+  background: rgba(0, 0, 0, 0.06); }
+.bubble .markdown pre code { background: none; padding: 0; }
+/* A table is the one thing that can overflow a bubble on a phone. It scrolls inside itself
+   rather than widening the thread. */
+.bubble .markdown table { display: block; overflow-x: auto; border-collapse: collapse; }
+.bubble .markdown th,
+.bubble .markdown td { border: 1px solid rgba(0, 0, 0, 0.12); padding: 0.25em 0.5em; }
 .bubble.user {
   align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px;
 }
