@@ -22,7 +22,7 @@ const search = async (userId: string, query: string, embedding: number[], limit 
     p_user_id: userId, p_query: query, p_embedding: embedding, p_limit: limit,
   });
   if (error) throw error;
-  return data as { note_id: string; title: string | null; snippet: string; score: number; matched_by: string }[];
+  return data as { note_id: string; title: string | null; snippet: string; created_at: string; score: number; matched_by: string }[];
 };
 
 async function seed(userId: string, content: string, opts: { embedding?: number[]; sourceType?: string; createdAt?: string } = {}) {
@@ -57,6 +57,20 @@ describe("search_notes", () => {
     ({ id: fusion } = await makeUser("search-fusion@example.com"));
     ({ id: clock } = await makeUser("search-clock@example.com"));
     await admin.from("notes").delete().in("user_id", [alice, bob, fusion, clock]);
+  });
+
+  // The whole point of this migration. A note's own date is the anchor every relative word
+  // inside it ("mai", "tuần sau") is measured from, and without it reaching the prompt the model
+  // resolves those against today -- which is how a note written on 12-08 saying "sáng mai" was
+  // reported as an appointment for tomorrow, four days after it happened.
+  it("returns each note's created_at", async () => {
+    const id = await seed(bob, "cái ghi chú có ngày tháng đàng hoàng", {
+      createdAt: "2026-08-12T03:00:00.000Z",
+    });
+    const rows = await search(bob, "ngày tháng", vec(11));
+    const row = rows.find((r) => r.note_id === id);
+    expect(row, "the seeded note did not come back at all").toBeDefined();
+    expect(new Date(row!.created_at).toISOString()).toBe("2026-08-12T03:00:00.000Z");
   });
 
   it("finds a note by keyword alone, with no useful embedding", async () => {

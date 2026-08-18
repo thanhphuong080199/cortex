@@ -52,3 +52,33 @@ describe("default ACL revocation (00009_revoke_default_grants.sql)", () => {
     expect(data).toBe(true);
   });
 });
+
+// 00032_search_notes_created_at.sql: `search_notes` gained a column, and Postgres refuses to
+// change an existing function's RETURNS TABLE with `create or replace` -- so that migration had
+// to DROP the function, which discards its ACL, and restate the revoke/grant pair by hand. Every
+// assertion in search-notes.test.ts runs as `admin` (service_role) and would stay green even if
+// that restatement were silently dropped, so this is the one test that actually exercises the
+// risk a DROP-and-CREATE introduces. `_test_has_function_privilege` is 00032's own companion to
+// `_test_has_table_privilege` above, added there for the same reason: the suite reaches Postgres
+// only through PostgREST, with no direct psql connection to introspect pg_catalog from.
+describe("search_notes execute grant (00032_search_notes_created_at.sql)", () => {
+  const SEARCH_NOTES_SIG = "public.search_notes(uuid, text, extensions.vector(1536), int)";
+
+  it.each(["authenticated", "anon"])("%s holds no EXECUTE on search_notes", async (role) => {
+    const { data, error } = await admin.rpc("_test_has_function_privilege", {
+      p_role: role, p_function: SEARCH_NOTES_SIG, p_privilege: "EXECUTE",
+    });
+    expect(error).toBeNull();
+    expect(data).toBe(false);
+  });
+
+  // Positive control, same reasoning as the table-privilege one above: proves the lookup path
+  // can return true at all, so the two `false` assertions mean something.
+  it("service_role does hold EXECUTE on search_notes (positive control)", async () => {
+    const { data, error } = await admin.rpc("_test_has_function_privilege", {
+      p_role: "service_role", p_function: SEARCH_NOTES_SIG, p_privilege: "EXECUTE",
+    });
+    expect(error).toBeNull();
+    expect(data).toBe(true);
+  });
+});
