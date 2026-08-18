@@ -21,7 +21,7 @@ export function Sidebar({ token, userId, notes, filters, href, domainHref }: {
   href: (view: string) => string;
   domainHref: (domain: string) => string;
 }) {
-  const { view, q, tag, domain } = filters;
+  const { view, q, tag, domain, saved } = filters;
 
   return (
     <>
@@ -57,6 +57,7 @@ export function Sidebar({ token, userId, notes, filters, href, domainHref }: {
         <input type="hidden" name="view" value={view} />
         {tag && <input type="hidden" name="tag" value={tag} />}
         {domain && <input type="hidden" name="domain" value={domain} />}
+        {saved && <input type="hidden" name="saved" value="1" />}
         <input type="text" name="q" defaultValue={q} placeholder="Search notes…" aria-label="Search notes" />
         <button type="submit">Search</button>
         {(q || tag || domain) && <Link className="btn" href={`/?view=${view}`}>Clear</Link>}
