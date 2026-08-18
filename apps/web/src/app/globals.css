@@ -261,6 +261,17 @@ a.back:hover { color: var(--text); }
   .bubble.assistant.thinking .dots::after { animation: none; content: "…"; }
 }
 
+/* One line, two buttons, easy to ignore (§11) -- deliberately lighter than a `.bubble`, so it
+   reads as a follow-up prompt rather than another message in the thread. */
+.offer {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  max-width: 78%; align-self: flex-start;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+  padding: 8px 12px; font-size: 13.5px;
+}
+.offer p { margin: 0; flex: 1; min-width: 160px; }
+.offer button { flex-shrink: 0; padding: 4px 10px; font-size: 12.5px; }
+
 .chat-error { max-width: 760px; width: 100%; margin: 0 auto 8px; padding: 0 16px; }
 
 .chat-composer {

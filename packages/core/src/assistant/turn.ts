@@ -11,6 +11,7 @@ import { CheckinService } from "../checkins/service.js";
 import { MediaService } from "../media/service.js";
 import { NoteService } from "../notes/service.js";
 import { resolveCurrentSession, selectContext, type ThreadTurn } from "./context.js";
+import { proposeOffer } from "./offer.js";
 import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
 import { retrieve, type Citation } from "./retrieve.js";
 
@@ -21,6 +22,7 @@ export type AssistantEvent =
   | { type: "web"; sources: WebCitation[]; queries: string[]; entryPoint?: string }
   | { type: "mood"; checkinId: string; mood: number }
   | { type: "token"; text: string }
+  | { type: "offer"; statement: string; sourceUrl?: string }
   | { type: "declined"; reason: "budget" }
   | { type: "done"; messageId: string; sessionId: string }
   | { type: "error"; message: string };
@@ -418,6 +420,26 @@ export async function* runTurn(
     } catch (err) {
       console.error(`[assistant] grounding usage_ledger write failed: ${errorMessage(err)}`);
     }
+  }
+
+  // C5 §11. Gated on `searched`, which is the cost ceiling: a turn that answered from the
+  // user's own notes contributed nothing external and makes no extra model call at all.
+  // `incomplete` is checked too -- offering to save a fact out of an answer that was cut off
+  // mid-sentence proposes a statement nobody, including this process, ever saw whole.
+  if (searched && !incomplete && answer !== "") {
+    const offer = await proposeOffer({ db: serviceDb, ai }, {
+      userId: args.userId, question: text, answer,
+      ...(webCitations[0]?.url !== undefined ? { sourceUrl: webCitations[0].url } : {}),
+      requestId,
+    });
+    if (offer) {
+      yield {
+        type: "offer",
+        statement: offer.statement,
+        ...(offer.sourceUrl !== undefined ? { sourceUrl: offer.sourceUrl } : {}),
+      };
+    }
+    mark("offer resolved");
   }
 
   const { data: message } = await userDb.from("chat_messages").insert({

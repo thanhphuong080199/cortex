@@ -54,6 +54,12 @@ export const saveAnswerInput = z
 
 export type SaveAnswerInput = z.infer<typeof saveAnswerInput>;
 
+/** The `offer` SSE event's payload (C5 §11). `sourceUrl` is absent for general knowledge. */
+export interface Offer {
+  statement: string;
+  sourceUrl?: string;
+}
+
 /**
  * One row of the `citations` SSE event `POST /assistant` streams -- the OUTPUT half of the
  * contract, mirroring how `SearchResult` (search.ts, same directory) already documents the

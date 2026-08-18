@@ -211,6 +211,58 @@ describe("AssistantBox", () => {
     expect(calls.filter((u) => u.endsWith("/assistant"))).toHaveLength(1);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  // The offer's entry point: a fact the answer contributed that the user's own notes did not
+  // have, carried on its own SSE event exactly like `web` already is.
+  it("shows the offer and saves it on accept", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url).endsWith("/notes")) return new Response(JSON.stringify({ id: "n1" }), { status: 201 });
+      if (String(url).endsWith("/notes/save-answer")) {
+        return new Response(JSON.stringify({ id: "m1" }), { status: 201 });
+      }
+      return sse([
+        ["token", { text: "Cá hồi giàu omega-3." }],
+        ["offer", { statement: "Cá hồi giàu omega-3.", sourceUrl: "https://e.com/a" }],
+        ["done", { messageId: "m1", sessionId: "s1" }],
+      ]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Lưu" }));
+
+    const saveCall = calls.find((c) => c.url.endsWith("/notes/save-answer"));
+    expect(saveCall).toBeDefined();
+    expect(saveCall?.init?.method).toBe("POST");
+    expect(JSON.parse(String(saveCall?.init?.body))).toEqual({
+      statement: "Cá hồi giàu omega-3.", sourceUrl: "https://e.com/a",
+    });
+    // Accepting clears the row -- it is a one-shot prompt, not a standing widget.
+    expect(screen.queryByRole("button", { name: "Lưu" })).toBeNull();
+  });
+
+  // §11's "easy to ignore" is only true if it is genuinely optional. A turn with no offer must
+  // render no row at all -- not an empty one waiting to be filled.
+  it("renders nothing when no offer arrives", async () => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([
+            ["token", { text: "ok" }],
+            ["done", { messageId: "m1", sessionId: "s1" }],
+          ])) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(screen.getByText("ok")).toBeInTheDocument());
+    expect(screen.queryByRole("group", { name: "Lưu vào notes?" })).toBeNull();
+  });
 });
 
 const turn = (over: Partial<TranscriptTurn> = {}): TranscriptTurn => ({

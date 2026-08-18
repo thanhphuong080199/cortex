@@ -979,6 +979,55 @@ describe("runTurn", () => {
       { userId: "u1", noteId: "n1", budgetUsd: 5, timeZone: "Mars/Olympus_Mons" }));
     expect(events.some((e) => e.type === "done")).toBe(true);
   });
+
+  // THE CEILING, and the assertion that keeps this from becoming a second model call on every
+  // turn in the system. An ungrounded answer contributed nothing external, so proposeOffer must
+  // not run at all -- asserted on the absence of the event AND on the classify-call count,
+  // because an offer that ran and returned null is invisible in the event stream alone.
+  it("makes no offer call on an ungrounded turn", async () => {
+    const { client } = dbs();
+    let jsonCalls = 0;
+    const ai = createFakeAi({
+      generateJson: async () => {
+        jsonCalls += 1;
+        return {
+          value: { intent: "question", complexity: "simple", domain: null,
+                   domain_meta: {}, tags: [], mood: null },
+          inputTokens: 10, outputTokens: 5, model: "fake-classify",
+        };
+      },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "từ note của bạn thôi" }; })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        // No grounding() -- nothing was searched.
+      }),
+    });
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(events.some((e) => e.type === "offer")).toBe(false);
+    expect(jsonCalls, "classification only, no offer call").toBe(1);
+  });
+
+  // An interrupted answer must not produce an offer: the statement would be condensed out of a
+  // reply that was cut off mid-sentence, so nobody -- including this process -- saw it whole.
+  it("makes no offer when the answer was interrupted", async () => {
+    const { client } = dbs();
+    const ai = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "question", complexity: "simple", domain: null,
+                 domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "một nử" }; throw new Error("cut"); })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        grounding: () => ({ queries: ["omega 3"], sources: [{ url: "https://e.com/a", title: "A" }] }),
+      }),
+    });
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(events.some((e) => e.type === "offer")).toBe(false);
+  });
 });
 
 // One recorder for the whole describe: each of these cases cares about the same three

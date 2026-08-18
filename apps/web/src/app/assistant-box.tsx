@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { readEvents, type AnyCitation, type Citation, type WebCitation } from "@cortex/shared";
+import { readEvents, type AnyCitation, type Citation, type Offer, type WebCitation } from "@cortex/shared";
 import { api } from "@/lib/api";
 import { Provenance } from "./provenance";
 import { Markdown } from "./markdown";
@@ -50,6 +50,10 @@ export function AssistantBox(
   const [citations, setCitations] = useState<Citation[]>([]);
   const [web, setWeb] = useState<Web | null>(null);
   const [answer, setAnswer] = useState("");
+  // NOT reset by flushLiveIntoTurns: unlike attached/citations/web/answer, the offer must
+  // survive the hand-off into `turns` -- it is the whole point of the row, and it disappears
+  // only when the user acts on it (accept/decline) or the next submit() starts.
+  const [offer, setOffer] = useState<Offer | null>(null);
   const [online, setOnline] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Mirrors `answer` without the stale-closure lag: the SSE event loop is one long-lived async
@@ -120,6 +124,7 @@ export function AssistantBox(
     setCitations([]);
     setWeb(null);
     setAnswer("");
+    setOffer(null);
     answerRef.current = "";
     citationsRef.current = [];
     webRef.current = null;
@@ -258,6 +263,15 @@ export function AssistantBox(
           };
           webRef.current = w;
           setWeb(w);
+        } else if (ev.type === "offer") {
+          mark("event: offer");
+          const d = ev.data as { statement?: unknown; sourceUrl?: unknown };
+          if (typeof d.statement === "string" && d.statement !== "") {
+            setOffer({
+              statement: d.statement,
+              ...(typeof d.sourceUrl === "string" ? { sourceUrl: d.sourceUrl } : {}),
+            });
+          }
         } else if (ev.type === "declined") {
           mark("event: declined");
           declined = true;
@@ -292,6 +306,33 @@ export function AssistantBox(
       setBusy(false);
       mark("submit finished");
     }
+  }
+
+  // Cleared immediately -- optimistic, same as the rest of this box's saves. A failed write
+  // here costs the user one skipped note, not their answer or their transcript, so there is
+  // nothing worth rolling the UI back to.
+  async function acceptOffer(o: Offer) {
+    setOffer(null);
+    try {
+      await fetch(`${process.env.NEXT_PUBLIC_API_URL}/notes/save-answer`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          statement: o.statement,
+          ...(o.sourceUrl !== undefined ? { sourceUrl: o.sourceUrl } : {}),
+        }),
+      });
+    } catch {
+      // Best-effort: the offer is already off the screen, and re-showing it after a failed
+      // save would be its own kind of nag. Nothing else to do here today.
+    }
+  }
+
+  // Task 13 writes the real decline record (a signal not to offer the same fact again). For
+  // now the button must not be dead while that lands, so it does the one thing already true
+  // either way: the offer goes away.
+  function declineOffer(_o: Offer) {
+    setOffer(null);
   }
 
   if (!online) {
@@ -344,6 +385,20 @@ export function AssistantBox(
             {answer && <div className="answer"><Markdown>{answer}</Markdown></div>}
 
             {!error && status && <p className="hint" role="status">{status}</p>}
+          </div>
+        )}
+
+        {offer && (
+          // One line, two buttons, easy to ignore (§11). Not a modal and not a blocking step:
+          // an offer that interrupts is a nag, and a nag is what makes a user stop reading them.
+          // Rendered OUTSIDE `hasReply`, deliberately: `hasReply` goes false the instant the
+          // turn's live state is flushed into `turns` (done event), and the offer must still be
+          // sitting on screen after that -- it is not part of the ephemeral reply, it is its own
+          // standing prompt until the user acts on it.
+          <div className="offer" role="group" aria-label="Lưu vào notes?">
+            <p>{offer.statement}</p>
+            <button type="button" onClick={() => void acceptOffer(offer)}>Lưu</button>
+            <button type="button" onClick={() => void declineOffer(offer)}>Bỏ qua</button>
           </div>
         )}
 
