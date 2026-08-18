@@ -132,7 +132,7 @@ describe("buildAcknowledgePrompt", () => {
   it("carries what was attached, so the reply can name it", () => {
     const p = buildAcknowledgePrompt({
       note: "hôm nay tôi chạy bộ", domain: "health", tags: ["thể dục"], related: [], history: [],
-      timeZone: TZ, now: NOW,
+      timeZone: TZ, now: NOW, verify: false,
     });
     // Each value paired with the label that claims it. Asserting mere presence cannot tell the
     // two apart: swap domain and tags in the renderer and the prompt reads "You filed it under:
@@ -148,7 +148,7 @@ describe("buildAcknowledgePrompt", () => {
   // list renders a dangling "You tagged it: ." -- both are prompts the model has to interpret.
   it("names the absence of a domain and of tags in words", () => {
     const p = buildAcknowledgePrompt({
-      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW,
+      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW, verify: false,
     });
     expect(p).toContain("You filed it under: no domain");
     expect(p).toContain("You tagged it: nothing");
@@ -157,7 +157,7 @@ describe("buildAcknowledgePrompt", () => {
 
   it("forbids inventing a question that was not asked", () => {
     expect(buildAcknowledgePrompt({
-      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW,
+      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW, verify: false,
     })).toMatch(/did not ask/i);
   });
 
@@ -165,7 +165,7 @@ describe("buildAcknowledgePrompt", () => {
   // other: dropping the constant from this call site alone is a one-line change.
   it("carries the language rule too", () => {
     const p = buildAcknowledgePrompt({
-      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW,
+      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW, verify: false,
     });
     expect(p).toMatch(/same language/i);
     expect(p).toMatch(/do not translate/i);
@@ -174,12 +174,13 @@ describe("buildAcknowledgePrompt", () => {
   it("says the search itself failed, distinct from finding nothing and from finding notes", () => {
     const failed = buildAcknowledgePrompt({
       note: "n", domain: null, tags: [], related: "failed", history: [], timeZone: TZ, now: NOW,
+      verify: false,
     });
     expect(failed).toMatch(/could not be searched/i);
     expect(failed).not.toMatch(/no notes matching/i);
 
     const empty = buildAcknowledgePrompt({
-      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW,
+      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW, verify: false,
     });
     expect(empty).not.toMatch(/could not be searched/i);
   });
@@ -187,7 +188,7 @@ describe("buildAcknowledgePrompt", () => {
   it("numbers the related notes the same way the answer prompt does", () => {
     const p = buildAcknowledgePrompt({
       note: "n", domain: null, tags: [], related: [cite({ snippet: "ghi chú cũ" })], history: [],
-      timeZone: TZ, now: NOW,
+      timeZone: TZ, now: NOW, verify: false,
     });
     expect(p).toContain("The user's own notes:\n[1] ghi chú cũ");
   });
@@ -196,7 +197,7 @@ describe("buildAcknowledgePrompt", () => {
     const p = buildAcknowledgePrompt({
       note: "n", domain: null, tags: [], related: [],
       history: [turn("user", "câu hỏi cũ"), turn("assistant", "câu trả lời cũ")],
-      timeZone: TZ, now: NOW,
+      timeZone: TZ, now: NOW, verify: false,
     });
     expect(p).toContain("User: câu hỏi cũ");
     expect(p).toContain("You: câu trả lời cũ");
@@ -207,7 +208,7 @@ describe("buildAcknowledgePrompt", () => {
   it("does not tell the acknowledge prompt about searching", () => {
     const p = buildAcknowledgePrompt({
       note: "hôm nay mình ngủ 5 tiếng", domain: "health", tags: [], related: [], history: [],
-      timeZone: TZ, now: NOW,
+      timeZone: TZ, now: NOW, verify: false,
     });
     expect(p).not.toMatch(/search/i);
   });
@@ -258,7 +259,8 @@ describe("the recall rule", () => {
     for (const p of [
       buildAnswerPrompt({ question: "mỏi mắt ăn gì", ...args }),
       buildAcknowledgePrompt({ note: "dạo này mỏi mắt", domain: null, tags: [],
-        related: args.citations, history: [], timeZone: args.timeZone, now: args.now }),
+        related: args.citations, history: [], timeZone: args.timeZone, now: args.now,
+        verify: false }),
     ]) {
       expect(p).toMatch(/recall|remember|nhắc/i);
     }
@@ -289,7 +291,7 @@ describe("the recall rule", () => {
   it("keeps the bracket citation while changing how it is introduced (acknowledge prompt)", () => {
     const p = buildAcknowledgePrompt({
       note: "dạo này mỏi mắt", domain: null, tags: [], related: args.citations,
-      history: [], timeZone: args.timeZone, now: args.now,
+      history: [], timeZone: args.timeZone, now: args.now, verify: false,
     });
     // Pre-existing instruction line already mentions citing like [1], so isolate RECALL_RULE's own.
     expect(p).toMatch(/\[1\]/);
@@ -321,7 +323,7 @@ describe("temporal anchoring", () => {
   it("tells the acknowledge prompt what today is", () => {
     const p = buildAcknowledgePrompt({
       note: "hôm nay mình chạy bộ", domain: null, tags: [], related: [],
-      history: [], timeZone: TZ, now: NOW,
+      history: [], timeZone: TZ, now: NOW, verify: false,
     });
     expect(p).toContain("16-08-2026");
   });
@@ -385,7 +387,7 @@ describe("temporal anchoring", () => {
   it("tells the acknowledge prompt the trailing note itself is from today", () => {
     const p = buildAcknowledgePrompt({
       note: "Ngày mai có hẹn đi xem spiderman", domain: null, tags: [], related: [],
-      history: [], timeZone: TZ, now: NOW,
+      history: [], timeZone: TZ, now: NOW, verify: false,
     });
     expect(p).toMatch(/HÔM NAY/);
   });
@@ -419,9 +421,56 @@ describe("FORMAT_RULE", () => {
   it("stays off the acknowledge and chitchat prompts", () => {
     const ack = buildAcknowledgePrompt({
       note: "dạo này mỏi mắt", domain: null, tags: [], related: [], history: [],
-      timeZone: "Asia/Ho_Chi_Minh", now: new Date("2026-08-18T03:00:00.000Z"),
+      timeZone: "Asia/Ho_Chi_Minh", now: new Date("2026-08-18T03:00:00.000Z"), verify: false,
     });
     expect(ack).not.toContain("liệt kê");
     expect(buildChitchatPrompt({ text: "haha ok", history: [] })).not.toContain("liệt kê");
+  });
+});
+
+describe("the verification exception", () => {
+  const base = {
+    note: "omega-3 chữa được cận thị", domain: null, tags: [], related: [], history: [],
+    timeZone: "Asia/Ho_Chi_Minh", now: new Date("2026-08-18T03:00:00.000Z"),
+  };
+  const plain = () => buildAcknowledgePrompt({ ...base, verify: false });
+  const checking = () => buildAcknowledgePrompt({ ...base, verify: true });
+
+  // The prohibition SURVIVES on the ordinary path. It is what stops every acknowledgement
+  // becoming a conversation, and deleting it to make room for the exception is the obvious
+  // wrong move.
+  it("keeps the no-question rule on an ordinary statement", () => {
+    expect(plain()).toMatch(/did not ask a question/i);
+  });
+
+  // AND on the verifying path. The exception is one named carve-out, not a licence to
+  // converse: the model may note a discrepancy, not open a dialogue about it.
+  it("keeps the no-question rule while verifying", () => {
+    expect(checking()).toMatch(/did not ask a question/i);
+    expect(checking()).toMatch(/do not ask|no follow-up|without asking/i);
+  });
+
+  it("permits one brief correction only when verifying", () => {
+    expect(checking()).toMatch(/wrong|incorrect|discrepancy|sai/i);
+    expect(plain()).not.toMatch(/discrepancy/i);
+  });
+
+  // THE ASYMMETRIC ONE. The model looked only at the claim it flagged, and the user cannot
+  // tell which claims those were -- so "đúng rồi" on an unchecked sentence is the system
+  // asserting a verification it never performed. Silence has to mean "no basis to doubt",
+  // never "confirmed".
+  it("forbids implying a claim was checked and found correct", () => {
+    const p = checking();
+    expect(p).toMatch(/đúng rồi/);
+    expect(p).toMatch(/chính xác/);
+    expect(p).toMatch(/xác nhận/);
+    expect(p).toMatch(/silence|not confirm/i);
+  });
+
+  // Scoping: an ordinary statement must not carry a paragraph about verification it will never
+  // do. That is instruction the model has to interpret on every capture in the corpus.
+  it("stays out of an ordinary acknowledgement entirely", () => {
+    expect(plain()).not.toMatch(/silence/i);
+    expect(plain()).not.toMatch(/đúng rồi/);
   });
 });

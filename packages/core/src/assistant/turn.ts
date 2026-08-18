@@ -305,6 +305,10 @@ export async function* runTurn(
       : buildAcknowledgePrompt({
           note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
           related: citationsForPrompt, history, timeZone, now,
+          // The same boolean that put this turn on ANSWER_MODEL and enabled grounding. One
+          // derivation, three uses -- a second condition here could disagree with the model
+          // choice and produce a verification prompt running on flash-lite.
+          verify: verifies,
         });
   // Two ways onto the reasoning model and no third. `verifies` is capped by the classifier's
   // own threshold ("only when you have real reason to doubt"), so an ordinary capture is

@@ -68,6 +68,31 @@ const FORMAT_RULE =
   "exception, not the default shape of an answer.";
 
 /**
+ * Stage C5 §9.3. Added to buildAcknowledgePrompt only when the classifier flagged the note as
+ * carrying a factual claim it has real reason to doubt, and only on the reasoning model --
+ * asking flash-lite to adjudicate truth is asking the weakest model in the system to do the
+ * task with the most asymmetric failure mode.
+ *
+ * The first sentence is a CARVE-OUT of the acknowledge prompt's standing "do not answer a
+ * question" rule, not a replacement for it. That rule stays on both paths: without it, an
+ * acknowledgement becomes a conversation, and this branch would become a debate.
+ *
+ * The second half has no exception and is the more important of the two. The model looked only
+ * at the claim it flagged, and the user cannot tell which claims those were -- so "đúng rồi" on
+ * a sentence nothing examined is the system asserting a verification it never performed.
+ * Silence has to mean "no basis to doubt", never "checked and confirmed". A system that
+ * sometimes confirms is one whose silence starts reading as confirmation too.
+ */
+const VERIFY_RULE =
+  "One exception to the rule above: if something they stated is factually wrong, say so once, " +
+  "briefly, in the same breath as the acknowledgement. Name the discrepancy and stop -- do " +
+  "not ask a follow-up, do not invite a reply, and do not explain at length. " +
+  "Never do the opposite: do not say \"đúng rồi\", \"chính xác\", \"xác nhận\" or anything " +
+  "else implying you checked their note and found it correct. You looked at one claim, and " +
+  "they cannot tell which. Silence means you had no reason to doubt them, not that you " +
+  "confirmed them.";
+
+/**
  * The temporal anchor, on both prompts that read the user's own material.
  *
  * Two facts and one rule, and the rule is the part that fixes the observed defect: the date
@@ -173,6 +198,12 @@ export function buildAcknowledgePrompt(a: {
   history: ThreadTurn[];
   timeZone: string;
   now: Date;
+  /**
+   * Required rather than optional, deliberately. An optional flag defaulting to false lets a
+   * call site forget it, and the symptom -- verification silently never happening -- looks
+   * exactly like a classifier that stopped setting the flag.
+   */
+  verify: boolean;
 }): string {
   return [
     "The user just saved a note. Acknowledge it in one or two sentences.",
@@ -191,6 +222,9 @@ export function buildAcknowledgePrompt(a: {
       "related, say so and cite them like [1].",
     RECALL_RULE,
     "The user did not ask a question. Do not answer one, and do not invent one to answer.",
+    // Spread-in rather than an empty string: an ordinary acknowledgement must carry no
+    // instruction about verification at all, not a blank line where one used to be.
+    ...(a.verify ? [VERIFY_RULE] : []),
     renderCitations(a.related, a.timeZone),
     renderHistory(a.history, a.timeZone),
     `\n\nTheir note: ${a.note}`,
