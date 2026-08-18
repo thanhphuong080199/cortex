@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { CLASSIFY_MODEL, formatToday, GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS } from "@cortex/shared";
+import {
+  ANSWER_MODEL, CLASSIFY_MODEL, formatToday, GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS,
+} from "@cortex/shared";
 import type { GroundingResult } from "../ai/client.js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
@@ -820,6 +822,121 @@ describe("runTurn", () => {
       },
     });
 
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+    expect(seen[0]?.grounding).toBeFalsy();
+  });
+
+  // THE TURN THIS WHOLE TASK EXISTS FOR: a note to file AND a question, in one sentence. From
+  // the routing point on it must be indistinguishable from a pure question -- same prompt, same
+  // model, same grounding, same stamp. Four assertions and not one, because the old `isQuestion`
+  // drove exactly these four things and a partial fix would leave the answer ungrounded or
+  // running on flash-lite with nothing to show that it had.
+  it("answers a statement that also asks something", async () => {
+    const { client, updated } = dbs();
+    const seen: { prompt?: string; model?: string; grounding?: boolean }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", alsoWantsAnswer: true, complexity: "simple",
+                 domain: null, domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "Cá hồi và rau xanh." }; })(),
+          usage: () => ({ inputTokens: 5, outputTokens: 4, model: ANSWER_MODEL }),
+        };
+      },
+    });
+
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+
+    expect(seen[0]?.model, "must reach the answer model").toBe(ANSWER_MODEL);
+    expect(seen[0]?.grounding, "must be allowed to search the web").toBe(true);
+    expect(updated.notes ?? []).toContainEqual(expect.objectContaining({ source_type: "chat" }));
+    // The acknowledge prompt's refusal is the sentence that swallowed the question. Its absence
+    // is the only direct evidence the ANSWER prompt ran rather than a reworded acknowledge one.
+    expect(seen[0]?.prompt).not.toMatch(/did not ask a question/i);
+  });
+
+  // Confirmed by the user: this branch must NOT announce a save. The property is bought by
+  // routing to buildAnswerPrompt, which has no filing language -- so this asserts the outcome,
+  // which stays green against a correct implementation and red against one that "helpfully"
+  // adds a filing line to the answer prompt.
+  it("does not announce the filing when it answers a statement", async () => {
+    const { client } = dbs();
+    const seen: { prompt?: string }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", alsoWantsAnswer: true, complexity: "simple",
+                 domain: "health", domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "ok" }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        };
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seen[0]?.prompt).not.toMatch(/You filed it under/i);
+    expect(seen[0]?.prompt).not.toMatch(/Mention what you attached/i);
+  });
+
+  // THE REGRESSION GUARD, and the one that makes the flag worth having rather than a blanket
+  // widening. An ordinary recorded note -- no question in it -- must stay on the cheap model,
+  // must not ground, and must keep the 'quick' source_type it was created with. Drop the
+  // `alsoWantsAnswer` condition and write `intent === "statement"` instead and this goes red.
+  it("leaves an ordinary statement on the cheap path", async () => {
+    const { client, updated } = dbs();
+    const seen: { model?: string; grounding?: boolean }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", alsoWantsAnswer: false, complexity: "simple",
+                 domain: null, domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "Đã lưu." }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: CLASSIFY_MODEL }),
+        };
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+    expect(seen[0]?.grounding).toBeFalsy();
+    expect((updated.notes ?? []).some((r) => "source_type" in r)).toBe(false);
+  });
+
+  // Chitchat must not be reachable through the new flag. "haha ok" with a spurious
+  // alsoWantsAnswer must stay small talk: grounding "haha ok" against Google is the single most
+  // wasteful thing this system can be made to do, and a flag the model sets is not trusted input.
+  it("never lets the flag promote chitchat", async () => {
+    const { client } = dbs();
+    const seen: { model?: string; grounding?: boolean }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "chitchat", alsoWantsAnswer: true, complexity: "simple",
+                 domain: null, domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "hehe" }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: CLASSIFY_MODEL }),
+        };
+      },
+    });
     await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
     expect(seen[0]?.model).toBe(CLASSIFY_MODEL);

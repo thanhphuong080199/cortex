@@ -259,21 +259,40 @@ export async function* runTurn(
     return;
   }
 
-  const isQuestion = extracted?.intent === "question";
+  // AN ORDERED CHAIN, not a set of independent booleans, and the order is the decision.
+  //
+  // `wantsAnswer` covers two shapes that behave identically from here on: a pure question, and
+  // a statement the classifier flagged as also asking something (design doc §1). The second is
+  // the eye-fatigue turn -- "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi mắt" -- which
+  // was classified `statement`, routed to buildAcknowledgePrompt, and had its question dropped
+  // by that prompt's "The user did not ask a question" rule.
+  //
+  // `intent` stays "statement" for that turn on purpose: it still drives tagging, domain and
+  // the filing tone correctly. Only the reply branch was ever wrong.
+  //
+  // Chitchat is checked SECOND and can never be reached by the flag: grounding "haha ok"
+  // against Google is the most wasteful thing this system can be told to do, and
+  // `alsoWantsAnswer` is a value a model produced, not trusted input.
+  const wantsAnswer = extracted?.intent === "question"
+    || (extracted?.intent === "statement" && extracted?.alsoWantsAnswer === true);
   const isChitchat = extracted?.intent === "chitchat";
+
   // A note that already exists, restamped after classification -- the shape 'chat' has used
-  // since C1. `statement` is the default branch and writes nothing: every ordinary capture
-  // keeps the 'quick' the row was created with.
-  if (isQuestion || isChitchat) {
+  // since C1. An ordinary statement is the default branch and writes nothing: every plain
+  // capture keeps the 'quick' the row was created with.
+  if (wantsAnswer || isChitchat) {
     await userDb.from("notes")
-      .update({ source_type: isQuestion ? "chat" : "chitchat" })
+      .update({ source_type: wantsAnswer ? "chat" : "chitchat" })
       .eq("id", args.noteId);
   }
   // Resolved once per turn, not per prompt: two calls could not disagree today, but the point
   // of a single resolution is that they cannot start to.
   const timeZone = resolveTimeZone(args.timeZone);
   const now = new Date();
-  const prompt = isQuestion
+  const prompt = wantsAnswer
+    // The FULL turn text, both shapes. "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi
+    // mắt" answers better with the eye strain still in it than with the question carved out,
+    // and carving it out would need a second model call to decide where the seam is.
     ? buildAnswerPrompt({ question: text, citations: citationsForPrompt, history, timeZone, now })
     : isChitchat
       ? buildChitchatPrompt({ text, history })
@@ -281,20 +300,20 @@ export async function* runTurn(
           note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
           related: citationsForPrompt, history, timeZone, now,
         });
-  // Unchanged, and it is what keeps small talk cheap: only a question reaches ANSWER_MODEL,
-  // and only a question grounds (`grounding: isQuestion`, below).
-  const model = isQuestion ? ANSWER_MODEL : CLASSIFY_MODEL;
+  // Only a turn that wants an answer reaches ANSWER_MODEL, and only it grounds. That ceiling
+  // is what keeps the flag cheap: an ordinary capture is untouched by this task.
+  const model = wantsAnswer ? ANSWER_MODEL : CLASSIFY_MODEL;
 
   let answer = "";
   let incomplete = false;
   let streamUsage: { inputTokens: number; outputTokens: number; model: string } | null = null;
   let grounding: GroundingResult | null = null;
-  mark(`model stream requested (${model}, grounding=${isQuestion})`);
+  mark(`model stream requested (${model}, grounding=${wantsAnswer})`);
   try {
     const stream = await ai.generateStream({
       prompt, model, signal: args.signal,
       // The whole enablement decision. Never unconditional: see the acknowledge-path test.
-      grounding: isQuestion,
+      grounding: wantsAnswer,
     });
     mark("model stream opened");
     try {
