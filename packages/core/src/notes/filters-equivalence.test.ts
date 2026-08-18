@@ -60,6 +60,13 @@ beforeAll(async () => {
   await svc.softDelete(goneMedia.id);
   ids.trashedMedia = goneMedia.id;
 
+  // Stage C4: excluded from BOTH engines. Seeded as a real row -- agreement alone is the
+  // weaker property (two appliers that both forget the clause agree perfectly), so this id is
+  // named in the expectations below and must appear in neither.
+  const chit = await svc.create({ content: "haha ok chitchat row" });
+  await client.from("notes").update({ source_type: "chitchat" }).eq("id", chit.id);
+  ids.chitchat = chit.id;
+
   tagId = (await tags.findOrCreate({ name: "equiv-fixture" })).id;
   await tags.attach(ids.media, tagId);
 
@@ -69,7 +76,7 @@ beforeAll(async () => {
   sqlite = new Database(":memory:");
   sqlite.exec(`CREATE TABLE notes (
     id TEXT PRIMARY KEY, content TEXT, title TEXT, lifecycle TEXT,
-    domain TEXT, updated_at TEXT, deleted_at TEXT
+    domain TEXT, source_type TEXT, updated_at TEXT, deleted_at TEXT
   );
   CREATE TABLE note_tags (id TEXT PRIMARY KEY, note_id TEXT, tag_id TEXT, deleted_at TEXT);
   CREATE VIRTUAL TABLE notes_fts USING fts5(id UNINDEXED, content);`);
@@ -78,12 +85,12 @@ beforeAll(async () => {
     .select("*").eq("user_id", alice.id);
   if (notesError) throw notesError;
   const insertNote = sqlite.prepare(
-    `INSERT INTO notes (id, content, title, lifecycle, domain, updated_at, deleted_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO notes (id, content, title, lifecycle, domain, source_type, updated_at, deleted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertFts = sqlite.prepare(`INSERT INTO notes_fts (id, content) VALUES (?, ?)`);
   for (const n of notes as Record<string, string | null>[]) {
-    insertNote.run(n.id, n.content, n.title, n.lifecycle, n.domain, n.updated_at, n.deleted_at);
+    insertNote.run(n.id, n.content, n.title, n.lifecycle, n.domain, n.source_type, n.updated_at, n.deleted_at);
     insertFts.run(n.id, n.content);
   }
 
@@ -98,7 +105,7 @@ beforeAll(async () => {
   }
   // A mirror that silently copied nothing would make every equivalence assertion agree on
   // two empty sets. Fail here instead, where the cause is obvious.
-  expect(sqlite.prepare("SELECT count(*) c FROM notes").get()).toEqual({ c: 7 });
+  expect(sqlite.prepare("SELECT count(*) c FROM notes").get()).toEqual({ c: 8 });
   expect(sqlite.prepare("SELECT count(*) c FROM note_tags").get()).toEqual({ c: 1 });
 });
 
@@ -157,6 +164,14 @@ describe("filter equivalence: PostgREST vs SQLite", () => {
     expect(sqlIds(f)).toEqual([]);
     expect(await postgrestIds(f)).toEqual([]);
   });
+
+  it("excludes a chitchat note from the inbox on both engines", async () => {
+    const filters: NoteFilters = { view: "inbox" };
+    expect(sqlIds(filters)).toEqual(set("inbox", "media"));
+    expect(await postgrestIds(filters)).toEqual(set("inbox", "media"));
+    expect(sqlIds(filters)).not.toContain(ids.chitchat);
+    expect(await postgrestIds(filters)).not.toContain(ids.chitchat);
+  });
 });
 
 describe("the q clause executes on the engine the phone runs", () => {
@@ -201,8 +216,8 @@ describe("noteFiltersToSql parameterisation", () => {
   it("emits numbered placeholders and converts them positionally", () => {
     const { where, params } = noteFiltersToSql({ view: "active", domain: "media" });
     expect(where).toContain("$1");
-    expect(params).toHaveLength(3); // active, evergreen, media
+    expect(params).toHaveLength(4); // chitchat, active, evergreen, media
     expect(toSqlitePlaceholders(where)).not.toContain("$");
-    expect(toSqlitePlaceholders(where).match(/\?/g)).toHaveLength(3);
+    expect(toSqlitePlaceholders(where).match(/\?/g)).toHaveLength(4);
   });
 });

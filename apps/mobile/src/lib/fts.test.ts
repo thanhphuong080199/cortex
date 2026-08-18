@@ -14,7 +14,9 @@ import { setupNotesFts, type FtsTarget } from "./fts.js";
  * plan's version would have shipped -- a rowid-keyed FTS table that matches nothing without
  * ever erroring, so every search silently returns empty and nothing anywhere reports a problem.
  */
-const COLUMNS = ["title", "content", "lifecycle", "domain", "created_at", "updated_at", "deleted_at"];
+const COLUMNS = [
+  "title", "content", "lifecycle", "domain", "source_type", "created_at", "updated_at", "deleted_at",
+];
 
 function powersyncLike() {
   const db = new Database(":memory:");

@@ -1,8 +1,9 @@
 import { redirect } from "next/navigation";
+import { readCitation, resolveCurrentSession, type AnyCitation } from "@cortex/shared";
 import { createClient } from "@/lib/supabase/server";
 import { applyNoteFilters, noteSelect, parseNoteFilters } from "@/lib/note-views";
 import { AppShell } from "./app-shell";
-import { AssistantBox } from "./assistant-box";
+import { AssistantBox, type TranscriptTurn } from "./assistant-box";
 import { Sidebar } from "./sidebar";
 import type { NoteRow } from "./note-list";
 
@@ -49,9 +50,53 @@ export default async function Home(
     return `/?${sp.toString()}`;
   };
 
-  // Chat reads top-to-bottom, oldest first; the note list beside it (in the sidebar) is the
-  // same rows in the opposite, most-recent-first order the query already fetched them in.
-  const messages = [...notes].reverse().map((n) => ({ id: n.id, content: n.content }));
+  // THE SPLIT. The pane reads chat_messages; the sidebar reads notes. Two TABLES, not two
+  // narrowings of one -- so the pane cannot inherit the sidebar's view/q/tag filters, which is
+  // what it did until stage C4 (`/?view=archived` rendered an archived-only "conversation").
+  // chat_messages also holds the assistant's own replies, which are not notes and never will
+  // be, so there is no second narrowing here to drift.
+  //
+  // RLS is the isolation layer and it is already in place: chat_messages_own (00006) scopes
+  // both statements below to this user, which is why the second one can be scoped by session
+  // alone -- the same shape turn.ts reads it with.
+  const { data: last } = await supabase
+    .from("chat_messages").select("session_id, created_at")
+    .eq("user_id", user.id).order("created_at", { ascending: false }).limit(1);
+  const sessionId = resolveCurrentSession(
+    ((last ?? [])[0] as { session_id: string; created_at: string } | undefined) ?? null,
+    new Date(),
+  );
+
+  // Scrollback across earlier sessions is OUT of stage C4 (§2), and the limit is the visible
+  // form of that decision: the pane shows the rolling 4-hour thread, not an unbounded list with
+  // no bottom. Reaching older conversations is a search problem and gets its own stage.
+  const TRANSCRIPT_LIMIT = 200;
+  const { data: messageRows } = sessionId
+    ? await supabase
+        .from("chat_messages").select("id, role, content, citations, retrieval_meta")
+        .eq("session_id", sessionId)
+        .order("created_at", { ascending: true })
+        .limit(TRANSCRIPT_LIMIT)
+    : { data: [] };
+
+  const turns: TranscriptTurn[] = (messageRows ?? []).map((m) => {
+    const row = m as {
+      id: string; role: string; content: string;
+      citations: unknown; retrieval_meta: { incomplete?: boolean } | null;
+    };
+    return {
+      id: row.id,
+      role: row.role === "assistant" ? "assistant" : "user",
+      content: row.content,
+      // readCitation is the one place a jsonb entry's shape is decided: a pre-C3 entry with no
+      // `type` reads as a note, and anything unreadable is DROPPED rather than rendered. One
+      // bad entry must not cost the user the rest of the transcript.
+      citations: (Array.isArray(row.citations) ? row.citations : [])
+        .map(readCitation)
+        .filter((c): c is AnyCitation => c !== null),
+      incomplete: row.retrieval_meta?.incomplete === true,
+    };
+  });
 
   return (
     <AppShell
@@ -66,7 +111,7 @@ export default async function Home(
         />
       }
     >
-      <AssistantBox token={session.access_token} initialMessages={messages} />
+      <AssistantBox token={session.access_token} initialTurns={turns} />
     </AppShell>
   );
 }

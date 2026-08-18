@@ -1,14 +1,13 @@
+// Moved to @cortex/shared in stage C4 so the web transcript pane can reach it -- apps/web
+// depends on shared and not on core. Re-exported here under the same names so this module
+// stays the one import site for the assistant's context and session rules.
+export { SESSION_IDLE_RESET_MS, isStale, resolveCurrentSession } from "@cortex/shared";
+
 /**
  * A token BUDGET, not a turn count: one turn may be a word and the next a pasted page
  * (parent spec §9).
  */
 export const CONTEXT_TOKEN_BUDGET = 2000;
-
-/**
- * An idle gap rather than a calendar boundary, so someone writing at 1am is not cut
- * mid-thought.
- */
-export const SESSION_IDLE_RESET_MS = 4 * 60 * 60 * 1000;
 
 export interface ThreadTurn {
   role: "user" | "assistant";
@@ -66,10 +65,4 @@ export function selectContext(turns: ThreadTurn[], budget = CONTEXT_TOKEN_BUDGET
     kept.push(t);
   }
   return kept.reverse();
-}
-
-/** No history is stale: a first message starts a session rather than joining one. */
-export function isStale(lastMessageAt: string | null, now: Date): boolean {
-  if (lastMessageAt === null) return true;
-  return now.getTime() - new Date(lastMessageAt).getTime() >= SESSION_IDLE_RESET_MS;
 }

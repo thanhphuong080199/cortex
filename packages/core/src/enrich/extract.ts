@@ -2,10 +2,24 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { domainMetaSchemas, mediaKind, noteDomain } from "@cortex/shared";
 import type { AiClient } from "../ai/client.js";
 import type { EnrichTarget } from "./embed.js";
+import type { ThreadTurn } from "../assistant/context.js";
 import { recordUsage } from "./budget.js";
 
+/**
+ * The three kinds of turn. `chitchat` is stage C4: "hello", "haha ok", "1111" -- input with
+ * nothing to file and no question in it. Before it existed, those were forced into one of the
+ * other two, and both reply templates are wrong for them (prompts.ts's acknowledge branch
+ * explicitly refuses to converse; the answer branch searches the corpus for an answer to
+ * "what?").
+ *
+ * Exported and reused in buildPrompt below so the schema and the prompt cannot name different
+ * sets -- the same drift `mediaKind` already cost this file once.
+ */
+export const INTENTS = ["question", "statement", "chitchat"] as const;
+export type Intent = (typeof INTENTS)[number];
+
 interface Extraction {
-  intent?: "question" | "statement";
+  intent?: Intent;
   complexity?: "simple" | "complex";
   domain: string | null;
   domain_meta: Record<string, unknown>;
@@ -18,7 +32,7 @@ const RESPONSE_SCHEMA = {
   properties: {
     // The box branches on this. The sweep ignores it -- a few output tokens, against two
     // prompts that would have to be kept in step by discipline alone.
-    intent: { type: "string", enum: ["question", "statement"] },
+    intent: { type: "string", enum: [...INTENTS] },
     // RECORDED, NOT ACTED ON. It costs a couple of output tokens and produces the dataset a
     // future model-routing decision needs: complexity x real cost x model. Nothing reads it.
     complexity: { type: "string", enum: ["simple", "complex"] },
@@ -67,11 +81,25 @@ const RESPONSE_SCHEMA = {
 export const TAG_VOCABULARY_LIMIT = 200;
 
 /**
+ * How many prior turns the CLASSIFIER sees. Two, not selectContext's 2000-token window: this
+ * prompt runs on every capture, so history here is a per-note cost forever, and a follow-up
+ * depends on the exchange immediately before it rather than on turn 40. Truncation lives here
+ * rather than at the call site so the ceiling holds for every caller -- including a future one
+ * that hands over a whole session by mistake.
+ */
+export const CLASSIFIER_HISTORY_TURNS = 2;
+
+/**
  * Exported for extract.test.ts only. The media-kind line has to be assertable against
  * `mediaKind`: the two live in different packages, drift is not a type error, and the
  * symptom is a silently empty domain_meta rather than anything that throws.
  */
-export function buildPrompt(contentText: string, vocabulary: string[]): string {
+export function buildPrompt(
+  contentText: string,
+  vocabulary: string[],
+  history?: ThreadTurn[],
+): string {
+  const recent = (history ?? []).slice(-CLASSIFIER_HISTORY_TURNS);
   return [
     "You organise one person's personal notes. Return JSON only.",
     "",
@@ -91,6 +119,15 @@ export function buildPrompt(contentText: string, vocabulary: string[]): string {
     "- mood is 1 to 5, and ONLY when the note says how the writer feels — \"mệt\", \"vui\",",
     "  \"chán\". A note about a difficult topic is not a bad mood. Return null if you are",
     "  inferring rather than reading.",
+    "- intent labels THIS TURN, not the note's worth:",
+    "  \"question\" — they want an answer. A short follow-up counts: \"còn gì nữa\",",
+    "    \"tại sao\", \"ví dụ đi\", \"ok còn gì khác không\" are questions when what they",
+    "    follow up on is shown below.",
+    "  \"chitchat\" — greetings, reactions and noise with nothing to file: \"hello\",",
+    "    \"haha ok\", \"1111\".",
+    "  \"statement\" — anything else: something they are recording.",
+    "  Every one of the three is still SAVED as a note. You are labelling the turn, not",
+    "  deciding whether it is worth keeping.",
     "",
     "Write tags in the SAME LANGUAGE the note is written in. Do not translate: a note in",
     "Vietnamese gets Vietnamese tags. Tag vocabularies that mix languages split one idea across two",
@@ -98,6 +135,13 @@ export function buildPrompt(contentText: string, vocabulary: string[]): string {
     "identifier stored in the database, so return it exactly as listed above whatever the note's",
     "language.",
     "",
+    // Rendered only when there is one. The sweep calls extractNote with no history, and an
+    // empty "Earlier in this conversation:" heading is a heading the model has to interpret,
+    // on every note in the corpus.
+    recent.length > 0
+      ? "Earlier in this conversation:\n" +
+        recent.map((t) => `${t.role === "user" ? "User" : "You"}: ${t.content}`).join("\n") + "\n"
+      : "",
     "The note:",
     contentText,
   ].join("\n");
@@ -117,7 +161,7 @@ export async function extractNote(
   domain: string | null;
   domainMeta: Record<string, unknown>;
   mood: number | null;
-  intent: "question" | "statement";
+  intent: Intent;
   complexity: "simple" | "complex";
 }> {
   const { db, ai } = deps;
@@ -139,7 +183,7 @@ export async function extractNote(
   const byLowerName = new Map(vocabulary.map((t) => [t.name.toLowerCase(), t]));
 
   const { value, inputTokens, outputTokens, model } = await ai.generateJson<Extraction>({
-    prompt: buildPrompt(note.contentText, vocabulary.map((t) => t.name)),
+    prompt: buildPrompt(note.contentText, vocabulary.map((t) => t.name), note.history),
     schema: RESPONSE_SCHEMA,
   });
   // "tag": usage_ledger.kind's CHECK constraint (00007_integrations_ops.sql) is a fixed
@@ -285,7 +329,9 @@ export async function extractNote(
     // here, which made that impossible.
     domainMeta: meta,
     mood,
-    intent: value.intent === "question" ? "question" : "statement",
+    // A COMPARISON, not a cast. See extract.test.ts's default cases: `value.intent as Intent`
+    // compiles and lets an unrecognised string through to turn.ts's branch.
+    intent: value.intent === "question" || value.intent === "chitchat" ? value.intent : "statement",
     complexity: value.complexity === "complex" ? "complex" : "simple",
   };
 }

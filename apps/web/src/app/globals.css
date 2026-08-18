@@ -218,6 +218,23 @@ a.back:hover { color: var(--text); }
 .bubble.assistant .provenance.web .citations li::before { content: "🌐 "; }
 .bubble.assistant .search-suggestions { margin-top: 6px; }
 
+.bubble.assistant .interrupted { margin: 0; font-size: 12.5px; color: var(--muted); font-style: italic; }
+.bubble.assistant.thinking p { color: var(--muted); font-size: 13.5px; }
+.bubble.assistant.thinking .dots::after {
+  content: "";
+  animation: thinking-dots 1.2s steps(4, end) infinite;
+}
+@keyframes thinking-dots {
+  0%   { content: ""; }
+  25%  { content: "."; }
+  50%  { content: ".."; }
+  75%  { content: "..."; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The label already says what is happening; the animation is decoration and is dropped. */
+  .bubble.assistant.thinking .dots::after { animation: none; content: "…"; }
+}
+
 .chat-error { max-width: 760px; width: 100%; margin: 0 auto 8px; padding: 0 16px; }
 
 .chat-composer {

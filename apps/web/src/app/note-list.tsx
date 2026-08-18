@@ -10,6 +10,8 @@ import {
 export interface NoteRow {
   id: string; title: string | null; content: string;
   lifecycle: string; updated_at: string; deleted_at: string | null;
+  /** Required because matchesFilters requires it. `noteSelect` returns "*", so it is always here. */
+  source_type: string;
   domain?: string | null;
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ThreadTurn } from "./context.js";
-import { buildAcknowledgePrompt, buildAnswerPrompt } from "./prompts.js";
+import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
 import type { Citation } from "./retrieve.js";
 
 const cite = (over: Partial<Citation> = {}): Citation => ({
@@ -186,5 +186,36 @@ describe("buildAcknowledgePrompt", () => {
       note: "hôm nay mình ngủ 5 tiếng", domain: "health", tags: [], related: [], history: [],
     });
     expect(p).not.toMatch(/search/i);
+  });
+});
+
+describe("buildChitchatPrompt", () => {
+  const history: ThreadTurn[] = [
+    { role: "user", content: "hôm nay mình chạy bộ", createdAt: "2026-08-16T10:00:00Z" },
+    { role: "assistant", content: "Đã lưu vào health.", createdAt: "2026-08-16T10:00:01Z" },
+  ];
+
+  it("carries the conversation so far", () => {
+    expect(buildChitchatPrompt({ text: "haha ok", history })).toContain("hôm nay mình chạy bộ");
+  });
+
+  it("keeps the language rule", () => {
+    expect(buildChitchatPrompt({ text: "haha ok", history: [] }))
+      .toMatch(/same language the user wrote in/i);
+  });
+
+  // The whole reason this branch exists. The acknowledge prompt says "You filed it under ..."
+  // and "Mention what you attached"; applied to "haha ok" the model announces a filing nobody
+  // asked for. If either phrase appears here, the third intent bought nothing.
+  it("does not file, tag, or announce what it attached", () => {
+    const p = buildChitchatPrompt({ text: "haha ok", history: [] });
+    expect(p).not.toMatch(/filed it under/i);
+    expect(p).not.toMatch(/tagged/i);
+    expect(p).not.toMatch(/attached/i);
+  });
+
+  // It is not the answer branch either: there are no citations to cite and nothing was searched.
+  it("does not ask for citations", () => {
+    expect(buildChitchatPrompt({ text: "hello", history: [] })).not.toMatch(/\[1\]/);
   });
 });

@@ -8,8 +8,8 @@ import { errorMessage } from "../errors.js";
 import { CheckinService } from "../checkins/service.js";
 import { MediaService } from "../media/service.js";
 import { NoteService } from "../notes/service.js";
-import { isStale, selectContext, type ThreadTurn } from "./context.js";
-import { buildAcknowledgePrompt, buildAnswerPrompt } from "./prompts.js";
+import { resolveCurrentSession, selectContext, type ThreadTurn } from "./context.js";
+import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
 import { retrieve, type Citation } from "./retrieve.js";
 
 export type AssistantEvent =
@@ -56,6 +56,11 @@ export async function* runTurn(
 ): AsyncGenerator<AssistantEvent> {
   const { userDb, serviceDb, ai } = deps;
   const requestId = randomUUID();
+  // Diagnostic only, temporary: one line per milestone, all relative to the same t0, so a slow
+  // turn can be read off the server log as a timeline instead of guessed at. Every mark carries
+  // requestId so concurrent turns interleave in the log without being ambiguous.
+  const t0 = Date.now();
+  const mark = (label: string) => console.log(`[assistant:timing] ${requestId} ${label} +${Date.now() - t0}ms`);
 
   // The user's client, so RLS is what proves ownership -- and the note's text comes from the
   // database, never from the caller's copy of it.
@@ -91,6 +96,7 @@ export async function* runTurn(
   }
   const text = note.content_text;
   const noteCreatedAt = note.created_at;
+  mark("note ready");
 
   // A client-supplied sessionId is UNVERIFIED input. Without this read the history query below
   // is scoped by session alone, so a guessed id would select another user's conversation into
@@ -107,11 +113,15 @@ export async function* runTurn(
     .from("chat_messages").select("session_id, created_at")
     .eq("user_id", args.userId).order("created_at", { ascending: false }).limit(1);
   const lastRow = (last ?? [])[0] as { session_id: string; created_at: string } | undefined;
-  sessionId = sessionId ?? lastRow?.session_id;
-  if (!sessionId || isStale(lastRow?.created_at ?? null, new Date())) {
+  // The SAME call the web pane makes (page.tsx). A client-supplied id is honoured only while
+  // the thread it names is still live: past the idle gap this turn starts a new session
+  // whatever the client asked for, which is what the two lines this replaced already did.
+  const live = resolveCurrentSession(lastRow ?? null, new Date());
+  sessionId = live === null ? undefined : (sessionId ?? live);
+  if (!sessionId) {
     const { data: created } = await userDb
       .from("chat_sessions").insert({ user_id: args.userId }).select("id").single();
-    sessionId = (created as { id: string } | null)?.id ?? sessionId ?? randomUUID();
+    sessionId = (created as { id: string } | null)?.id ?? randomUUID();
   }
   // History is read BEFORE the current turn's own message is written, deliberately: writing
   // first and reading back with no exclusion would make the just-inserted row indistinguishable
@@ -120,9 +130,11 @@ export async function* runTurn(
   const { data: historyRows } = await userDb
     .from("chat_messages").select("role, content, created_at, retrieval_meta")
     .eq("session_id", sessionId).order("created_at", { ascending: false }).limit(40);
+  mark("session+history resolved");
 
   await userDb.from("chat_messages")
     .insert({ user_id: args.userId, session_id: sessionId, role: "user", content: text });
+  mark("user message written");
   // No trailing reverse: `selectContext` sorts its input by `createdAt` on its own copy before
   // filling the budget (Task 5), so the order these rows arrive in does not matter here -- only
   // the filter below does.
@@ -144,19 +156,30 @@ export async function* runTurn(
   // sweep would re-extract this note 60 seconds later and pay for the same call twice. This is
   // the two-hash design working (spec §4.2) only if the hash is honest.
   const contentHash = createHash("md5").update(text, "utf8").digest("hex");
+  // Individually timed, not just the pair via `mark` after the await below: the two race each
+  // other, so knowing only their combined finish time hides which one is actually the long pole
+  // (classification vs. retrieval's own embedding call and search_notes round trip).
+  const timed = <T,>(label: string, p: Promise<T>): Promise<T> =>
+    p.finally(() => mark(`${label} settled`));
   const [extraction, citationsResult] = await Promise.allSettled([
-    withDeadline(
+    timed("classify", withDeadline(
       extractNote({ db: serviceDb, ai }, {
         noteId: args.noteId, userId: args.userId, contentText: text, contentHash,
         // This call is the assistant's own classification spend, not the 60-second sweep's --
         // filing it under "sweep" (extractNote's default) would make a live turn's cost
         // indistinguishable from real sweep activity and unjoinable to this turn's requestId.
         source: "assistant", requestId,
+        // Handed over whole; buildPrompt takes the last CLASSIFIER_HISTORY_TURNS. Without this
+        // the classifier sees "ok còn gì khác không" as an isolated sentence, returns
+        // `statement`, and the acknowledge prompt then refuses to answer -- observed
+        // 2026-08-16 and the reason this field exists.
+        history,
       }),
       EXTRACT_DEADLINE_MS,
-    ),
-    retrieve({ db: serviceDb, ai }, { userId: args.userId, text, requestId }),
+    )),
+    timed("retrieve", retrieve({ db: serviceDb, ai }, { userId: args.userId, text, requestId })),
   ]);
+  mark("classify+retrieve both settled");
 
   // `withDeadline` resolves to null on timeout, so a fulfilled-but-null result is a timeout
   // and must be treated exactly like a thrown one. Both are logged (rejection and timeout give
@@ -183,6 +206,7 @@ export async function* runTurn(
     } catch (err) {
       console.error(`[assistant] media link failed (request ${requestId}): ${errorMessage(err)}`);
     }
+    mark("media link resolved");
   }
 
   yield extracted
@@ -232,32 +256,51 @@ export async function* runTurn(
   }
 
   const isQuestion = extracted?.intent === "question";
-  if (isQuestion) {
-    await userDb.from("notes").update({ source_type: "chat" }).eq("id", args.noteId);
+  const isChitchat = extracted?.intent === "chitchat";
+  // A note that already exists, restamped after classification -- the shape 'chat' has used
+  // since C1. `statement` is the default branch and writes nothing: every ordinary capture
+  // keeps the 'quick' the row was created with.
+  if (isQuestion || isChitchat) {
+    await userDb.from("notes")
+      .update({ source_type: isQuestion ? "chat" : "chitchat" })
+      .eq("id", args.noteId);
   }
   const prompt = isQuestion
     ? buildAnswerPrompt({ question: text, citations: citationsForPrompt, history })
-    : buildAcknowledgePrompt({
-        note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
-        related: citationsForPrompt, history,
-      });
+    : isChitchat
+      ? buildChitchatPrompt({ text, history })
+      : buildAcknowledgePrompt({
+          note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
+          related: citationsForPrompt, history,
+        });
+  // Unchanged, and it is what keeps small talk cheap: only a question reaches ANSWER_MODEL,
+  // and only a question grounds (`grounding: isQuestion`, below).
   const model = isQuestion ? ANSWER_MODEL : CLASSIFY_MODEL;
 
   let answer = "";
   let incomplete = false;
   let streamUsage: { inputTokens: number; outputTokens: number; model: string } | null = null;
   let grounding: GroundingResult | null = null;
+  mark(`model stream requested (${model}, grounding=${isQuestion})`);
   try {
     const stream = await ai.generateStream({
       prompt, model, signal: args.signal,
       // The whole enablement decision. Never unconditional: see the acknowledge-path test.
       grounding: isQuestion,
     });
+    mark("model stream opened");
     try {
+      // Split out because this is usually THE number: the gap between "opened" above and
+      // "first token" below is the silent stretch the loading indicator's "Đang tìm câu trả
+      // lời…" phase exists to cover, and it is dominated by grounding (a web search the model
+      // runs before it says anything) far more often than by the model's own latency.
+      let sawFirstToken = false;
       for await (const chunk of stream.chunks) {
+        if (!sawFirstToken) { sawFirstToken = true; mark("first token"); }
         answer += chunk.text;
         yield { type: "token", text: chunk.text };
       }
+      mark("stream exhausted");
     } finally {
       // Both reads live in the `finally` for the same reason: an aborted answer has still been
       // billed and has still been searched, and neither fact survives if it is only read on the
@@ -267,6 +310,7 @@ export async function* runTurn(
     }
   } catch (err) {
     incomplete = true;
+    mark("model stream threw");
     yield { type: "error", message: errorMessage(err).slice(0, 200) };
   }
 
@@ -340,8 +384,10 @@ export async function* runTurn(
     citations: [...citations, ...webCitations],
     retrieval_meta: { requestId, incomplete },
   }).select("id").single();
+  mark("assistant message written");
 
   if (!incomplete) {
     yield { type: "done", messageId: (message as { id: string } | null)?.id ?? "", sessionId };
   }
+  mark("turn complete");
 }

@@ -52,6 +52,12 @@ export class AssistantController {
   ): Promise<void> {
     const budgetUsd = this.env().ASSISTANT_MONTHLY_BUDGET_USD;
 
+    // Diagnostic only, temporary: correlates with runTurn's own `[assistant:timing]` lines
+    // (same clock, this controller's t0 is always <= runTurn's t0) so a slow turn can be told
+    // apart from slow middleware (SupabaseAuthGuard, the zod body validation) ahead of it.
+    const reqT0 = Date.now();
+    console.log(`[assistant:timing] controller received POST /assistant, noteId=${body.noteId}`);
+
     res.setHeader("content-type", "text/event-stream");
     res.setHeader("cache-control", "no-cache, no-transform");
     res.setHeader("connection", "keep-alive");
@@ -79,6 +85,7 @@ export class AssistantController {
         const { type, ...data } = event;
         res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
       }
+      console.log(`[assistant:timing] controller stream done +${Date.now() - reqT0}ms since request received`);
     } catch (err) {
       // Headers are already sent, so there is no status code left to set -- the only way to
       // report a failure is inside the stream. Never the raw error: it can carry model output.

@@ -54,7 +54,7 @@ describe("noteSelect", () => {
 });
 
 describe("matchesFilters", () => {
-  const note = { lifecycle: "inbox", deleted_at: null, domain: "media" };
+  const note = { lifecycle: "inbox", deleted_at: null, domain: "media", source_type: "quick" };
 
   it("agrees with the inbox view", () => {
     expect(matchesFilters(note, { view: "inbox" })).toBe(true);
@@ -66,7 +66,7 @@ describe("matchesFilters", () => {
     expect(matchesFilters(note, { view: "inbox", domain: "health" })).toBe(false);
   });
   it("admits an undomained note only when no domain is filtered", () => {
-    const plain = { lifecycle: "inbox", deleted_at: null, domain: null };
+    const plain = { lifecycle: "inbox", deleted_at: null, domain: null, source_type: "quick" };
     expect(matchesFilters(plain, { view: "inbox" })).toBe(true);
     expect(matchesFilters(plain, { view: "inbox", domain: "media" })).toBe(false);
   });
@@ -139,7 +139,7 @@ describe("applyNoteFilters and noteFiltersToSql agree about an empty q", () => {
     // SQLite side drops its clause and shows the view. Same NoteFilters, two answers.
     const calls: string[] = [];
     const builder = {
-      is: () => builder, not: () => builder, in: () => builder, eq: () => builder,
+      is: () => builder, not: () => builder, in: () => builder, eq: () => builder, neq: () => builder,
       order: () => builder,
       textSearch: () => {
         calls.push("textSearch");
@@ -155,7 +155,7 @@ describe("applyNoteFilters and noteFiltersToSql agree about an empty q", () => {
   it("both still search for a real query", () => {
     const calls: string[] = [];
     const builder = {
-      is: () => builder, not: () => builder, in: () => builder, eq: () => builder,
+      is: () => builder, not: () => builder, in: () => builder, eq: () => builder, neq: () => builder,
       order: () => builder,
       textSearch: () => {
         calls.push("textSearch");
@@ -166,6 +166,52 @@ describe("applyNoteFilters and noteFiltersToSql agree about an empty q", () => {
 
     expect(calls).toEqual(["textSearch"]);
     expect(noteFiltersToSql({ view: "inbox", q: "pricing" }).where).toContain("notes_fts");
+  });
+});
+
+describe("chitchat is not a note anyone browses", () => {
+  // Applier 1. Asserted through a recording double rather than a live query, the way this
+  // file's other applyNoteFilters cases are: what matters is the CALL, since a missing `neq`
+  // is invisible in a result set that happens to contain no chitchat.
+  it("applyNoteFilters excludes it from every view", () => {
+    for (const view of NOTE_VIEWS) {
+      const calls: [string, unknown][] = [];
+      const q = new Proxy({}, {
+        get: (_t, prop: string) => (...args: unknown[]) => { calls.push([prop, args]); return q; },
+      });
+      applyNoteFilters(q, { view });
+      expect(calls, `view=${view}`).toContainEqual(["neq", ["source_type", "chitchat"]]);
+    }
+  });
+
+  // Applier 2. Trash included: chitchat is excluded everywhere, not just from the live views.
+  it("noteFiltersToSql excludes it from every view", () => {
+    for (const view of NOTE_VIEWS) {
+      const { where, params } = noteFiltersToSql({ view });
+      expect(where, `view=${view}`).toContain("source_type");
+      expect(params, `view=${view}`).toContain("chitchat");
+    }
+  });
+
+  // Applier 3, AND the reason it is separate from applier 1. A chitchat note is created as
+  // 'quick' and stamped only after classification, so Realtime delivers it to the list first
+  // and the stamping UPDATE arrives second. Without this the SSR query excludes it and the
+  // live patch puts it straight back -- E5's surviving half, exactly.
+  it("matchesFilters evicts a row that has just been stamped chitchat", () => {
+    const row = { lifecycle: "inbox", deleted_at: null, source_type: "chitchat" };
+    expect(matchesFilters(row, { view: "inbox" })).toBe(false);
+  });
+
+  it("matchesFilters still admits an ordinary note", () => {
+    const row = { lifecycle: "inbox", deleted_at: null, source_type: "quick" };
+    expect(matchesFilters(row, { view: "inbox" })).toBe(true);
+  });
+
+  // A note in the trash is still not browsable banter. Checked separately because the trash
+  // branch of matchesFilters returns before the lifecycle checks.
+  it("matchesFilters evicts chitchat from trash too", () => {
+    const row = { lifecycle: "inbox", deleted_at: "2026-08-16T00:00:00Z", source_type: "chitchat" };
+    expect(matchesFilters(row, { view: "trash" })).toBe(false);
   });
 });
 
@@ -218,6 +264,7 @@ describe("noteFiltersToSql q handling", () => {
     const { where, params } = noteFiltersToSql({ view: "inbox", q: "   " });
     // Emitting an empty MATCH would make every such search throw instead of showing the view.
     expect(where).not.toContain("notes_fts");
-    expect(params).toEqual(["inbox"]);
+    // Params now include "chitchat" from the source_type exclusion clause.
+    expect(params).toEqual(["chitchat", "inbox"]);
   });
 });

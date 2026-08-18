@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { chunkText, EMBEDDING_MODEL } from "@cortex/shared";
 import { createHash } from "node:crypto";
 import type { AiClient } from "../ai/client.js";
+import type { ThreadTurn } from "../assistant/context.js";
 import { recordUsage, type UsageSource } from "./budget.js";
 
 export interface EnrichTarget {
@@ -16,6 +17,16 @@ export interface EnrichTarget {
   // instead of being filed under the 60-second sweep with no request_id (see 00027).
   source?: UsageSource;
   requestId?: string;
+  /**
+   * The conversation so far, for classification only. Optional and absent in the sweep, which
+   * is the point: a note being re-extracted an hour later by the 60-second sweep has no
+   * conversation around it, and inventing one would classify it against turns it was never
+   * part of. `embedNote` never reads this, the same way it never reads `source`.
+   *
+   * Truncated by buildPrompt to CLASSIFIER_HISTORY_TURNS, so a caller may hand over as much
+   * as it has without knowing the ceiling.
+   */
+  history?: ThreadTurn[];
 }
 
 const md5 = (s: string) => createHash("md5").update(s, "utf8").digest("hex");

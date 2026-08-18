@@ -63,3 +63,30 @@ test("a thought is saved even though the assistant cannot answer", async ({ page
   await expect(page.getByText(text)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText(/no answer right now/i)).toBeVisible({ timeout: 15_000 });
 });
+
+/**
+ * Stage C4: the pane and the sidebar read DIFFERENT TABLES, and this is the assertion that
+ * says so. Both halves matter and neither implies the other:
+ *
+ *   - the seeded assistant reply exists only in chat_messages, so it can only appear if the
+ *     pane reads that table (before C4 the pane was derived from `notes` and this text was
+ *     nowhere on the page);
+ *   - the seeded chitchat note exists only in `notes`, and must NOT be in the sidebar list --
+ *     if applyNoteFilters loses its clause, this is where it shows.
+ *
+ * The seeded conversation is timestamped at seed time and the pane shows a rolling 4-hour
+ * session; re-run `node e2e/scripts/seed.mjs` if this goes red with an empty pane.
+ */
+test("the transcript reads the conversation, and the list does not show chitchat", async ({ page }) => {
+  await page.goto("/");
+
+  await expect(page.getByText("Hehe, seeded assistant reply.")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("haha ok chitchat seeded turn")).toBeVisible();
+
+  // The sidebar's note list, scoped so the pane's copy of the same text cannot satisfy it.
+  await expect(
+    page.locator("ul.notes").getByText("Chitchat seed", { exact: false }),
+  ).toHaveCount(0);
+  // Not vacuous: the list is rendering other notes.
+  await expect(page.locator("ul.notes li").first()).toBeVisible();
+});

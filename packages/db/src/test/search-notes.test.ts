@@ -345,4 +345,28 @@ describe("search_notes", () => {
       expect(rows.map((r) => r.note_id)).toContain(id);
     });
   });
+
+  // Stage C4 §5.3. The FTS arm: a chitchat note whose text matches the query exactly must not
+  // come back. Anchored against a control note with the same keyword, so a green result cannot
+  // come from the query simply matching nothing.
+  it("never returns a chitchat note matched by keyword", async () => {
+    const control = await seed(bob, "the flibbertigibbet protocol, a real note");
+    const chit = await seed(bob, "the flibbertigibbet protocol, haha ok", { sourceType: "chitchat" });
+    const rows = await search(bob, "flibbertigibbet protocol", vec(7));
+    expect(rows.map((r) => r.note_id)).toContain(control);
+    expect(rows.map((r) => r.note_id)).not.toContain(chit);
+  });
+
+  // The VECTOR arm, separately: the two arms are joined with a full outer join, so a clause
+  // present in one and absent from the other still returns the row. A near-identical embedding
+  // is the strongest possible pull into the vector arm -- if the exclusion is missing there,
+  // this is the assertion that says so.
+  it("never returns a chitchat note matched by embedding", async () => {
+    const target = vec(21);
+    const chit = await seed(bob, "banter with a very close embedding", {
+      sourceType: "chitchat", embedding: target,
+    });
+    const rows = await search(bob, "nothing-matches-this-keyword-zzz", target);
+    expect(rows.map((r) => r.note_id)).not.toContain(chit);
+  });
 });
