@@ -1,9 +1,12 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Stage C3 Task 7: the server's `web` SSE event must render as its own block, visibly separate
- * from note citations (life-domains §6.2) -- never merged into one list. This is the regression
- * that split is meant to catch.
+ * Stage C3 Task 7: the server's `web` SSE event must render as its own block. Originally this
+ * also asserted a "Từ notes của bạn" block rendered separately from it (life-domains §6.2) --
+ * that box was removed on 2026-08-18 (provenance.tsx) because a matched note is usually the
+ * user's own message echoed back one bubble higher. What's left worth pinning: the web block
+ * still renders even when the SSE stream also carries a note citation, i.e. the note citation
+ * must not leak into, or suppress, the web section.
  *
  * Stubbed at the network layer, same pattern as capture.spec.ts's "a failed capture keeps the
  * text" case: matched on the full API origin so the page's other requests (CORS preflight, any
@@ -12,7 +15,7 @@ import { expect, test } from "@playwright/test";
  * made to ground an answer in a test environment (no live Google Search grounding), so this is
  * the only way to exercise the client's handling of the event.
  */
-test("shows web sources in their own block, separate from note citations", async ({ page }) => {
+test("shows web sources in their own block, and no notes block alongside them", async ({ page }) => {
   const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:3001";
 
   await page.route(`${apiUrl}/notes`, (route) =>
@@ -40,8 +43,8 @@ test("shows web sources in their own block, separate from note citations", async
   await page.getByLabel(/what are you thinking/i).fill(text);
   await page.getByRole("button", { name: /send/i }).click();
 
-  await expect(page.getByRole("heading", { name: "Từ notes của bạn" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole("heading", { name: "Từ web" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Từ web" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("heading", { name: "Từ notes của bạn" })).not.toBeVisible();
   // Scoped to the web block and matched exactly: a bare `{ name: "a" }` substring-matches the
   // sidebar's own nav links ("Active", "Archived", ...), which is a false pass, not a real one.
   const webSection = page.locator("section.provenance.web");
