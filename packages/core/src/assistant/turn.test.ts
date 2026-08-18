@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS } from "@cortex/shared";
+import { CLASSIFY_MODEL, formatToday, GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS } from "@cortex/shared";
 import type { GroundingResult } from "../ai/client.js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
@@ -824,5 +824,42 @@ describe("runTurn", () => {
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
     expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
     expect(seen[0]?.grounding).toBeFalsy();
+  });
+
+  // Wiring, asserted on the prompt text: a zone accepted by the DTO and then dropped somewhere
+  // between the controller and the builder is invisible in every other assertion -- the turn
+  // still answers, just from the wrong day.
+  it("formats the turn's dates in the caller's time zone", async () => {
+    const { client } = dbs();
+    const prompts: string[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", complexity: "simple", domain: null,
+                 domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (args) => {
+        prompts.push(args.prompt);
+        return {
+          chunks: (async function* () { yield { text: "ok" }; })(),
+          usage: () => ({ inputTokens: 5, outputTokens: 2, model: "fake-answer" }),
+        };
+      },
+    });
+
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5, timeZone: "Pacific/Auckland" }));
+
+    const today = formatToday(new Date(), "Pacific/Auckland");
+    expect(prompts[0]).toContain(today);
+  });
+
+  // An invalid zone must cost accuracy, never the answer. Intl throws RangeError on an unknown
+  // zone, and this whole value arrives from an HTTP body.
+  it("still answers when the client sends a nonsense time zone", async () => {
+    const { client } = dbs();
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", budgetUsd: 5, timeZone: "Mars/Olympus_Mons" }));
+    expect(events.some((e) => e.type === "done")).toBe(true);
   });
 });

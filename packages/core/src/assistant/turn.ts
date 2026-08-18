@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ANSWER_MODEL, CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, type WebCitation } from "@cortex/shared";
+import {
+  ANSWER_MODEL, CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, resolveTimeZone, type WebCitation,
+} from "@cortex/shared";
 import type { AiClient, GroundingResult } from "../ai/client.js";
 import { isOverBudget, recordUsage } from "../enrich/budget.js";
 import { extractNote } from "../enrich/extract.js";
@@ -51,6 +53,8 @@ export async function* runTurn(
   args: {
     userId: string; noteId: string; sessionId?: string;
     content?: string; createdAt?: string;
+    /** The caller's IANA zone, validated here rather than trusted. See resolveTimeZone. */
+    timeZone?: string;
     budgetUsd: number; signal?: AbortSignal;
   },
 ): AsyncGenerator<AssistantEvent> {
@@ -265,13 +269,17 @@ export async function* runTurn(
       .update({ source_type: isQuestion ? "chat" : "chitchat" })
       .eq("id", args.noteId);
   }
+  // Resolved once per turn, not per prompt: two calls could not disagree today, but the point
+  // of a single resolution is that they cannot start to.
+  const timeZone = resolveTimeZone(args.timeZone);
+  const now = new Date();
   const prompt = isQuestion
-    ? buildAnswerPrompt({ question: text, citations: citationsForPrompt, history })
+    ? buildAnswerPrompt({ question: text, citations: citationsForPrompt, history, timeZone, now })
     : isChitchat
       ? buildChitchatPrompt({ text, history })
       : buildAcknowledgePrompt({
           note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
-          related: citationsForPrompt, history,
+          related: citationsForPrompt, history, timeZone, now,
         });
   // Unchanged, and it is what keeps small talk cheap: only a question reaches ANSWER_MODEL,
   // and only a question grounds (`grounding: isQuestion`, below).
