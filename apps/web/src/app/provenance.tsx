@@ -1,50 +1,29 @@
 "use client";
-import { formatNoteDate, type AnyCitation } from "@cortex/shared";
+import { type AnyCitation } from "@cortex/shared";
 
 /**
- * The notes/web split, for BOTH the turn that is streaming right now and every turn read back
- * out of chat_messages. One component on purpose: stage C4 §3.1 requires a turn to look the
- * same after a reload as it did while it streamed, and two renderers for one concept is how
- * that stops being true without anyone noticing.
+ * The web half of a turn's provenance, for BOTH the turn that is streaming right now and every
+ * turn read back out of chat_messages. One component on purpose: stage C4 §3.1 requires a turn
+ * to look the same after a reload as it did while it streamed.
  *
- * The two blocks are NEVER merged into one list -- life-domains spec §6.2 requires the visible
- * split between what came from the user's own notes and what came from the open internet.
+ * There WAS a "Từ notes của bạn" block here listing every matched note. It was removed on
+ * 2026-08-18: a matched note is usually the user's own chat message echoed back, so the box
+ * repeated what they had just typed, one bubble higher up the same thread.
+ *
+ * What remains is not a design choice and must not be removed for looking sparse. Google's
+ * grounding terms require the returned Search Suggestions entry point to be displayed whenever
+ * grounding was used (life-domains spec §6.2); the source list is the other half of that
+ * obligation. The `citations` prop still carries note entries -- they feed the PROMPT server-side
+ * through renderCitations, which is a separate path from this component and is unaffected.
  */
-/**
- * What to call a cited note. A note captured through the chat box has `title = null` -- which
- * is most of them -- and rendering the placeholder gave five identical "Untitled" rows as
- * provenance (observed 2026-08-16). Same fallback order note-list.tsx:16's `preview()` uses for
- * the sidebar, so a note is named the same way wherever it appears. Truncated because a snippet
- * is up to 240 characters (`left(n.content_text, 240)`, 00026) and this is a list item.
- */
-const label = (c: { title: string | null; snippet: string; createdAt: string | null }) => {
-  const text = c.title?.trim() || c.snippet.split("\n")[0]?.trim() || "";
-  const body = text === "" ? "Untitled" : text.length > 80 ? `${text.slice(0, 80)}…` : text;
-  // The same zone the prompt was rendered in, from the same function -- a UI that dated a note
-  // one day off from the answer above it would be worse than showing nothing.
-  const on = c.createdAt
-    ? formatNoteDate(c.createdAt, Intl.DateTimeFormat().resolvedOptions().timeZone)
-    : null;
-  return on ? `${on} · ${body}` : body;
-};
 
 export function Provenance(
   { citations, entryPoint }: { citations: AnyCitation[]; entryPoint?: string },
 ) {
-  const notes = citations.filter((c) => c.type === "note");
   const web = citations.filter((c) => c.type === "web");
 
   return (
     <>
-      {notes.length > 0 && (
-        <section className="provenance">
-          <h3>Từ notes của bạn</h3>
-          <ul className="citations">
-            {notes.map((c) => <li key={c.noteId}>{label(c)}</li>)}
-          </ul>
-        </section>
-      )}
-
       {web.length > 0 && (
         <section className="provenance web">
           <h3>Từ web</h3>

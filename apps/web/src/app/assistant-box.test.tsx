@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantBox, type TranscriptTurn } from "./assistant-box";
+import { Provenance } from "./provenance";
 
 const sse = (events: [string, unknown][]) =>
   new Response(
@@ -224,21 +225,6 @@ describe("the transcript", () => {
     ]} />);
     expect(screen.getByText("hôm nay tôi chạy bộ")).toBeInTheDocument();
     expect(screen.getByText("Đã lưu vào health.")).toBeInTheDocument();
-  });
-
-  // A reloaded turn must look like the turn did while it streamed -- same component, same
-  // split. Rendering a persisted turn's citations differently is how "did it remember?"
-  // becomes a question the user has to ask.
-  it("renders a past turn's note and web provenance in the same split blocks", () => {
-    render(<AssistantBox token="t" initialTurns={[turn({
-      citations: [
-        { type: "note", noteId: "n1", title: "Dune", createdAt: null, snippet: "s", score: 1, matchedBy: "fts" },
-        { type: "web", url: "https://a.example", title: "a" },
-      ],
-    })]} />);
-    expect(screen.getByRole("heading", { name: "Từ notes của bạn" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Từ web" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "a" })).toHaveAttribute("href", "https://a.example");
   });
 
   // THE ONE THAT IS INVISIBLE OTHERWISE. retrieval_meta.incomplete marks an answer the stream
@@ -475,5 +461,45 @@ describe("the loading phases", () => {
   it("shows no indicator when nothing is in flight", () => {
     render(<AssistantBox token="t" initialTurns={[]} />);
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+describe("provenance", () => {
+  const noteCitation = {
+    type: "note" as const, noteId: "n1", title: null, createdAt: "2026-08-18T02:00:00.000Z",
+    snippet: "dạo này hơi mỏi mắt", score: 0.9, matchedBy: "fts",
+  };
+  const webCitation = { type: "web" as const, url: "https://e.com/a", title: "Eye health" };
+
+  // The box being removed. Asserted on the HEADING, not on the snippet text: the snippet is
+  // the user's own message, which also appears in their own bubble in the transcript, so a
+  // snippet-based assertion would stay red for the wrong reason.
+  it("does not render a notes section", () => {
+    render(<Provenance citations={[noteCitation]} />);
+    expect(screen.queryByText(/Từ notes của bạn/i)).toBeNull();
+  });
+
+  // THE ONE THAT MATTERS MORE THAN THE REMOVAL. The web block is a Google terms-of-service
+  // obligation, not a design choice, and it is rendered by the same component from the same
+  // array -- so the natural way to break it is to delete one filter too many.
+  it("still renders the web section", () => {
+    render(<Provenance citations={[noteCitation, webCitation]} />);
+    expect(screen.getByText("Từ web")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Eye health" })).toHaveAttribute("href", webCitation.url);
+  });
+
+  // Same obligation, the other half: the entry-point widget must survive on a grounded turn.
+  it("still renders the grounding entry point", () => {
+    const { container } = render(
+      <Provenance citations={[webCitation]} entryPoint='<div id="gse">chips</div>' />,
+    );
+    expect(container.querySelector("#gse")).not.toBeNull();
+  });
+
+  // A turn whose only citations are notes must now render NOTHING at all -- not an empty
+  // <section> with a heading and no list, which is what a half-deletion leaves behind.
+  it("renders nothing when the only citations are notes", () => {
+    const { container } = render(<Provenance citations={[noteCitation]} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });
