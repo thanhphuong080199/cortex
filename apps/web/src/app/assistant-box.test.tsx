@@ -245,6 +245,58 @@ describe("AssistantBox", () => {
     expect(screen.queryByRole("button", { name: "Lưu" })).toBeNull();
   });
 
+  // "Costs nothing" is a claim about LATENCY as much as about writes. The offer must be gone
+  // before the request settles, so a slow or dead /assistant/decline is invisible to the user.
+  // A `fetch` awaited ahead of setOffer(null) passes every other test in this file and fails
+  // only this one -- which is the whole reason it is written.
+  it("clears the offer without waiting for the decline to land", async () => {
+    let resolveDecline!: (res: Response) => void;
+    const declinePromise = new Promise<Response>((resolve) => { resolveDecline = resolve; });
+    globalThis.fetch = (async (url: string) => {
+      if (String(url).endsWith("/notes")) return new Response(JSON.stringify({ id: "n1" }), { status: 201 });
+      if (String(url).endsWith("/assistant/decline")) return declinePromise;
+      return sse([
+        ["token", { text: "Cá hồi giàu omega-3." }],
+        ["offer", { statement: "Cá hồi giàu omega-3." }],
+        ["done", { messageId: "m1", sessionId: "s1" }],
+      ]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Bỏ qua" }));
+
+    // The request is still in flight -- resolveDecline has not been called.
+    expect(screen.queryByRole("group", { name: "Lưu vào notes?" })).toBeNull();
+    resolveDecline(new Response(null, { status: 204 }));
+  });
+
+  // The other half of "costs nothing": no note, from the client's side. The accept path posts to
+  // /notes/save-answer, and the natural way to break this is one shared handler with a flag.
+  it("posts no save when the offer is declined", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url));
+      if (String(url).endsWith("/notes")) return new Response(JSON.stringify({ id: "n1" }), { status: 201 });
+      if (String(url).endsWith("/assistant/decline")) return new Response(null, { status: 204 });
+      return sse([
+        ["token", { text: "ok" }],
+        ["offer", { statement: "Cá hồi giàu omega-3." }],
+        ["done", { messageId: "m1", sessionId: "s1" }],
+      ]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Bỏ qua" }));
+
+    expect(calls.some((u) => u.endsWith("/notes/save-answer"))).toBe(false);
+  });
+
   // §11's "easy to ignore" is only true if it is genuinely optional. A turn with no offer must
   // render no row at all -- not an empty one waiting to be filled.
   it("renders nothing when no offer arrives", async () => {

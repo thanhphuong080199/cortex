@@ -43,9 +43,13 @@ export const noteSourceType = z.enum([
 export const paraCategory = z.enum(["project", "area", "resource", "archive"]);
 export const suggestionStatus = z.enum(["suggested", "accepted", "rejected"]);
 export const taskStatus = z.enum(["suggested", "todo", "doing", "done", "dropped"]);
+// 'assistant_offer' -- NOT a fact about the person. A statement the assistant offered to save
+//                      and the user declined, kept only so the same offer is not made twice
+//                      (stage C5 §12). Excluded from the nightly memory update by category;
+//                      see 00033's header for why this is a category and not a jsonb marker.
 export const memoryCategory = z.enum([
   "identity", "preference", "interest", "project",
-  "habit", "opinion", "skill", "relationship",
+  "habit", "opinion", "skill", "relationship", "assistant_offer",
 ]);
 export const memoryStatus = z.enum(["proposed", "active", "archived", "rejected"]);
 

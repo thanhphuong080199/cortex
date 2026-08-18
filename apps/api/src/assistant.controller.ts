@@ -1,8 +1,8 @@
 import { Body, Controller, HttpCode, Inject, Post, Req, Res, UseGuards } from "@nestjs/common";
 import type { Request, Response } from "express";
 import type { AiClient } from "@cortex/core";
-import { createServiceClient, createUserClient, errorMessage, runTurn } from "@cortex/core";
-import { assistantInput, type AssistantInput } from "@cortex/shared";
+import { createServiceClient, createUserClient, declineOffer, errorMessage, runTurn } from "@cortex/core";
+import { assistantInput, declineOfferInput, type AssistantInput, type DeclineOfferInput } from "@cortex/shared";
 import { AI_CLIENT } from "./ai-client.provider";
 import { CurrentUser } from "./auth/current-user.decorator";
 import type { AuthedUser } from "./auth/supabase-auth.guard";
@@ -97,5 +97,24 @@ export class AssistantController {
     } finally {
       if (!res.writableEnded) res.end();
     }
+  }
+
+  // @HttpCode, like the streaming handler above it: Nest's RouterExecutionContext sets 201 on a
+  // POST before the handler runs. A decline creates nothing the caller can address, so 204 is
+  // the honest status -- and the web client keys on it.
+  @Post("decline")
+  @HttpCode(204)
+  async decline(
+    @CurrentUser() user: AuthedUser,
+    @Body(new ZodValidationPipe(declineOfferInput)) body: DeclineOfferInput,
+  ): Promise<void> {
+    // The offer's own statement was never embedded server-side (turn.ts builds it from the
+    // model's answer text, not from a retrieval call) -- embed it here, the same call retrieve()
+    // makes for a query, so the stored row has the vector Task 14's dedup compares against.
+    const { vectors } = await this.ai.embed([body.statement]);
+    const embedding = vectors[0];
+    if (!embedding) throw new Error("assistant: embed() returned no vector for the decline");
+
+    await declineOffer(this.serviceDb, { userId: user.id, statement: body.statement, embedding });
   }
 }

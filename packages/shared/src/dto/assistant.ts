@@ -54,6 +54,21 @@ export const saveAnswerInput = z
 
 export type SaveAnswerInput = z.infer<typeof saveAnswerInput>;
 
+/**
+ * `POST /assistant/decline`'s body (C5 §12, task 13). `.strict()` for the same reason
+ * saveAnswerInput above is: the user id comes from the verified JWT, never from the body.
+ *
+ * No `sourceUrl` here, unlike saveAnswerInput -- declining records that the STATEMENT should not
+ * be offered again; it never writes a note, so there is no source to attribute.
+ */
+export const declineOfferInput = z
+  .object({
+    statement: z.string().min(1).max(100_000),
+  })
+  .strict();
+
+export type DeclineOfferInput = z.infer<typeof declineOfferInput>;
+
 /** The `offer` SSE event's payload (C5 §11). `sourceUrl` is absent for general knowledge. */
 export interface Offer {
   statement: string;

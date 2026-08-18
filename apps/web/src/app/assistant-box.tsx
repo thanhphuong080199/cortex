@@ -328,11 +328,20 @@ export function AssistantBox(
     }
   }
 
-  // Task 13 writes the real decline record (a signal not to offer the same fact again). For
-  // now the button must not be dead while that lands, so it does the one thing already true
-  // either way: the offer goes away.
-  function declineOffer(_o: Offer) {
+  // §11: "declining costs nothing" -- a claim about LATENCY as much as about writes. setOffer(null)
+  // runs FIRST, synchronously, and the fetch below is deliberately NOT awaited ahead of it: the
+  // offer must be gone the instant the button is clicked, whether the network is slow, offline, or
+  // the request fails outright. If the write never lands, the worst case is the same fact gets
+  // offered again later -- fine, per §11 -- which is why the catch below does nothing at all.
+  function declineOffer(o: Offer) {
     setOffer(null);
+    void fetch(`${process.env.NEXT_PUBLIC_API_URL}/assistant/decline`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ statement: o.statement }),
+    }).catch(() => {
+      // Best-effort, same as acceptOffer: the offer is already off the screen.
+    });
   }
 
   if (!online) {
