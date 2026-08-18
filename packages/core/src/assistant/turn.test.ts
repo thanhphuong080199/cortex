@@ -980,3 +980,75 @@ describe("runTurn", () => {
     expect(events.some((e) => e.type === "done")).toBe(true);
   });
 });
+
+// One recorder for the whole describe: each of these cases cares about the same three
+// outputs -- which prompt ran, on which model, with grounding on or off.
+const recordTurn = async (extraction: Record<string, unknown>) => {
+  const { client, updated } = dbs();
+  const seen: { prompt?: string; model?: string; grounding?: boolean }[] = [];
+  const ai = createFakeAi({
+    generateJson: async () => ({
+      value: { intent: "statement", complexity: "simple", domain: null,
+               domain_meta: {}, tags: [], mood: null, ...extraction },
+      inputTokens: 10, outputTokens: 5, model: "fake-classify",
+    }),
+    generateStream: async (a) => {
+      seen.push(a);
+      return {
+        chunks: (async function* () { yield { text: "ok" }; })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: "fake" }),
+      };
+    },
+  });
+  await collect(runTurn({ userDb: client, serviceDb: client, ai },
+    { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+  return { seen, updated };
+};
+
+describe("the routing chain", () => {
+  it("sends a flagged statement to the reasoning model", async () => {
+    const { seen } = await recordTurn({ checkable_claim: true });
+    expect(seen[0]?.model).toBe(ANSWER_MODEL);
+  });
+
+  // THE CEILING. Without this the flag is indistinguishable from "route every statement to
+  // the expensive model", which is the one outcome §9.2 was written to prevent.
+  it("leaves an unflagged statement on the cheap model", async () => {
+    const { seen } = await recordTurn({ checkable_claim: false });
+    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+  });
+
+  // A flagged statement is still a FILING. It keeps the acknowledge prompt -- it just runs it
+  // on a model capable of the judgment -- so the "You filed it under" line must survive.
+  it("keeps a flagged statement on the acknowledge prompt", async () => {
+    const { seen } = await recordTurn({ checkable_claim: true });
+    expect(seen[0]?.prompt).toMatch(/You filed it under/i);
+  });
+
+  // THE COLLISION, decided in design doc §1.1. Both flags fire on "Omega-3 chữa được cận thị,
+  // có đúng không?" -- a recordable statement, a question, and a doubtful claim in one
+  // sentence. The user asked, so the user gets an answer; being corrected INSTEAD of answered
+  // is the same silent drop Part A exists to fix, reached through a different branch. Two
+  // independent `if`s is how this would have gone unnoticed, which is why the chain is ordered.
+  it("answers rather than corrects when the turn asks a question too", async () => {
+    const { seen, updated } = await recordTurn({ alsoWantsAnswer: true, checkable_claim: true });
+    expect(seen[0]?.prompt).not.toMatch(/You filed it under/i);
+    expect(seen[0]?.grounding).toBe(true);
+    expect(updated.notes ?? []).toContainEqual(expect.objectContaining({ source_type: "chat" }));
+  });
+
+  // A flagged statement grounds, so the check has a second source rather than only the model's
+  // own memory (C5 §9.3's last paragraph). Separate from the model assertion: they are set on
+  // two different lines and a partial edit moves one without the other.
+  it("grounds a flagged statement", async () => {
+    const { seen } = await recordTurn({ checkable_claim: true });
+    expect(seen[0]?.grounding).toBe(true);
+  });
+
+  // Chitchat is checked before the claim flag and is never promoted by it.
+  it("never promotes chitchat", async () => {
+    const { seen } = await recordTurn({ intent: "chitchat", checkable_claim: true });
+    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+    expect(seen[0]?.grounding).toBeFalsy();
+  });
+});

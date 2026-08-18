@@ -21,6 +21,7 @@ export type Intent = (typeof INTENTS)[number];
 interface Extraction {
   intent?: Intent;
   alsoWantsAnswer?: unknown;
+  checkable_claim?: unknown;
   complexity?: "simple" | "complex";
   domain: string | null;
   domain_meta: Record<string, unknown>;
@@ -38,6 +39,10 @@ const RESPONSE_SCHEMA = {
     // to record and a question. Not a fourth intent -- `intent` still drives tagging, domain,
     // filing tone and chitchat exclusion, and all three are correct at "statement" here.
     alsoWantsAnswer: { type: "boolean" },
+    // Stage C5 §9.2. A couple of output tokens on a call that is already happening, and unlike
+    // `complexity` this one is acted on: a flagged statement is the only statement that reaches
+    // ANSWER_MODEL. Not in `required`, for the reason the defaults below document.
+    checkable_claim: { type: "boolean" },
     // RECORDED, NOT ACTED ON. It costs a couple of output tokens and produces the dataset a
     // future model-routing decision needs: complexity x real cost x model. Nothing reads it.
     complexity: { type: "string", enum: ["simple", "complex"] },
@@ -138,6 +143,12 @@ export function buildPrompt(
     "  so) and for a statement with nothing being asked.",
     "  Every one of the three is still SAVED as a note. You are labelling the turn, not",
     "  deciding whether it is worth keeping.",
+    "- checkable_claim is TRUE only when the note asserts something factual about the world",
+    "  that you have real reason to DOUBT — \"omega-3 chữa được cận thị\", \"uống nước đá gây",
+    "  ung thư\". Not for anything merely factual, and never for something about their own",
+    "  life, their plans, or how they feel: those are theirs to state and not yours to check.",
+    "  Leave it false when you are unsure. A false flag costs them a correction they did not",
+    "  need on something that was right.",
     "",
     "Write tags in the SAME LANGUAGE the note is written in. Do not translate: a note in",
     "Vietnamese gets Vietnamese tags. Tag vocabularies that mix languages split one idea across two",
@@ -173,6 +184,7 @@ export async function extractNote(
   mood: number | null;
   intent: Intent;
   alsoWantsAnswer: boolean;
+  checkableClaim: boolean;
   complexity: "simple" | "complex";
 }> {
   const { db, ai } = deps;
@@ -348,6 +360,10 @@ export async function extractNote(
     // keeps this turn on CLASSIFY_MODEL and off Google Search, so it is where an unreadable
     // value must land. See extract.test.ts's two default cases.
     alsoWantsAnswer: value.alsoWantsAnswer === true,
+    // Defaulted like every other flag: `false` is the branch that never spends ANSWER_MODEL.
+    // See extract.test.ts -- `as boolean` compiles and lets the string "false" through, which
+    // is truthy and would promote the turn it was meant to keep cheap.
+    checkableClaim: value.checkable_claim === true,
     complexity: value.complexity === "complex" ? "complex" : "simple",
   };
 }

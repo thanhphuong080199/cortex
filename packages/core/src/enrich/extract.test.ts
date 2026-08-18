@@ -530,7 +530,10 @@ describe("extractNote — intent, complexity and language", () => {
     expect(schemas).toHaveLength(1);
     const props = (schemas[0]!.properties ?? {}) as Record<string, unknown>;
     expect(Object.keys(props).sort())
-      .toEqual(["alsoWantsAnswer", "complexity", "domain", "domain_meta", "intent", "mood", "tags"]);
+      .toEqual([
+        "alsoWantsAnswer", "checkable_claim", "complexity", "domain", "domain_meta", "intent",
+        "mood", "tags",
+      ]);
   });
 
   // Cortex's users write Vietnamese. A prompt that says nothing about language gets tags back
@@ -688,5 +691,32 @@ describe("alsoWantsAnswer", () => {
       expect(out.intent).toBe("question");
       expect(out.alsoWantsAnswer).toBe(false);
     });
+  });
+});
+
+describe("checkableClaim", () => {
+  it("defines the flag in the classification prompt", () => {
+    const prompt = buildPrompt("bất kỳ", []);
+    expect(prompt).toContain("checkable_claim");
+    // A flag with no threshold gets set on everything, and every flagged statement costs the
+    // reasoning model. The prompt has to say "doubtful", not merely "factual".
+    expect(prompt).toMatch(/doubt|sai|nghi ngờ/i);
+  });
+
+  it("passes a flagged statement through", async () => {
+    expect((await runExtract({ intent: "statement", checkable_claim: true })).checkableClaim)
+      .toBe(true);
+  });
+
+  // THE COST CEILING, defaulted the same way and for the same reason as intent and
+  // alsoWantsAnswer: false is the branch that never spends ANSWER_MODEL. One schema miss must
+  // not silently promote every capture in the corpus onto the reasoning model.
+  it("defaults a missing checkable_claim to false", async () => {
+    expect((await runExtract({ intent: "statement" })).checkableClaim).toBe(false);
+  });
+
+  it("defaults a non-boolean checkable_claim to false", async () => {
+    expect((await runExtract({ intent: "statement", checkable_claim: "true" })).checkableClaim)
+      .toBe(false);
   });
 });

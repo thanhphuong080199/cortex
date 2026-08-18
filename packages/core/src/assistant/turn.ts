@@ -276,6 +276,12 @@ export async function* runTurn(
   const wantsAnswer = extracted?.intent === "question"
     || (extracted?.intent === "statement" && extracted?.alsoWantsAnswer === true);
   const isChitchat = extracted?.intent === "chitchat";
+  // THE THIRD LINK, and its position in the chain is the decision (design doc §1.1). Read only
+  // when `wantsAnswer` is already false: a turn that asks a question gets ANSWERED, and the
+  // correction rides inside that answer rather than replacing it. Written as `!wantsAnswer &&`
+  // rather than as a separate `if` further down, because two booleans that can both be true and
+  // are read in different places is exactly how this collision was created.
+  const verifies = !wantsAnswer && !isChitchat && extracted?.checkableClaim === true;
 
   // A note that already exists, restamped after classification -- the shape 'chat' has used
   // since C1. An ordinary statement is the default branch and writes nothing: every plain
@@ -300,20 +306,25 @@ export async function* runTurn(
           note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
           related: citationsForPrompt, history, timeZone, now,
         });
-  // Only a turn that wants an answer reaches ANSWER_MODEL, and only it grounds. That ceiling
-  // is what keeps the flag cheap: an ordinary capture is untouched by this task.
-  const model = wantsAnswer ? ANSWER_MODEL : CLASSIFY_MODEL;
+  // Two ways onto the reasoning model and no third. `verifies` is capped by the classifier's
+  // own threshold ("only when you have real reason to doubt"), so an ordinary capture is
+  // untouched -- see turn.test.ts's cheap-model assertion.
+  const model = wantsAnswer || verifies ? ANSWER_MODEL : CLASSIFY_MODEL;
 
   let answer = "";
   let incomplete = false;
   let streamUsage: { inputTokens: number; outputTokens: number; model: string } | null = null;
   let grounding: GroundingResult | null = null;
-  mark(`model stream requested (${model}, grounding=${wantsAnswer})`);
+  // A verification checks against a second source rather than the model's own memory alone
+  // (C5 §9.3). Where grounding is unavailable it degrades to that memory, which the prompt
+  // does not need to know about.
+  const grounds = wantsAnswer || verifies;
+  mark(`model stream requested (${model}, grounding=${grounds})`);
   try {
     const stream = await ai.generateStream({
       prompt, model, signal: args.signal,
       // The whole enablement decision. Never unconditional: see the acknowledge-path test.
-      grounding: wantsAnswer,
+      grounding: grounds,
     });
     mark("model stream opened");
     try {
