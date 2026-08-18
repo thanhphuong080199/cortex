@@ -26,7 +26,16 @@ export interface NoteFilters {
   q?: string;
   tag?: string;
   domain?: string;
+  /**
+   * Life-domains §6.3's third bullet: show only notes that came from an ANSWER rather than
+   * from the user. Both source types together, never one -- the difference between them is
+   * whether grounding ran, which is not a distinction the user made or should have to.
+   */
+  saved?: boolean;
 }
+
+/** The two source types buildSavedAnswerRow writes. search_notes down-weights both by 0.8. */
+export const SAVED_ANSWER_SOURCE_TYPES = ["assistant", "web_search"] as const;
 
 const one = (v: string | string[] | undefined): string | undefined =>
   Array.isArray(v) ? v[0] : v;
@@ -56,6 +65,10 @@ export function parseNoteFilters(
     ? rawDomain
     : undefined;
 
+  // Strictly "1", matching how every other field here drops anything unrecognised rather than
+  // coercing it. `Boolean(params.saved)` would make ?saved=0 mean true.
+  const saved = one(params.saved) === "1" ? true : undefined;
+
   // Spread-if rather than assigning undefined: these round-trip through a URLSearchParams
   // in the web nav helpers, where a present-but-undefined key becomes an empty `?q=`.
   return {
@@ -63,6 +76,7 @@ export function parseNoteFilters(
     ...(q ? { q } : {}),
     ...(tag ? { tag } : {}),
     ...(domain ? { domain } : {}),
+    ...(saved ? { saved } : {}),
   };
 }
 
@@ -95,6 +109,9 @@ export function applyNoteFilters<T>(query: T, f: NoteFilters): T {
   // talk, not a note. `neq` and not a null-tolerant form because notes.source_type is
   // `not null default 'quick'` (00002) -- there is no null here to lose a row to.
   q = q.neq("source_type", "chitchat");
+  // Independent of the chitchat exclusion above, and applied after it: both narrowings hold at
+  // once. An if/else here would let the chip show banter.
+  if (f.saved) q = q.in("source_type", [...SAVED_ANSWER_SOURCE_TYPES]);
   q = f.view === "trash" ? q.not("deleted_at", "is", null) : q.is("deleted_at", null);
   // One view over two lifecycle states: `active` and `evergreen` are both live working
   // notes. Trash spans every lifecycle, so it narrows on deleted_at alone.
@@ -142,6 +159,11 @@ export function matchesFilters(
 ): boolean {
   // First, and above the trash branch: banter in the trash is still not a note anyone browses.
   if (note.source_type === "chitchat") return false;
+  // Independent of the chitchat exclusion above, and checked after it: both narrowings hold at
+  // once. An if/else here would let the chip show banter.
+  if (f.saved && !(SAVED_ANSWER_SOURCE_TYPES as readonly string[]).includes(note.source_type)) {
+    return false;
+  }
   if (f.domain && note.domain !== f.domain) return false;
   if (f.view === "trash") return note.deleted_at !== null;
   if (note.deleted_at !== null) return false;
@@ -232,6 +254,11 @@ export function noteFiltersToSql(f: NoteFilters): {
   // by a distance. (capture.ts and media-log.ts both write 'quick' today, so this is a guard
   // against a future write path, not a bug being papered over.)
   clauses.push(`(n.source_type is null or n.source_type != ${p("chitchat")})`);
+  // Independent of the chitchat exclusion above, and appended after it: both narrowings hold
+  // at once. An if/else here would let the chip show banter.
+  if (f.saved) {
+    clauses.push(`n.source_type in (${SAVED_ANSWER_SOURCE_TYPES.map((t) => p(t)).join(", ")})`);
+  }
   clauses.push(f.view === "trash" ? "n.deleted_at is not null" : "n.deleted_at is null");
   if (f.view === "active") clauses.push(`n.lifecycle in (${p("active")}, ${p("evergreen")})`);
   else if (f.view !== "trash") clauses.push(`n.lifecycle = ${p(f.view)}`);

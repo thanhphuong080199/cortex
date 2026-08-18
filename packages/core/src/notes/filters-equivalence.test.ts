@@ -67,6 +67,14 @@ beforeAll(async () => {
   await client.from("notes").update({ source_type: "chitchat" }).eq("id", chit.id);
   ids.chitchat = chit.id;
 
+  // Task 15: what buildSavedAnswerRow (Task 11) writes. Seeded as a real row, not just
+  // asserted in isolation, so the `saved` clause is exercised on both the query side and the
+  // SQL side by the same three-way check (SQLite == expected == PostgREST) as every other
+  // filter here.
+  const savedAnswer = await svc.create({ content: "an answer worth keeping" });
+  await client.from("notes").update({ source_type: "web_search" }).eq("id", savedAnswer.id);
+  ids.savedAnswer = savedAnswer.id;
+
   tagId = (await tags.findOrCreate({ name: "equiv-fixture" })).id;
   await tags.attach(ids.media, tagId);
 
@@ -105,7 +113,7 @@ beforeAll(async () => {
   }
   // A mirror that silently copied nothing would make every equivalence assertion agree on
   // two empty sets. Fail here instead, where the cause is obvious.
-  expect(sqlite.prepare("SELECT count(*) c FROM notes").get()).toEqual({ c: 8 });
+  expect(sqlite.prepare("SELECT count(*) c FROM notes").get()).toEqual({ c: 9 });
   expect(sqlite.prepare("SELECT count(*) c FROM note_tags").get()).toEqual({ c: 1 });
 });
 
@@ -132,12 +140,16 @@ describe("filter equivalence: PostgREST vs SQLite", () => {
   // engines with different tokenizers, and asserting they rank identically would be a test
   // that lies (spec §3.3). Each engine's `q` handling is asserted separately below.
   const structural: [string, NoteFilters, string[]][] = [
-    ["inbox", { view: "inbox" }, ["inbox", "media"]],
+    ["inbox", { view: "inbox" }, ["inbox", "media", "savedAnswer"]],
     ["active covers evergreen too", { view: "active" }, ["active", "evergreen"]],
     ["archived", { view: "archived" }, ["archived"]],
     ["trash", { view: "trash" }, ["trashed", "trashedMedia"]],
     ["inbox + domain", { view: "inbox", domain: "media" }, ["media"]],
     ["trash + domain", { view: "trash", domain: "media" }, ["trashedMedia"]],
+    // Task 15: the fourth applier this suite guards. savedAnswer is source_type
+    // 'web_search' -- one of the two SAVED_ANSWER_SOURCE_TYPES -- while inbox and media
+    // are both 'quick', so the filter must narrow past them, not just past chitchat.
+    ["inbox + saved", { view: "inbox", saved: true }, ["savedAnswer"]],
   ];
 
   for (const [name, f, expected] of structural) {
@@ -167,10 +179,20 @@ describe("filter equivalence: PostgREST vs SQLite", () => {
 
   it("excludes a chitchat note from the inbox on both engines", async () => {
     const filters: NoteFilters = { view: "inbox" };
-    expect(sqlIds(filters)).toEqual(set("inbox", "media"));
-    expect(await postgrestIds(filters)).toEqual(set("inbox", "media"));
+    expect(sqlIds(filters)).toEqual(set("inbox", "media", "savedAnswer"));
+    expect(await postgrestIds(filters)).toEqual(set("inbox", "media", "savedAnswer"));
     expect(sqlIds(filters)).not.toContain(ids.chitchat);
     expect(await postgrestIds(filters)).not.toContain(ids.chitchat);
+  });
+
+  it("still excludes chitchat from the inbox when the saved filter is also on", async () => {
+    // The natural bug: an if/else that lets `saved` replace the chitchat narrowing instead
+    // of applying on top of it. chitchat's source_type is neither 'assistant' nor
+    // 'web_search', so it is already excluded by `saved` alone -- this only proves the
+    // combination holds, not that either clause alone would have caught the regression.
+    const filters: NoteFilters = { view: "inbox", saved: true };
+    expect(sqlIds(filters)).toEqual(set("savedAnswer"));
+    expect(await postgrestIds(filters)).toEqual(set("savedAnswer"));
   });
 });
 

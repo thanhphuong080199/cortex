@@ -22,15 +22,32 @@ export function NoteList({ initialNotes, filters, userId, token }: {
 }) {
   const [notes, setNotes] = useState<NoteRow[]>(initialNotes);
   const [busy, setBusy] = useState<string | null>(null);
-  const { view, q, tag, domain } = filters;
+  const { view, q, tag, domain, saved } = filters;
 
   // `filters` is an object prop, so both `refetch` and the Realtime subscription below were
   // keyed on an identity the parent recreates on every render. NoteFilters is exactly these
-  // four fields (packages/shared/src/notes/filters.ts:24-29), so a useMemo over them is the
+  // five fields (packages/shared/src/notes/filters.ts), so a useMemo over them is the
   // same value with a stable identity, and using it everywhere -- not just in refetch's own
   // dependency array -- is what keeps the subscription from being torn down and rebuilt for a
   // value that did not change.
-  const stableFilters = useMemo(() => ({ view, q, tag, domain }), [view, q, tag, domain]);
+  const stableFilters = useMemo(
+    () => ({ view, q, tag, domain, saved }),
+    [view, q, tag, domain, saved],
+  );
+
+  // Toggles the chip's own filter, following the same clears-itself idiom as page.tsx's
+  // domainHref: clicking the chip while it is on turns the filter back off. `saved` narrows
+  // on top of every other filter (matchesFilters and applyNoteFilters both apply it
+  // independently of the chitchat exclusion), so the other params round-trip unchanged.
+  const savedHref = useMemo(() => {
+    const sp = new URLSearchParams();
+    sp.set("view", view);
+    if (q) sp.set("q", q);
+    if (tag) sp.set("tag", tag);
+    if (domain) sp.set("domain", domain);
+    if (!saved) sp.set("saved", "1");
+    return `/?${sp.toString()}`;
+  }, [view, q, tag, domain, saved]);
 
   useEffect(() => { setNotes(initialNotes); }, [initialNotes]);
 
@@ -72,7 +89,7 @@ export function NoteList({ initialNotes, filters, userId, token }: {
     // already here and needs no await.
     supabase.realtime.setAuth(token);
     const channel = supabase
-      .channel(`notes-list-${view}-${domain ?? "all"}-${tag ?? ""}-${q ?? ""}`)
+      .channel(`notes-list-${view}-${domain ?? "all"}-${tag ?? ""}-${q ?? ""}-${saved ? "1" : "0"}`)
       .on("postgres_changes",
         { event: "*", schema: "public", table: "notes", filter: `user_id=eq.${userId}` },
         (payload) => {
@@ -95,7 +112,7 @@ export function NoteList({ initialNotes, filters, userId, token }: {
         })
       .subscribe((status) => { if (status === "SUBSCRIBED") void refetch(); });
     return () => { void supabase.removeChannel(channel); };
-  }, [userId, view, domain, q, tag, stableFilters, refetch, token]);
+  }, [userId, view, domain, q, tag, saved, stableFilters, refetch, token]);
 
   async function act(id: string, fn: () => Promise<unknown>) {
     setBusy(id);
@@ -111,41 +128,59 @@ export function NoteList({ initialNotes, filters, userId, token }: {
     }
   }
 
+  // Reuses the "domains" chip styling (globals.css) rather than a new class: same shape, one
+  // toggleable Link, "on" when active -- the same idiom page.tsx's domainHref already uses.
+  const savedChip = (
+    <nav className="domains" aria-label="Filter by source">
+      <Link href={savedHref} className={saved ? "on" : ""} aria-current={saved ? "true" : undefined}>
+        Từ trợ lý
+      </Link>
+    </nav>
+  );
+
   if (notes.length === 0) {
-    return <p className="empty">{view === "trash" ? "Trash is empty." : "Nothing here yet."}</p>;
+    return (
+      <>
+        {savedChip}
+        <p className="empty">{view === "trash" ? "Trash is empty." : "Nothing here yet."}</p>
+      </>
+    );
   }
 
   return (
-    <ul className="notes">
-      {notes.map((n) => (
-        <li key={n.id}>
-          {view === "trash"
-            ? <span className="title">{preview(n)}</span>
-            : <Link className="title" href={`/notes/${n.id}`}>{preview(n)}</Link>}
-          <div className="meta">
-            <time dateTime={n.updated_at}>{new Date(n.updated_at).toLocaleString()}</time>
-            <span>{n.lifecycle}</span>
-          </div>
-          {view === "trash" && (
-            <div className="row-actions">
-              <button disabled={busy === n.id} onClick={() => void act(n.id, () => api.restoreNote(token, n.id))}>
-                Restore
-              </button>
-              <button
-                className="danger"
-                disabled={busy === n.id}
-                onClick={() => {
-                  if (confirm("Permanently delete this note? This cannot be undone.")) {
-                    void act(n.id, () => api.purgeNote(token, n.id));
-                  }
-                }}
-              >
-                Delete forever
-              </button>
+    <>
+      {savedChip}
+      <ul className="notes">
+        {notes.map((n) => (
+          <li key={n.id}>
+            {view === "trash"
+              ? <span className="title">{preview(n)}</span>
+              : <Link className="title" href={`/notes/${n.id}`}>{preview(n)}</Link>}
+            <div className="meta">
+              <time dateTime={n.updated_at}>{new Date(n.updated_at).toLocaleString()}</time>
+              <span>{n.lifecycle}</span>
             </div>
-          )}
-        </li>
-      ))}
-    </ul>
+            {view === "trash" && (
+              <div className="row-actions">
+                <button disabled={busy === n.id} onClick={() => void act(n.id, () => api.restoreNote(token, n.id))}>
+                  Restore
+                </button>
+                <button
+                  className="danger"
+                  disabled={busy === n.id}
+                  onClick={() => {
+                    if (confirm("Permanently delete this note? This cannot be undone.")) {
+                      void act(n.id, () => api.purgeNote(token, n.id));
+                    }
+                  }}
+                >
+                  Delete forever
+                </button>
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
