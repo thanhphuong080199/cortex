@@ -10,10 +10,10 @@ export interface SaveAnswerArgs {
 }
 
 /**
- * THE row for a saved answer, built in one place because it is reached two ways: the user taps
- * the saved-external chip's save action (life-domains §6.3), or they accept an offer the model
- * made (C5 §11). C5 §13 requires the two to be indistinguishable afterwards -- and the only way
- * to get that by construction rather than by discipline is for there to be one builder.
+ * THE row for a saved answer, built in one place because it is reached today by the offer's
+ * accept action (C5 §11). The second path -- the user-initiated save trigger §6.3 describes --
+ * is not built yet by this plan; when it lands it must come through this same function, which is
+ * what makes the two indistinguishable BY CONSTRUCTION rather than by discipline, per C5 §13.
  *
  * The source type is the load-bearing field. search_notes down-weights 'web_search' and
  * 'assistant' by 0.8 (00022:92, 00024:127), which is how §6.3 handles corpus pollution: by

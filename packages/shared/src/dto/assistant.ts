@@ -60,10 +60,18 @@ export type SaveAnswerInput = z.infer<typeof saveAnswerInput>;
  *
  * No `sourceUrl` here, unlike saveAnswerInput -- declining records that the STATEMENT should not
  * be offered again; it never writes a note, so there is no source to attribute.
+ *
+ * The cap is 400, NOT saveAnswerInput's 100_000: a decline's statement can only ever have come
+ * from an offer this same server generated (the "no thanks" on the box the offer put on screen),
+ * and an offer is capped at `OFFER_MAX_CHARS = 400` (@cortex/core's packages/core/src/assistant/
+ * offer.ts). `shared` cannot import from `core` (the dependency runs the other way), so this is a
+ * comment cross-reference rather than a shared constant -- the same pattern this file already
+ * uses. 100_000 here would let an unmetered `embed()` call (Finding 2, final whole-branch review)
+ * run on a body 250x larger than any real decline, with no `recordUsage` upstream to notice.
  */
 export const declineOfferInput = z
   .object({
-    statement: z.string().min(1).max(100_000),
+    statement: z.string().min(1).max(400),
   })
   .strict();
 

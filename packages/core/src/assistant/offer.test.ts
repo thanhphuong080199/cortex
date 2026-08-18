@@ -107,6 +107,27 @@ describe("dedup against declined facts", () => {
     expect(out, "near-identical vectors, unrelated strings").toBeNull();
   });
 
+  // FINDING 1 (final whole-branch review). PostgREST serializes a `vector` column as its
+  // Postgres text output, e.g. "[1,0]", NOT a JSON array -- pgvector has no JSON cast. The
+  // fixture above (`dbWith`) hands `embedding` as a real `number[]`, a shape the real database
+  // never actually returns; this test hands it as the STRING the real database does, so that a
+  // regression back to comparing it raw (`a[i] * b[i]` on a string index, silently NaN
+  // everywhere) is caught here instead of only in production.
+  it("still dedups when the stored embedding arrives as PostgREST's string encoding", async () => {
+    const stringEmbeddingDb = {
+      from: (t: string) => t === "memory_facts"
+        ? { select: () => ({ eq: () => ({ in: async () => (
+            { data: [{ statement: "Cá hồi giàu omega-3.", embedding: "[1,0]" }], error: null }
+          ) }) }) }
+        : { insert: async () => ({ data: null, error: null }) },
+    } as never;
+    const out = await proposeOffer(
+      { db: stringEmbeddingDb, ai: aiWith("Omega-3 có nhiều trong cá hồi.", [1, 0]) },
+      { userId: "u1", question: "q", answer: "a", requestId: "r1" },
+    );
+    expect(out).toBeNull();
+  });
+
   // A dedup that fails must not cost the user the offer OR the turn. The read is a convenience;
   // the worst case of skipping it is being asked once more, which is far better than an error.
   it("still offers when the dedup read fails", async () => {

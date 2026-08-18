@@ -1028,6 +1028,82 @@ describe("runTurn", () => {
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
     expect(events.some((e) => e.type === "offer")).toBe(false);
   });
+
+  // FINDING 3 (final whole-branch review): THE POSITIVE CASE. Every other offer test in this
+  // file is negative -- until this one, deleting the entire `yield { type: "offer", ... }` block
+  // out of turn.ts would leave the whole monorepo test suite green. `generateJson` is scripted
+  // by CALL COUNT: the first call is extractNote's own classification, the second is
+  // proposeOffer's condensation call -- the same two-calls-in-sequence shape "makes no offer
+  // call on an ungrounded turn" above already pins the ABSENCE of.
+  it("emits an offer event when a grounded, complete question turn produces one", async () => {
+    const { client } = dbs();
+    let jsonCalls = 0;
+    const scripted = createFakeAi({
+      generateJson: async () => {
+        jsonCalls += 1;
+        return jsonCalls === 1
+          ? { // extractNote's classify call.
+              value: { intent: "question", complexity: "simple", domain: null,
+                       domain_meta: {}, tags: [], mood: null },
+              inputTokens: 10, outputTokens: 5, model: "fake-classify",
+            }
+          : { // proposeOffer's own classify call, condensing the answer into one statement.
+              value: { statement: "some fact" },
+              inputTokens: 10, outputTokens: 5, model: "fake-classify",
+            };
+      },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "Cá hồi giàu omega-3." }; })(),
+        usage: () => ({ inputTokens: 20, outputTokens: 4, model: ANSWER_MODEL }),
+        grounding: () => ({
+          queries: ["omega 3"],
+          sources: [{ url: "https://e.com/a", title: "A" }],
+        }),
+      }),
+    });
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: scripted },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(events).toContainEqual({
+      type: "offer", statement: "some fact", sourceUrl: "https://e.com/a",
+    });
+    expect(jsonCalls, "extraction, then proposeOffer's own classify call").toBe(2);
+  });
+
+  // FINDING 4 (final whole-branch review): Task 9 widened `grounds` to `wantsAnswer ||
+  // verifies`, so a `verifies`-only turn (a doubtful claim that is NOT also a question, corrected
+  // via buildAcknowledgePrompt's correction branch) can also set `searched` when the
+  // verification grounded -- `searched` alone does not mean "this turn answered a question".
+  // Before this fix the old gate (`searched && !incomplete && answer !== ""`) would still let
+  // proposeOffer run here, on a prompt hardcoded to open with "The assistant just answered a
+  // question using knowledge that was NOT in the user's own notes" -- false on this branch,
+  // since nothing answered a question. `checkable_claim: true` and no `alsoWantsAnswer` makes
+  // `wantsAnswer` false and `verifies` true, the exact collision Finding 4 describes.
+  it("makes no offer on a verification-only turn grounded via verifies, not an answer", async () => {
+    const { client } = dbs();
+    let jsonCalls = 0;
+    const scripted = createFakeAi({
+      generateJson: async () => {
+        jsonCalls += 1;
+        return {
+          value: { intent: "statement", complexity: "simple", domain: null,
+                   domain_meta: {}, tags: [], mood: null, checkable_claim: true },
+          inputTokens: 10, outputTokens: 5, model: "fake-classify",
+        };
+      },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "Không đúng, cá hồi giàu omega-3." }; })(),
+        usage: () => ({ inputTokens: 20, outputTokens: 4, model: ANSWER_MODEL }),
+        grounding: () => ({
+          queries: ["omega 3 chữa cận thị"],
+          sources: [{ url: "https://e.com/a", title: "A" }],
+        }),
+      }),
+    });
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: scripted },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(events.some((e) => e.type === "offer")).toBe(false);
+    expect(jsonCalls, "extraction only -- proposeOffer's classify call must not run").toBe(1);
+  });
 });
 
 // One recorder for the whole describe: each of these cases cares about the same three

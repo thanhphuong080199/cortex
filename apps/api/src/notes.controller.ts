@@ -44,9 +44,10 @@ export class NotesController {
   }
 
   /**
-   * The saved-answer write, reached from the chat box's offer (C5 §11) and from the
-   * saved-external chip (§6.3). Both send the same body to the same route, which is half of
-   * why the two produce the same row; buildSavedAnswerRow is the other half.
+   * The saved-answer write. Today the offer's accept action (C5 §11) is its only caller; the
+   * saved-external chip (§6.3) is not built yet by this plan. Whichever caller reaches this
+   * route -- one today, a second later -- sends the same body to it, which is half of why the
+   * two will produce the same row once both exist; buildSavedAnswerRow is the other half.
    */
   @Post("save-answer")
   async saveAnswer(

@@ -20,6 +20,13 @@ export interface Offer {
  * save button with extra steps -- and it would write the model's entire reply into the user's
  * corpus as a single note. One statement is what §11 asks for and this is what makes that
  * assertable rather than aspirational.
+ *
+ * COUPLED to @cortex/shared's `declineOfferInput.statement` cap (packages/shared/src/dto/
+ * assistant.ts), which is 400 for exactly this reason: a decline's statement always originates
+ * from an offer this server produced, so it can never legitimately exceed what an offer can
+ * produce. `shared` cannot import from `core` (the dependency runs the other way), so that cap is
+ * a plain number with a comment pointing back here rather than a shared import -- keep the two in
+ * step by hand if this number ever moves.
  */
 export const OFFER_MAX_CHARS = 400;
 
@@ -50,6 +57,28 @@ const cosine = (a: number[], b: number[]): number => {
   // Zero-length vectors are not "identical", they are unusable. Returning 0 makes them fail to
   // suppress anything, which is the safe direction: the cost is one extra offer.
   return na === 0 || nb === 0 ? 0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
+};
+
+/**
+ * PostgREST serializes a `vector` column as its Postgres text output (e.g. "[1,2,3]"), not a
+ * JSON array -- pgvector has no JSON cast. A raw `number[]` cast on the read below compiles and
+ * passes every test whose fixture hands it a real array, but at runtime `embedding` is always a
+ * string, and comparing it as a vector silently produces NaN on every row (each `a[i] * b[i]`
+ * multiplies a number by a single CHARACTER of the string) -- the dedup never suppresses
+ * anything, with no error and no log line, because `NaN >= OFFER_DEDUP_THRESHOLD` is false and
+ * the zero-guard in `cosine` does not catch NaN either. This is what makes it real.
+ */
+const toEmbeddingVector = (raw: unknown): number[] | null => {
+  if (Array.isArray(raw)) return raw as number[];
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? (parsed as number[]) : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 };
 
 const PROMPT =
@@ -139,8 +168,9 @@ export async function proposeOffer(
           .eq("user_id", a.userId).in("status", ["rejected", "active"]);
         if (error) throw error;
 
-        for (const f of (facts ?? []) as { embedding: number[] | null }[]) {
-          if (f.embedding && cosine(vector, f.embedding) >= OFFER_DEDUP_THRESHOLD) return null;
+        for (const f of (facts ?? []) as { embedding: unknown }[]) {
+          const stored = toEmbeddingVector(f.embedding);
+          if (stored && cosine(vector, stored) >= OFFER_DEDUP_THRESHOLD) return null;
         }
       }
     } catch (err) {

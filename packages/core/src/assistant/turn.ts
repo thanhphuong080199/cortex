@@ -426,7 +426,18 @@ export async function* runTurn(
   // user's own notes contributed nothing external and makes no extra model call at all.
   // `incomplete` is checked too -- offering to save a fact out of an answer that was cut off
   // mid-sentence proposes a statement nobody, including this process, ever saw whole.
-  if (searched && !incomplete && answer !== "") {
+  //
+  // `wantsAnswer` too (Finding 4, final whole-branch review). `searched` alone is not "this turn
+  // answered a question" -- Task 9 widened `grounds` to `wantsAnswer || verifies`, so a
+  // `verifies`-only turn (a doubtful factual claim that was not also a question, corrected via
+  // buildAcknowledgePrompt's correction branch) also sets `searched` when the verification
+  // grounded. proposeOffer's prompt is hardcoded to open with "The assistant just answered a
+  // question using knowledge that was NOT in the user's own notes" -- which is simply false on
+  // that branch: nothing answered a question, the model filed a note with a one-line correction.
+  // Requiring `wantsAnswer` here, rather than rewording the prompt for two contexts, keeps the
+  // offer scoped to turns that actually answered -- the cost-ceiling intent Part B states
+  // throughout, not every turn that merely searched as a side effect of verification.
+  if (wantsAnswer && searched && !incomplete && answer !== "") {
     const offer = await proposeOffer({ db: serviceDb, ai }, {
       userId: args.userId, question: text, answer,
       ...(webCitations[0]?.url !== undefined ? { sourceUrl: webCitations[0].url } : {}),
