@@ -275,7 +275,12 @@ describe("AssistantBox", () => {
 
   // The other half of "costs nothing": no note, from the client's side. The accept path posts to
   // /notes/save-answer, and the natural way to break this is one shared handler with a flag.
-  it("posts no save when the offer is declined", async () => {
+  //
+  // Review finding: the two tests above/below this one only ever asserted the ABSENCE of a
+  // save call and the offer UI clearing -- both would still pass if declineOffer were reverted
+  // to Task 12's no-op placeholder (setOffer(null) alone). The `/assistant/decline` assertion
+  // below is what actually proves the button records the decline, not just hides the offer.
+  it("posts no save when the offer is declined, and posts the decline itself", async () => {
     const calls: string[] = [];
     globalThis.fetch = (async (url: string) => {
       calls.push(String(url));
@@ -294,6 +299,9 @@ describe("AssistantBox", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "Bỏ qua" }));
 
+    // Waits for the microtask the fire-and-forget fetch runs on -- declineOffer does not await
+    // it, so without this the assertion below could run before `calls` has been pushed to.
+    await waitFor(() => expect(calls.some((u) => u.endsWith("/assistant/decline"))).toBe(true));
     expect(calls.some((u) => u.endsWith("/notes/save-answer"))).toBe(false);
   });
 
