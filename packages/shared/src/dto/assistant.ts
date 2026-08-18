@@ -21,6 +21,16 @@ export const assistantInput = z
     content: z.string().min(1).max(100_000).optional(),
     /** An offline capture's real timestamp, not the reconnect time. Same field NoteService takes. */
     createdAt: z.string().datetime().optional(),
+    /**
+     * The caller's IANA time zone, e.g. "Asia/Ho_Chi_Minh". Both clients read it from
+     * `Intl.DateTimeFormat().resolvedOptions().timeZone`, which needs no permission and no
+     * stored setting -- and which follows the user when they travel, unlike a column would.
+     *
+     * Optional, and never trusted: the server runs it through `resolveTimeZone` before it
+     * reaches Intl. The cap is a sanity bound on an untrusted string, not a real limit -- the
+     * longest IANA identifier is about 30 characters.
+     */
+    timeZone: z.string().max(64).optional(),
   })
   .strict();
 
