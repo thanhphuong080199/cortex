@@ -74,6 +74,24 @@ const tagsOn = async (noteId: string) => {
 };
 
 /**
+ * Test helper: calls extractNote with a fake AI that returns the partial extraction value,
+ * and returns the full result. Defaults fields the test doesn't specify (domain, domain_meta,
+ * tags, mood) so callers can focus on the field they are testing.
+ */
+const runExtract = async (partial: Record<string, unknown>) => {
+  const note = await seedNote("test content");
+  const merged = {
+    domain: null,
+    domain_meta: {},
+    tags: [],
+    mood: null,
+    ...partial,
+  };
+  const ai = aiReturning(merged);
+  return extractNote({ db, ai }, note);
+};
+
+/**
  * 00008_invite_gate.sql fires on every auth.users insert, including through the admin
  * API, so createUser fails with "Signup not allowed" unless the email is allow-listed
  * first -- the same step every other suite's harness performs.
@@ -622,5 +640,53 @@ describe("the media prompt and the mediaKind enum", () => {
     const offered = [...line!.matchAll(/"([a-z_]+)"(?=\s*[|,])/g)].map((m) => m[1]!);
     expect(offered.length, "no quoted kinds parsed out of the prompt line").toBeGreaterThan(0);
     expect(new Set(offered)).toEqual(new Set(mediaKind.options));
+  });
+});
+
+describe("alsoWantsAnswer", () => {
+  // THE OBSERVED BUG. A turn can be a fact to file AND a question in one sentence; `intent`
+  // holds one value and therefore cannot say so. Without a rule naming that shape explicitly,
+  // the model has no reason to set a flag it was never told the purpose of.
+  it("tells the model a turn can be both a statement and a question", () => {
+    const prompt = buildPrompt("bất kỳ", []);
+    expect(prompt).toContain("alsoWantsAnswer");
+    // The rule must survive as a rule, not as a bare schema key echoed back.
+    expect(prompt).toMatch(/both|vừa|đồng thời/i);
+  });
+
+  describe("when a model response is evaluated", () => {
+    beforeEach(createTestUser);
+
+    // intent STAYS "statement". The flag is additive precisely so tagging, domain and filing
+    // tone keep working the way they do for any other recorded note -- widening `intent` to a
+    // fourth value would have meant re-deciding all three.
+    it("keeps intent at statement while asking for an answer", async () => {
+      const out = await runExtract({ intent: "statement", alsoWantsAnswer: true });
+      expect(out.intent).toBe("statement");
+      expect(out.alsoWantsAnswer).toBe(true);
+    });
+
+    // THE DEFAULT, AND WHY IT IS A COMPARISON. `required` in a responseSchema is a request, not
+    // a guarantee. `false` is the branch that keeps the turn on CLASSIFY_MODEL and off Google,
+    // so it is the only safe landing place for a value the model omitted or sent wrong.
+    // `value.alsoWantsAnswer as boolean` compiles and lets the string "true" -- or "no" --
+    // through into turn.ts, where every non-empty string is truthy.
+    it("defaults a missing alsoWantsAnswer to false", async () => {
+      expect((await runExtract({ intent: "statement" })).alsoWantsAnswer).toBe(false);
+    });
+
+    it("defaults a non-boolean alsoWantsAnswer to false", async () => {
+      expect((await runExtract({ intent: "statement", alsoWantsAnswer: "yes" })).alsoWantsAnswer)
+        .toBe(false);
+    });
+
+    // A pure question does not need the flag: `intent: "question"` already routes to the answer
+    // prompt. Asserted so nobody later makes the flag REQUIRED for an answer and breaks the
+    // path that was always working.
+    it("leaves a pure question's flag false without changing its routing", async () => {
+      const out = await runExtract({ intent: "question" });
+      expect(out.intent).toBe("question");
+      expect(out.alsoWantsAnswer).toBe(false);
+    });
   });
 });
