@@ -514,7 +514,7 @@ describe("extractNote — intent, complexity and language", () => {
     expect(out.complexity).toBe("complex");
   });
 
-  it("asks for one JSON object carrying all four decisions, not four calls", async () => {
+  it("asks for one JSON object carrying all fields, not multiple calls", async () => {
     const schemas: Record<string, unknown>[] = [];
     const ai = createFakeAi({
       generateJson: async (args) => {
@@ -530,7 +530,7 @@ describe("extractNote — intent, complexity and language", () => {
     expect(schemas).toHaveLength(1);
     const props = (schemas[0]!.properties ?? {}) as Record<string, unknown>;
     expect(Object.keys(props).sort())
-      .toEqual(["complexity", "domain", "domain_meta", "intent", "mood", "tags"]);
+      .toEqual(["alsoWantsAnswer", "complexity", "domain", "domain_meta", "intent", "mood", "tags"]);
   });
 
   // Cortex's users write Vietnamese. A prompt that says nothing about language gets tags back
