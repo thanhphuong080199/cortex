@@ -38,6 +38,52 @@ export const assistantInput = z
 export type AssistantInput = z.infer<typeof assistantInput>;
 
 /**
+ * `.strict()`, matching assistantInput: a body carrying a userId must be a 400, not a value the
+ * server quietly drops. The user id comes from the verified JWT and nowhere else.
+ *
+ * The statement cap matches createNoteInput's 100_000 rather than restating a smaller number --
+ * a value acceptable through POST /notes and rejected here would be the same note failing for
+ * no reason the user can see.
+ */
+export const saveAnswerInput = z
+  .object({
+    statement: z.string().min(1).max(100_000),
+    sourceUrl: z.string().url().max(2048).optional(),
+  })
+  .strict();
+
+export type SaveAnswerInput = z.infer<typeof saveAnswerInput>;
+
+/**
+ * `POST /assistant/decline`'s body (C5 §12, task 13). `.strict()` for the same reason
+ * saveAnswerInput above is: the user id comes from the verified JWT, never from the body.
+ *
+ * No `sourceUrl` here, unlike saveAnswerInput -- declining records that the STATEMENT should not
+ * be offered again; it never writes a note, so there is no source to attribute.
+ *
+ * The cap is 400, NOT saveAnswerInput's 100_000: a decline's statement can only ever have come
+ * from an offer this same server generated (the "no thanks" on the box the offer put on screen),
+ * and an offer is capped at `OFFER_MAX_CHARS = 400` (@cortex/core's packages/core/src/assistant/
+ * offer.ts). `shared` cannot import from `core` (the dependency runs the other way), so this is a
+ * comment cross-reference rather than a shared constant -- the same pattern this file already
+ * uses. 100_000 here would let an unmetered `embed()` call (Finding 2, final whole-branch review)
+ * run on a body 250x larger than any real decline, with no `recordUsage` upstream to notice.
+ */
+export const declineOfferInput = z
+  .object({
+    statement: z.string().min(1).max(400),
+  })
+  .strict();
+
+export type DeclineOfferInput = z.infer<typeof declineOfferInput>;
+
+/** The `offer` SSE event's payload (C5 §11). `sourceUrl` is absent for general knowledge. */
+export interface Offer {
+  statement: string;
+  sourceUrl?: string;
+}
+
+/**
  * One row of the `citations` SSE event `POST /assistant` streams -- the OUTPUT half of the
  * contract, mirroring how `SearchResult` (search.ts, same directory) already documents the
  * reasoning for declaring a response shape once in `@cortex/shared` rather than letting each

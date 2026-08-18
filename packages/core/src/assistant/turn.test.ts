@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { CLASSIFY_MODEL, formatToday, GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS } from "@cortex/shared";
+import {
+  ANSWER_MODEL, CLASSIFY_MODEL, formatToday, GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS,
+} from "@cortex/shared";
 import type { GroundingResult } from "../ai/client.js";
 import { createFakeAi } from "../ai/fake.js";
 import { runTurn, type AssistantEvent } from "./turn.js";
@@ -826,6 +828,121 @@ describe("runTurn", () => {
     expect(seen[0]?.grounding).toBeFalsy();
   });
 
+  // THE TURN THIS WHOLE TASK EXISTS FOR: a note to file AND a question, in one sentence. From
+  // the routing point on it must be indistinguishable from a pure question -- same prompt, same
+  // model, same grounding, same stamp. Four assertions and not one, because the old `isQuestion`
+  // drove exactly these four things and a partial fix would leave the answer ungrounded or
+  // running on flash-lite with nothing to show that it had.
+  it("answers a statement that also asks something", async () => {
+    const { client, updated } = dbs();
+    const seen: { prompt?: string; model?: string; grounding?: boolean }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", alsoWantsAnswer: true, complexity: "simple",
+                 domain: null, domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "Cá hồi và rau xanh." }; })(),
+          usage: () => ({ inputTokens: 5, outputTokens: 4, model: ANSWER_MODEL }),
+        };
+      },
+    });
+
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+
+    expect(seen[0]?.model, "must reach the answer model").toBe(ANSWER_MODEL);
+    expect(seen[0]?.grounding, "must be allowed to search the web").toBe(true);
+    expect(updated.notes ?? []).toContainEqual(expect.objectContaining({ source_type: "chat" }));
+    // The acknowledge prompt's refusal is the sentence that swallowed the question. Its absence
+    // is the only direct evidence the ANSWER prompt ran rather than a reworded acknowledge one.
+    expect(seen[0]?.prompt).not.toMatch(/did not ask a question/i);
+  });
+
+  // Confirmed by the user: this branch must NOT announce a save. The property is bought by
+  // routing to buildAnswerPrompt, which has no filing language -- so this asserts the outcome,
+  // which stays green against a correct implementation and red against one that "helpfully"
+  // adds a filing line to the answer prompt.
+  it("does not announce the filing when it answers a statement", async () => {
+    const { client } = dbs();
+    const seen: { prompt?: string }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", alsoWantsAnswer: true, complexity: "simple",
+                 domain: "health", domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "ok" }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        };
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seen[0]?.prompt).not.toMatch(/You filed it under/i);
+    expect(seen[0]?.prompt).not.toMatch(/Mention what you attached/i);
+  });
+
+  // THE REGRESSION GUARD, and the one that makes the flag worth having rather than a blanket
+  // widening. An ordinary recorded note -- no question in it -- must stay on the cheap model,
+  // must not ground, and must keep the 'quick' source_type it was created with. Drop the
+  // `alsoWantsAnswer` condition and write `intent === "statement"` instead and this goes red.
+  it("leaves an ordinary statement on the cheap path", async () => {
+    const { client, updated } = dbs();
+    const seen: { model?: string; grounding?: boolean }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", alsoWantsAnswer: false, complexity: "simple",
+                 domain: null, domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "Đã lưu." }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: CLASSIFY_MODEL }),
+        };
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+    expect(seen[0]?.grounding).toBeFalsy();
+    expect((updated.notes ?? []).some((r) => "source_type" in r)).toBe(false);
+  });
+
+  // Chitchat must not be reachable through the new flag. "haha ok" with a spurious
+  // alsoWantsAnswer must stay small talk: grounding "haha ok" against Google is the single most
+  // wasteful thing this system can be made to do, and a flag the model sets is not trusted input.
+  it("never lets the flag promote chitchat", async () => {
+    const { client } = dbs();
+    const seen: { model?: string; grounding?: boolean }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "chitchat", alsoWantsAnswer: true, complexity: "simple",
+                 domain: null, domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "hehe" }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: CLASSIFY_MODEL }),
+        };
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+    expect(seen[0]?.grounding).toBeFalsy();
+  });
+
   // Wiring, asserted on the prompt text: a zone accepted by the DTO and then dropped somewhere
   // between the controller and the builder is invisible in every other assertion -- the turn
   // still answers, just from the wrong day.
@@ -861,5 +978,202 @@ describe("runTurn", () => {
     const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: ai() },
       { userId: "u1", noteId: "n1", budgetUsd: 5, timeZone: "Mars/Olympus_Mons" }));
     expect(events.some((e) => e.type === "done")).toBe(true);
+  });
+
+  // THE CEILING, and the assertion that keeps this from becoming a second model call on every
+  // turn in the system. An ungrounded answer contributed nothing external, so proposeOffer must
+  // not run at all -- asserted on the absence of the event AND on the classify-call count,
+  // because an offer that ran and returned null is invisible in the event stream alone.
+  it("makes no offer call on an ungrounded turn", async () => {
+    const { client } = dbs();
+    let jsonCalls = 0;
+    const ai = createFakeAi({
+      generateJson: async () => {
+        jsonCalls += 1;
+        return {
+          value: { intent: "question", complexity: "simple", domain: null,
+                   domain_meta: {}, tags: [], mood: null },
+          inputTokens: 10, outputTokens: 5, model: "fake-classify",
+        };
+      },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "từ note của bạn thôi" }; })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        // No grounding() -- nothing was searched.
+      }),
+    });
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(events.some((e) => e.type === "offer")).toBe(false);
+    expect(jsonCalls, "classification only, no offer call").toBe(1);
+  });
+
+  // An interrupted answer must not produce an offer: the statement would be condensed out of a
+  // reply that was cut off mid-sentence, so nobody -- including this process -- saw it whole.
+  it("makes no offer when the answer was interrupted", async () => {
+    const { client } = dbs();
+    const ai = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "question", complexity: "simple", domain: null,
+                 domain_meta: {}, tags: [], mood: null },
+        inputTokens: 10, outputTokens: 5, model: "fake-classify",
+      }),
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "một nử" }; throw new Error("cut"); })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        grounding: () => ({ queries: ["omega 3"], sources: [{ url: "https://e.com/a", title: "A" }] }),
+      }),
+    });
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(events.some((e) => e.type === "offer")).toBe(false);
+  });
+
+  // FINDING 3 (final whole-branch review): THE POSITIVE CASE. Every other offer test in this
+  // file is negative -- until this one, deleting the entire `yield { type: "offer", ... }` block
+  // out of turn.ts would leave the whole monorepo test suite green. `generateJson` is scripted
+  // by CALL COUNT: the first call is extractNote's own classification, the second is
+  // proposeOffer's condensation call -- the same two-calls-in-sequence shape "makes no offer
+  // call on an ungrounded turn" above already pins the ABSENCE of.
+  it("emits an offer event when a grounded, complete question turn produces one", async () => {
+    const { client } = dbs();
+    let jsonCalls = 0;
+    const scripted = createFakeAi({
+      generateJson: async () => {
+        jsonCalls += 1;
+        return jsonCalls === 1
+          ? { // extractNote's classify call.
+              value: { intent: "question", complexity: "simple", domain: null,
+                       domain_meta: {}, tags: [], mood: null },
+              inputTokens: 10, outputTokens: 5, model: "fake-classify",
+            }
+          : { // proposeOffer's own classify call, condensing the answer into one statement.
+              value: { statement: "some fact" },
+              inputTokens: 10, outputTokens: 5, model: "fake-classify",
+            };
+      },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "Cá hồi giàu omega-3." }; })(),
+        usage: () => ({ inputTokens: 20, outputTokens: 4, model: ANSWER_MODEL }),
+        grounding: () => ({
+          queries: ["omega 3"],
+          sources: [{ url: "https://e.com/a", title: "A" }],
+        }),
+      }),
+    });
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: scripted },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(events).toContainEqual({
+      type: "offer", statement: "some fact", sourceUrl: "https://e.com/a",
+    });
+    expect(jsonCalls, "extraction, then proposeOffer's own classify call").toBe(2);
+  });
+
+  // FINDING 4 (final whole-branch review): Task 9 widened `grounds` to `wantsAnswer ||
+  // verifies`, so a `verifies`-only turn (a doubtful claim that is NOT also a question, corrected
+  // via buildAcknowledgePrompt's correction branch) can also set `searched` when the
+  // verification grounded -- `searched` alone does not mean "this turn answered a question".
+  // Before this fix the old gate (`searched && !incomplete && answer !== ""`) would still let
+  // proposeOffer run here, on a prompt hardcoded to open with "The assistant just answered a
+  // question using knowledge that was NOT in the user's own notes" -- false on this branch,
+  // since nothing answered a question. `checkable_claim: true` and no `alsoWantsAnswer` makes
+  // `wantsAnswer` false and `verifies` true, the exact collision Finding 4 describes.
+  it("makes no offer on a verification-only turn grounded via verifies, not an answer", async () => {
+    const { client } = dbs();
+    let jsonCalls = 0;
+    const scripted = createFakeAi({
+      generateJson: async () => {
+        jsonCalls += 1;
+        return {
+          value: { intent: "statement", complexity: "simple", domain: null,
+                   domain_meta: {}, tags: [], mood: null, checkable_claim: true },
+          inputTokens: 10, outputTokens: 5, model: "fake-classify",
+        };
+      },
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: "Không đúng, cá hồi giàu omega-3." }; })(),
+        usage: () => ({ inputTokens: 20, outputTokens: 4, model: ANSWER_MODEL }),
+        grounding: () => ({
+          queries: ["omega 3 chữa cận thị"],
+          sources: [{ url: "https://e.com/a", title: "A" }],
+        }),
+      }),
+    });
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: scripted },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(events.some((e) => e.type === "offer")).toBe(false);
+    expect(jsonCalls, "extraction only -- proposeOffer's classify call must not run").toBe(1);
+  });
+});
+
+// One recorder for the whole describe: each of these cases cares about the same three
+// outputs -- which prompt ran, on which model, with grounding on or off.
+const recordTurn = async (extraction: Record<string, unknown>) => {
+  const { client, updated } = dbs();
+  const seen: { prompt?: string; model?: string; grounding?: boolean }[] = [];
+  const ai = createFakeAi({
+    generateJson: async () => ({
+      value: { intent: "statement", complexity: "simple", domain: null,
+               domain_meta: {}, tags: [], mood: null, ...extraction },
+      inputTokens: 10, outputTokens: 5, model: "fake-classify",
+    }),
+    generateStream: async (a) => {
+      seen.push(a);
+      return {
+        chunks: (async function* () { yield { text: "ok" }; })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: "fake" }),
+      };
+    },
+  });
+  await collect(runTurn({ userDb: client, serviceDb: client, ai },
+    { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+  return { seen, updated };
+};
+
+describe("the routing chain", () => {
+  it("sends a flagged statement to the reasoning model", async () => {
+    const { seen } = await recordTurn({ checkable_claim: true });
+    expect(seen[0]?.model).toBe(ANSWER_MODEL);
+  });
+
+  // THE CEILING. Without this the flag is indistinguishable from "route every statement to
+  // the expensive model", which is the one outcome §9.2 was written to prevent.
+  it("leaves an unflagged statement on the cheap model", async () => {
+    const { seen } = await recordTurn({ checkable_claim: false });
+    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+  });
+
+  // A flagged statement is still a FILING. It keeps the acknowledge prompt -- it just runs it
+  // on a model capable of the judgment -- so the "You filed it under" line must survive.
+  it("keeps a flagged statement on the acknowledge prompt", async () => {
+    const { seen } = await recordTurn({ checkable_claim: true });
+    expect(seen[0]?.prompt).toMatch(/You filed it under/i);
+  });
+
+  // THE COLLISION, decided in design doc §1.1. Both flags fire on "Omega-3 chữa được cận thị,
+  // có đúng không?" -- a recordable statement, a question, and a doubtful claim in one
+  // sentence. The user asked, so the user gets an answer; being corrected INSTEAD of answered
+  // is the same silent drop Part A exists to fix, reached through a different branch. Two
+  // independent `if`s is how this would have gone unnoticed, which is why the chain is ordered.
+  it("answers rather than corrects when the turn asks a question too", async () => {
+    const { seen, updated } = await recordTurn({ alsoWantsAnswer: true, checkable_claim: true });
+    expect(seen[0]?.prompt).not.toMatch(/You filed it under/i);
+    expect(seen[0]?.grounding).toBe(true);
+    expect(updated.notes ?? []).toContainEqual(expect.objectContaining({ source_type: "chat" }));
+  });
+
+  // A flagged statement grounds, so the check has a second source rather than only the model's
+  // own memory (C5 §9.3's last paragraph). Separate from the model assertion: they are set on
+  // two different lines and a partial edit moves one without the other.
+  it("grounds a flagged statement", async () => {
+    const { seen } = await recordTurn({ checkable_claim: true });
+    expect(seen[0]?.grounding).toBe(true);
+  });
+
+  // Chitchat is checked before the claim flag and is never promoted by it.
+  it("never promotes chitchat", async () => {
+    const { seen } = await recordTurn({ intent: "chitchat", checkable_claim: true });
+    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+    expect(seen[0]?.grounding).toBeFalsy();
   });
 });

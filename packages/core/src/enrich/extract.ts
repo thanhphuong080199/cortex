@@ -20,6 +20,8 @@ export type Intent = (typeof INTENTS)[number];
 
 interface Extraction {
   intent?: Intent;
+  alsoWantsAnswer?: unknown;
+  checkable_claim?: unknown;
   complexity?: "simple" | "complex";
   domain: string | null;
   domain_meta: Record<string, unknown>;
@@ -33,6 +35,14 @@ const RESPONSE_SCHEMA = {
     // The box branches on this. The sweep ignores it -- a few output tokens, against two
     // prompts that would have to be kept in step by discipline alone.
     intent: { type: "string", enum: [...INTENTS] },
+    // Narrowly scoped to the one case `intent` cannot express: a turn that is BOTH something
+    // to record and a question. Not a fourth intent -- `intent` still drives tagging, domain,
+    // filing tone and chitchat exclusion, and all three are correct at "statement" here.
+    alsoWantsAnswer: { type: "boolean" },
+    // Stage C5 §9.2. A couple of output tokens on a call that is already happening, and unlike
+    // `complexity` this one is acted on: a flagged statement is the only statement that reaches
+    // ANSWER_MODEL. Not in `required`, for the reason the defaults below document.
+    checkable_claim: { type: "boolean" },
     // RECORDED, NOT ACTED ON. It costs a couple of output tokens and produces the dataset a
     // future model-routing decision needs: complexity x real cost x model. Nothing reads it.
     complexity: { type: "string", enum: ["simple", "complex"] },
@@ -126,8 +136,19 @@ export function buildPrompt(
     "  \"chitchat\" — greetings, reactions and noise with nothing to file: \"hello\",",
     "    \"haha ok\", \"1111\".",
     "  \"statement\" — anything else: something they are recording.",
+    "- alsoWantsAnswer is TRUE when the turn is BOTH something to record and a question they",
+    "  want answered — \"Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi mắt\" records the",
+    "  eye strain and asks what to eat. Keep intent \"statement\" in that case; the flag is what",
+    "  says an answer is also wanted. Leave it false for a pure question (intent already says",
+    "  so) and for a statement with nothing being asked.",
     "  Every one of the three is still SAVED as a note. You are labelling the turn, not",
     "  deciding whether it is worth keeping.",
+    "- checkable_claim is TRUE only when the note asserts something factual about the world",
+    "  that you have real reason to DOUBT — \"omega-3 chữa được cận thị\", \"uống nước đá gây",
+    "  ung thư\". Not for anything merely factual, and never for something about their own",
+    "  life, their plans, or how they feel: those are theirs to state and not yours to check.",
+    "  Leave it false when you are unsure. A false flag costs them a correction they did not",
+    "  need on something that was right.",
     "",
     "Write tags in the SAME LANGUAGE the note is written in. Do not translate: a note in",
     "Vietnamese gets Vietnamese tags. Tag vocabularies that mix languages split one idea across two",
@@ -162,6 +183,8 @@ export async function extractNote(
   domainMeta: Record<string, unknown>;
   mood: number | null;
   intent: Intent;
+  alsoWantsAnswer: boolean;
+  checkableClaim: boolean;
   complexity: "simple" | "complex";
 }> {
   const { db, ai } = deps;
@@ -332,6 +355,15 @@ export async function extractNote(
     // A COMPARISON, not a cast. See extract.test.ts's default cases: `value.intent as Intent`
     // compiles and lets an unrecognised string through to turn.ts's branch.
     intent: value.intent === "question" || value.intent === "chitchat" ? value.intent : "statement",
+    // A COMPARISON, not a cast, and `=== true` rather than a truthiness check: the model can
+    // return the STRING "true", or "no", and both are truthy. The false branch is the one that
+    // keeps this turn on CLASSIFY_MODEL and off Google Search, so it is where an unreadable
+    // value must land. See extract.test.ts's two default cases.
+    alsoWantsAnswer: value.alsoWantsAnswer === true,
+    // Defaulted like every other flag: `false` is the branch that never spends ANSWER_MODEL.
+    // See extract.test.ts -- `as boolean` compiles and lets the string "false" through, which
+    // is truthy and would promote the turn it was meant to keep cheap.
+    checkableClaim: value.checkable_claim === true,
     complexity: value.complexity === "complex" ? "complex" : "simple",
   };
 }

@@ -25,4 +25,10 @@ describe("shared enums", () => {
       "chat", "assistant", "web_search", "chitchat",
     ]);
   });
+  it("memoryCategory covers what we know about a person, plus an assistant's own offer", () => {
+    expect(memoryCategory.options).toEqual([
+      "identity", "preference", "interest", "project",
+      "habit", "opinion", "skill", "relationship", "assistant_offer",
+    ]);
+  });
 });

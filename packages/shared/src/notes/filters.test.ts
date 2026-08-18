@@ -252,6 +252,52 @@ describe("toFtsQuery", () => {
   });
 });
 
+describe("the saved-external filter", () => {
+  it("parses ?saved=1 and ignores anything else", () => {
+    expect(parseNoteFilters({ saved: "1" }).saved).toBe(true);
+    // Untrusted input: anything unrecognised is DROPPED, never passed on -- the promise
+    // parseNoteFilters' docstring already makes for every other field.
+    expect(parseNoteFilters({ saved: "yes" }).saved).toBeUndefined();
+    expect(parseNoteFilters({}).saved).toBeUndefined();
+  });
+
+  it("narrows the query to saved answers", () => {
+    const calls: [string, unknown][] = [];
+    const q = new Proxy({}, {
+      get: (_t, prop: string) => (...args: unknown[]) => { calls.push([prop, args]); return q; },
+    });
+    applyNoteFilters(q, { view: "inbox", saved: true });
+    expect(calls).toContainEqual(["in", ["source_type", ["assistant", "web_search"]]]);
+  });
+
+  // Applier 3, and the half that has already burned this codebase (issue-log E5): SSR excludes
+  // a row and the Realtime patch puts it straight back, because the predicate and the query
+  // narrow on different fields.
+  it("matchesFilters agrees with the query", () => {
+    const saved = { lifecycle: "inbox", deleted_at: null, source_type: "web_search" };
+    const own = { lifecycle: "inbox", deleted_at: null, source_type: "quick" };
+    expect(matchesFilters(saved, { view: "inbox", saved: true })).toBe(true);
+    expect(matchesFilters(own, { view: "inbox", saved: true })).toBe(false);
+    // And without the filter, both are in. A chip that silently narrows the DEFAULT view would
+    // hide every note the user actually wrote.
+    expect(matchesFilters(own, { view: "inbox" })).toBe(true);
+  });
+
+  it("noteFiltersToSql narrows the same way", () => {
+    const { where, params } = noteFiltersToSql({ view: "inbox", saved: true });
+    expect(where).toContain("source_type");
+    expect(params).toContain("web_search");
+    expect(params).toContain("assistant");
+  });
+
+  // Chitchat stays excluded regardless. The two narrowings are independent and both apply --
+  // the natural mistake is an if/else that makes the saved filter replace the chitchat one.
+  it("still excludes chitchat when the saved filter is on", () => {
+    const banter = { lifecycle: "inbox", deleted_at: null, source_type: "chitchat" };
+    expect(matchesFilters(banter, { view: "inbox", saved: true })).toBe(false);
+  });
+});
+
 describe("noteFiltersToSql q handling", () => {
   it("binds the escaped query, never the raw input", () => {
     const { where, params } = noteFiltersToSql({ view: "inbox", q: "don't" });

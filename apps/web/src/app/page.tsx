@@ -12,7 +12,7 @@ export default async function Home(
 ) {
   const params = await searchParams;
   const filters = parseNoteFilters(params);
-  const { view, q, tag, domain } = filters;
+  const { view, q, tag, domain, saved } = filters;
 
   const supabase = await createClient();
   // getUser() authenticates against the auth server; getSession() supplies the access
@@ -38,6 +38,7 @@ export default async function Home(
     if (q) sp.set("q", q);
     if (tag) sp.set("tag", tag);
     if (domain) sp.set("domain", domain);
+    if (saved) sp.set("saved", "1");
     return `/?${sp.toString()}`;
   };
   // Clicking the active domain chip clears it, so the filter is its own toggle.
@@ -47,6 +48,7 @@ export default async function Home(
     if (q) sp.set("q", q);
     if (tag) sp.set("tag", tag);
     if (d !== domain) sp.set("domain", d);
+    if (saved) sp.set("saved", "1");
     return `/?${sp.toString()}`;
   };
 

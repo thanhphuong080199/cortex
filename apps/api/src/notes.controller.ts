@@ -1,6 +1,9 @@
 import { Body, Controller, Delete, Param, ParseUUIDPipe, Patch, Post, UseGuards } from "@nestjs/common";
-import { createUserClient, NoteService } from "@cortex/core";
-import { createNoteInput, updateNoteInput, type CreateNoteInput, type UpdateNoteInput } from "@cortex/shared";
+import { createUserClient, NoteService, saveAnswer } from "@cortex/core";
+import {
+  createNoteInput, saveAnswerInput, updateNoteInput,
+  type CreateNoteInput, type SaveAnswerInput, type UpdateNoteInput,
+} from "@cortex/shared";
 import { CurrentUser } from "./auth/current-user.decorator";
 import type { AuthedUser } from "./auth/supabase-auth.guard";
 import { SupabaseAuthGuard } from "./auth/supabase-auth.guard";
@@ -38,5 +41,23 @@ export class NotesController {
   @Delete(":id/purge")
   purge(@CurrentUser() user: AuthedUser, @Param("id", ParseUUIDPipe) id: string) {
     return this.svc(user).purge(id);
+  }
+
+  /**
+   * The saved-answer write. Today the offer's accept action (C5 §11) is its only caller; the
+   * saved-external chip (§6.3) is not built yet by this plan. Whichever caller reaches this
+   * route -- one today, a second later -- sends the same body to it, which is half of why the
+   * two will produce the same row once both exist; buildSavedAnswerRow is the other half.
+   */
+  @Post("save-answer")
+  async saveAnswer(
+    @CurrentUser() user: AuthedUser,
+    @Body(new ZodValidationPipe(saveAnswerInput)) body: SaveAnswerInput,
+  ): Promise<{ id: string }> {
+    return saveAnswer(createUserClient(user.token), {
+      userId: user.id,
+      statement: body.statement,
+      ...(body.sourceUrl !== undefined ? { sourceUrl: body.sourceUrl } : {}),
+    });
   }
 }

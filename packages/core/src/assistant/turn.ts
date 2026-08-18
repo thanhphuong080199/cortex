@@ -11,6 +11,7 @@ import { CheckinService } from "../checkins/service.js";
 import { MediaService } from "../media/service.js";
 import { NoteService } from "../notes/service.js";
 import { resolveCurrentSession, selectContext, type ThreadTurn } from "./context.js";
+import { proposeOffer } from "./offer.js";
 import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
 import { retrieve, type Citation } from "./retrieve.js";
 
@@ -21,6 +22,7 @@ export type AssistantEvent =
   | { type: "web"; sources: WebCitation[]; queries: string[]; entryPoint?: string }
   | { type: "mood"; checkinId: string; mood: number }
   | { type: "token"; text: string }
+  | { type: "offer"; statement: string; sourceUrl?: string }
   | { type: "declined"; reason: "budget" }
   | { type: "done"; messageId: string; sessionId: string }
   | { type: "error"; message: string };
@@ -259,42 +261,76 @@ export async function* runTurn(
     return;
   }
 
-  const isQuestion = extracted?.intent === "question";
+  // AN ORDERED CHAIN, not a set of independent booleans, and the order is the decision.
+  //
+  // `wantsAnswer` covers two shapes that behave identically from here on: a pure question, and
+  // a statement the classifier flagged as also asking something (design doc §1). The second is
+  // the eye-fatigue turn -- "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi mắt" -- which
+  // was classified `statement`, routed to buildAcknowledgePrompt, and had its question dropped
+  // by that prompt's "The user did not ask a question" rule.
+  //
+  // `intent` stays "statement" for that turn on purpose: it still drives tagging, domain and
+  // the filing tone correctly. Only the reply branch was ever wrong.
+  //
+  // Chitchat is checked SECOND and can never be reached by the flag: grounding "haha ok"
+  // against Google is the most wasteful thing this system can be told to do, and
+  // `alsoWantsAnswer` is a value a model produced, not trusted input.
+  const wantsAnswer = extracted?.intent === "question"
+    || (extracted?.intent === "statement" && extracted?.alsoWantsAnswer === true);
   const isChitchat = extracted?.intent === "chitchat";
+  // THE THIRD LINK, and its position in the chain is the decision (design doc §1.1). Read only
+  // when `wantsAnswer` is already false: a turn that asks a question gets ANSWERED, and the
+  // correction rides inside that answer rather than replacing it. Written as `!wantsAnswer &&`
+  // rather than as a separate `if` further down, because two booleans that can both be true and
+  // are read in different places is exactly how this collision was created.
+  const verifies = !wantsAnswer && !isChitchat && extracted?.checkableClaim === true;
+
   // A note that already exists, restamped after classification -- the shape 'chat' has used
-  // since C1. `statement` is the default branch and writes nothing: every ordinary capture
-  // keeps the 'quick' the row was created with.
-  if (isQuestion || isChitchat) {
+  // since C1. An ordinary statement is the default branch and writes nothing: every plain
+  // capture keeps the 'quick' the row was created with.
+  if (wantsAnswer || isChitchat) {
     await userDb.from("notes")
-      .update({ source_type: isQuestion ? "chat" : "chitchat" })
+      .update({ source_type: wantsAnswer ? "chat" : "chitchat" })
       .eq("id", args.noteId);
   }
   // Resolved once per turn, not per prompt: two calls could not disagree today, but the point
   // of a single resolution is that they cannot start to.
   const timeZone = resolveTimeZone(args.timeZone);
   const now = new Date();
-  const prompt = isQuestion
+  const prompt = wantsAnswer
+    // The FULL turn text, both shapes. "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi
+    // mắt" answers better with the eye strain still in it than with the question carved out,
+    // and carving it out would need a second model call to decide where the seam is.
     ? buildAnswerPrompt({ question: text, citations: citationsForPrompt, history, timeZone, now })
     : isChitchat
       ? buildChitchatPrompt({ text, history })
       : buildAcknowledgePrompt({
           note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
           related: citationsForPrompt, history, timeZone, now,
+          // The same boolean that put this turn on ANSWER_MODEL and enabled grounding. One
+          // derivation, three uses -- a second condition here could disagree with the model
+          // choice and produce a verification prompt running on flash-lite.
+          verify: verifies,
         });
-  // Unchanged, and it is what keeps small talk cheap: only a question reaches ANSWER_MODEL,
-  // and only a question grounds (`grounding: isQuestion`, below).
-  const model = isQuestion ? ANSWER_MODEL : CLASSIFY_MODEL;
+  // Two ways onto the reasoning model and no third. `verifies` is capped by the classifier's
+  // own threshold ("only when you have real reason to doubt"), so an ordinary capture is
+  // untouched -- see turn.test.ts's cheap-model assertion.
+  const model = wantsAnswer || verifies ? ANSWER_MODEL : CLASSIFY_MODEL;
 
   let answer = "";
   let incomplete = false;
   let streamUsage: { inputTokens: number; outputTokens: number; model: string } | null = null;
   let grounding: GroundingResult | null = null;
-  mark(`model stream requested (${model}, grounding=${isQuestion})`);
+  // A verification checks against a second source rather than the model's own memory alone
+  // (C5 §9.3). Where grounding is unavailable it degrades to that memory, which the prompt
+  // does not need to know about.
+  const grounds = wantsAnswer || verifies;
+  mark(`model stream requested (${model}, grounding=${grounds})`);
   try {
     const stream = await ai.generateStream({
       prompt, model, signal: args.signal,
       // The whole enablement decision. Never unconditional: see the acknowledge-path test.
-      grounding: isQuestion,
+      grounding: grounds,
     });
     mark("model stream opened");
     try {
@@ -384,6 +420,37 @@ export async function* runTurn(
     } catch (err) {
       console.error(`[assistant] grounding usage_ledger write failed: ${errorMessage(err)}`);
     }
+  }
+
+  // C5 §11. Gated on `searched`, which is the cost ceiling: a turn that answered from the
+  // user's own notes contributed nothing external and makes no extra model call at all.
+  // `incomplete` is checked too -- offering to save a fact out of an answer that was cut off
+  // mid-sentence proposes a statement nobody, including this process, ever saw whole.
+  //
+  // `wantsAnswer` too (Finding 4, final whole-branch review). `searched` alone is not "this turn
+  // answered a question" -- Task 9 widened `grounds` to `wantsAnswer || verifies`, so a
+  // `verifies`-only turn (a doubtful factual claim that was not also a question, corrected via
+  // buildAcknowledgePrompt's correction branch) also sets `searched` when the verification
+  // grounded. proposeOffer's prompt is hardcoded to open with "The assistant just answered a
+  // question using knowledge that was NOT in the user's own notes" -- which is simply false on
+  // that branch: nothing answered a question, the model filed a note with a one-line correction.
+  // Requiring `wantsAnswer` here, rather than rewording the prompt for two contexts, keeps the
+  // offer scoped to turns that actually answered -- the cost-ceiling intent Part B states
+  // throughout, not every turn that merely searched as a side effect of verification.
+  if (wantsAnswer && searched && !incomplete && answer !== "") {
+    const offer = await proposeOffer({ db: serviceDb, ai }, {
+      userId: args.userId, question: text, answer,
+      ...(webCitations[0]?.url !== undefined ? { sourceUrl: webCitations[0].url } : {}),
+      requestId,
+    });
+    if (offer) {
+      yield {
+        type: "offer",
+        statement: offer.statement,
+        ...(offer.sourceUrl !== undefined ? { sourceUrl: offer.sourceUrl } : {}),
+      };
+    }
+    mark("offer resolved");
   }
 
   const { data: message } = await userDb.from("chat_messages").insert({

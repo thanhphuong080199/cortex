@@ -1,8 +1,16 @@
 import { INestApplication } from "@nestjs/common";
+import { createClient } from "@supabase/supabase-js";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createFakeAi, createUserClient } from "@cortex/core";
 import { auth, bootstrapTestApp, makeUser, type TestUser } from "./harness";
+
+// A dedicated admin client, built the same way notes.e2e.test.ts's does, to read memory_facts
+// (client-visible only through `select`, per 00005:61) and notes directly -- proving what
+// actually landed in the tables rather than trusting the 204 alone.
+const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+  auth: { persistSession: false },
+});
 
 let app: INestApplication;
 let alice: TestUser;
@@ -149,5 +157,46 @@ describe("POST /assistant", () => {
     const { data: messages } = await bobDb
       .from("chat_messages").select("content").eq("session_id", session!.id);
     expect(messages?.map((m) => m.content)).toEqual(["bob's private thought"]);
+  });
+});
+
+describe("POST /assistant/decline", () => {
+  it("rejects an unauthenticated request", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/assistant/decline")
+      .send({ statement: "Cá hồi giàu omega-3." });
+    expect(res.status).toBe(401);
+  });
+
+  // declineOfferInput is .strict(): a body-supplied userId must be a 400, not a value the
+  // server quietly drops, matching assistantInput's own rule.
+  it("rejects a body carrying an extra field", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/assistant/decline")
+      .set(auth(alice.token))
+      .send({ statement: "x", userId: "someone-else" });
+    expect(res.status).toBe(400);
+  });
+
+  // The task's whole point, end to end: a fresh user PER RUN (a random suffix, not a static
+  // email) so the assertions below are unambiguous. makeUser upserts by email -- a static email
+  // would reuse the same user id across repeated local test runs, and the SECOND run's
+  // memory_facts row would land alongside the FIRST run's still-there row, breaking the exact
+  // single-row equality below for a reason that has nothing to do with this endpoint.
+  it("records a decline without writing a note", async () => {
+    const carol = await makeUser(`api-assistant-carol-${crypto.randomUUID()}@test.local`);
+
+    await request(app.getHttpServer())
+      .post("/assistant/decline")
+      .set(auth(carol.token))
+      .send({ statement: "Cá hồi giàu omega-3." })
+      .expect(204);
+
+    const { data: facts } = await admin.from("memory_facts")
+      .select("category, status").eq("user_id", carol.id);
+    expect(facts).toEqual([{ category: "assistant_offer", status: "rejected" }]);
+
+    const { data: notes } = await admin.from("notes").select("id").eq("user_id", carol.id);
+    expect(notes, "declining must never write a note").toHaveLength(0);
   });
 });

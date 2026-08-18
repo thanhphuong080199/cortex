@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantBox, type TranscriptTurn } from "./assistant-box";
+import { Provenance } from "./provenance";
+import { Markdown } from "./markdown";
 
 const sse = (events: [string, unknown][]) =>
   new Response(
@@ -96,7 +98,6 @@ describe("AssistantBox", () => {
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
     expect(await screen.findByText(/health/)).toBeInTheDocument();
-    expect(await screen.findByText(/Older note/)).toBeInTheDocument();
     expect(await screen.findByText(/Đã lưu\./)).toBeInTheDocument();
   });
 
@@ -210,6 +211,118 @@ describe("AssistantBox", () => {
     expect(calls.filter((u) => u.endsWith("/assistant"))).toHaveLength(1);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  // The offer's entry point: a fact the answer contributed that the user's own notes did not
+  // have, carried on its own SSE event exactly like `web` already is.
+  it("shows the offer and saves it on accept", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url).endsWith("/notes")) return new Response(JSON.stringify({ id: "n1" }), { status: 201 });
+      if (String(url).endsWith("/notes/save-answer")) {
+        return new Response(JSON.stringify({ id: "m1" }), { status: 201 });
+      }
+      return sse([
+        ["token", { text: "Cá hồi giàu omega-3." }],
+        ["offer", { statement: "Cá hồi giàu omega-3.", sourceUrl: "https://e.com/a" }],
+        ["done", { messageId: "m1", sessionId: "s1" }],
+      ]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Lưu" }));
+
+    const saveCall = calls.find((c) => c.url.endsWith("/notes/save-answer"));
+    expect(saveCall).toBeDefined();
+    expect(saveCall?.init?.method).toBe("POST");
+    expect(JSON.parse(String(saveCall?.init?.body))).toEqual({
+      statement: "Cá hồi giàu omega-3.", sourceUrl: "https://e.com/a",
+    });
+    // Accepting clears the row -- it is a one-shot prompt, not a standing widget.
+    expect(screen.queryByRole("button", { name: "Lưu" })).toBeNull();
+  });
+
+  // "Costs nothing" is a claim about LATENCY as much as about writes. The offer must be gone
+  // before the request settles, so a slow or dead /assistant/decline is invisible to the user.
+  // A `fetch` awaited ahead of setOffer(null) passes every other test in this file and fails
+  // only this one -- which is the whole reason it is written.
+  it("clears the offer without waiting for the decline to land", async () => {
+    let resolveDecline!: (res: Response) => void;
+    const declinePromise = new Promise<Response>((resolve) => { resolveDecline = resolve; });
+    globalThis.fetch = (async (url: string) => {
+      if (String(url).endsWith("/notes")) return new Response(JSON.stringify({ id: "n1" }), { status: 201 });
+      if (String(url).endsWith("/assistant/decline")) return declinePromise;
+      return sse([
+        ["token", { text: "Cá hồi giàu omega-3." }],
+        ["offer", { statement: "Cá hồi giàu omega-3." }],
+        ["done", { messageId: "m1", sessionId: "s1" }],
+      ]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Bỏ qua" }));
+
+    // The request is still in flight -- resolveDecline has not been called.
+    expect(screen.queryByRole("group", { name: "Lưu vào notes?" })).toBeNull();
+    resolveDecline(new Response(null, { status: 204 }));
+  });
+
+  // The other half of "costs nothing": no note, from the client's side. The accept path posts to
+  // /notes/save-answer, and the natural way to break this is one shared handler with a flag.
+  //
+  // Review finding: the two tests above/below this one only ever asserted the ABSENCE of a
+  // save call and the offer UI clearing -- both would still pass if declineOffer were reverted
+  // to Task 12's no-op placeholder (setOffer(null) alone). The `/assistant/decline` assertion
+  // below is what actually proves the button records the decline, not just hides the offer.
+  it("posts no save when the offer is declined, and posts the decline itself", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url));
+      if (String(url).endsWith("/notes")) return new Response(JSON.stringify({ id: "n1" }), { status: 201 });
+      if (String(url).endsWith("/assistant/decline")) return new Response(null, { status: 204 });
+      return sse([
+        ["token", { text: "ok" }],
+        ["offer", { statement: "Cá hồi giàu omega-3." }],
+        ["done", { messageId: "m1", sessionId: "s1" }],
+      ]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Bỏ qua" }));
+
+    // Waits for the microtask the fire-and-forget fetch runs on -- declineOffer does not await
+    // it, so without this the assertion below could run before `calls` has been pushed to.
+    await waitFor(() => expect(calls.some((u) => u.endsWith("/assistant/decline"))).toBe(true));
+    expect(calls.some((u) => u.endsWith("/notes/save-answer"))).toBe(false);
+  });
+
+  // §11's "easy to ignore" is only true if it is genuinely optional. A turn with no offer must
+  // render no row at all -- not an empty one waiting to be filled.
+  it("renders nothing when no offer arrives", async () => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([
+            ["token", { text: "ok" }],
+            ["done", { messageId: "m1", sessionId: "s1" }],
+          ])) as typeof fetch;
+
+    render(<AssistantBox token="t" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(screen.getByText("ok")).toBeInTheDocument());
+    expect(screen.queryByRole("group", { name: "Lưu vào notes?" })).toBeNull();
+  });
 });
 
 const turn = (over: Partial<TranscriptTurn> = {}): TranscriptTurn => ({
@@ -224,21 +337,6 @@ describe("the transcript", () => {
     ]} />);
     expect(screen.getByText("hôm nay tôi chạy bộ")).toBeInTheDocument();
     expect(screen.getByText("Đã lưu vào health.")).toBeInTheDocument();
-  });
-
-  // A reloaded turn must look like the turn did while it streamed -- same component, same
-  // split. Rendering a persisted turn's citations differently is how "did it remember?"
-  // becomes a question the user has to ask.
-  it("renders a past turn's note and web provenance in the same split blocks", () => {
-    render(<AssistantBox token="t" initialTurns={[turn({
-      citations: [
-        { type: "note", noteId: "n1", title: "Dune", createdAt: null, snippet: "s", score: 1, matchedBy: "fts" },
-        { type: "web", url: "https://a.example", title: "a" },
-      ],
-    })]} />);
-    expect(screen.getByRole("heading", { name: "Từ notes của bạn" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Từ web" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "a" })).toHaveAttribute("href", "https://a.example");
   });
 
   // THE ONE THAT IS INVISIBLE OTHERWISE. retrieval_meta.incomplete marks an answer the stream
@@ -256,42 +354,6 @@ describe("the transcript", () => {
   it("does not mark a complete answer", () => {
     render(<AssistantBox token="t" initialTurns={[turn()]} />);
     expect(screen.queryByText(/interrupted|bị gián đoạn/i)).toBeNull();
-  });
-
-  // "Untitled" x5, observed 2026-08-16. Notes captured through the chat box have title = null,
-  // so every citation rendered the same placeholder -- five identical rows presented to the
-  // user as provenance. The snippet is right there and is what the sidebar already falls back
-  // to (note-list.tsx:16).
-  it("falls back to the snippet when a cited note has no title", () => {
-    render(<AssistantBox token="t" initialTurns={[turn({
-      citations: [{
-        type: "note", noteId: "n1", title: null, createdAt: null,
-        snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng", score: 1, matchedBy: "fts",
-      }],
-    })]} />);
-    expect(screen.getByText(/Ngày mai có hẹn đi xem spiderman/)).toBeInTheDocument();
-    expect(screen.queryByText("Untitled")).toBeNull();
-  });
-
-  it("prefers a real title over the snippet", () => {
-    render(<AssistantBox token="t" initialTurns={[turn({
-      citations: [{ type: "note", noteId: "n1", title: "Dune", createdAt: null, snippet: "body", score: 1, matchedBy: "fts" }],
-    })]} />);
-    expect(screen.getByText("Dune")).toBeInTheDocument();
-  });
-
-  // The same information the prompt gets, shown to the user -- so "why did it say that?" is
-  // answerable by looking. It also makes five citations from five different days legible as five
-  // different notes, which "Untitled" x5 never was.
-  it("shows each cited note's date", () => {
-    render(<AssistantBox token="t" initialTurns={[{
-      id: "a1", role: "assistant", content: "…", incomplete: false,
-      citations: [{
-        type: "note", noteId: "n1", title: null, snippet: "Ngày mai có hẹn đi xem spiderman",
-        score: 1, matchedBy: "fts", createdAt: "2026-08-12T03:00:00.000Z",
-      }],
-    }]} />);
-    expect(screen.getByText(/12-08-2026/)).toBeInTheDocument();
   });
 
   // The naive version double-renders the last turn: once from the box's streaming state and
@@ -475,5 +537,84 @@ describe("the loading phases", () => {
   it("shows no indicator when nothing is in flight", () => {
     render(<AssistantBox token="t" initialTurns={[]} />);
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+describe("Markdown", () => {
+  it("renders emphasis as elements rather than literal asterisks", () => {
+    const { container } = render(<Markdown>{"**Cá hồi** tốt cho mắt."}</Markdown>);
+    expect(container.querySelector("strong")).toHaveTextContent("Cá hồi");
+    expect(container.textContent).not.toContain("**");
+  });
+
+  it("renders a list as a list", () => {
+    const { container } = render(<Markdown>{"- cá hồi\n- rau xanh"}</Markdown>);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+  });
+
+  // NOT DECORATION. These URLs are chosen by the MODEL, from grounding results we did not vet
+  // -- exactly the case provenance.tsx:53 already hardens for. A rendered link without these
+  // hands the opener a window reference back into this tab.
+  it("hardens links the model produced", () => {
+    render(<Markdown>{"xem [ở đây](https://example.com/x)"}</Markdown>);
+    const link = screen.getByRole("link", { name: "ở đây" });
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noreferrer"));
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
+  // Raw HTML must NOT be rendered. react-markdown is safe by default (no rehype-raw), and this
+  // asserts that nobody adds it later for "richer" output -- model output is untrusted text and
+  // this component is the only place it becomes DOM.
+  it("does not render raw html from model output", () => {
+    const { container } = render(<Markdown>{"<img src=x onerror=alert(1)>"}</Markdown>);
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  // A half-written bold marker mid-stream must render as text, not swallow the rest of the
+  // answer. This is what every token between "**" and its closing pair looks like.
+  it("renders an unterminated marker as text while streaming", () => {
+    const { container } = render(<Markdown>{"**Cá h"}</Markdown>);
+    expect(container.textContent).toContain("Cá h");
+  });
+});
+
+describe("provenance", () => {
+  const noteCitation = {
+    type: "note" as const, noteId: "n1", title: null, createdAt: "2026-08-18T02:00:00.000Z",
+    snippet: "dạo này hơi mỏi mắt", score: 0.9, matchedBy: "fts",
+  };
+  const webCitation = { type: "web" as const, url: "https://e.com/a", title: "Eye health" };
+
+  // The box being removed. Asserted on the HEADING, not on the snippet text: the snippet is
+  // the user's own message, which also appears in their own bubble in the transcript, so a
+  // snippet-based assertion would stay red for the wrong reason.
+  it("does not render a notes section", () => {
+    render(<Provenance citations={[noteCitation]} />);
+    expect(screen.queryByText(/Từ notes của bạn/i)).toBeNull();
+  });
+
+  // THE ONE THAT MATTERS MORE THAN THE REMOVAL. The web block is a Google terms-of-service
+  // obligation, not a design choice, and it is rendered by the same component from the same
+  // array -- so the natural way to break it is to delete one filter too many.
+  it("still renders the web section", () => {
+    render(<Provenance citations={[noteCitation, webCitation]} />);
+    expect(screen.getByText("Từ web")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Eye health" })).toHaveAttribute("href", webCitation.url);
+  });
+
+  // Same obligation, the other half: the entry-point widget must survive on a grounded turn.
+  it("still renders the grounding entry point", () => {
+    const { container } = render(
+      <Provenance citations={[webCitation]} entryPoint='<div id="gse">chips</div>' />,
+    );
+    expect(container.querySelector("#gse")).not.toBeNull();
+  });
+
+  // A turn whose only citations are notes must now render NOTHING at all -- not an empty
+  // <section> with a heading and no list, which is what a half-deletion leaves behind.
+  it("renders nothing when the only citations are notes", () => {
+    const { container } = render(<Provenance citations={[noteCitation]} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });
