@@ -10,7 +10,8 @@ const NOW = new Date("2026-08-16T04:00:00.000Z");
 const TZ = "Asia/Ho_Chi_Minh";
 
 const cite = (over: Partial<Citation> = {}): Citation => ({
-  type: "note", noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts", ...over,
+  type: "note", noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts",
+  createdAt: null, ...over,
 });
 
 const turn = (role: ThreadTurn["role"], content: string): ThreadTurn => ({
