@@ -219,7 +219,13 @@ export function AssistantBox(
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/assistant`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-        body: JSON.stringify({ noteId: note.id }),
+        body: JSON.stringify({
+          noteId: note.id,
+          // Read per turn rather than captured once: it costs nothing and it is correct across
+          // a DST change or a flight. The server validates it (resolveTimeZone) -- this value
+          // comes from the browser, and the browser is not trusted input.
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        }),
       });
       mark(`fetch headers received (status ${res.status})`);
       if (!res.ok || !res.body) {

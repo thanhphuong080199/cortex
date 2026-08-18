@@ -65,12 +65,16 @@ describe("readCitation", () => {
     expect(readCitation({
       noteId: "n1", title: "Dune", snippet: "…", score: 0.8, matchedBy: "fts",
     })).toEqual({
-      type: "note", noteId: "n1", title: "Dune", snippet: "…", score: 0.8, matchedBy: "fts",
+      type: "note", noteId: "n1", title: "Dune", createdAt: null, snippet: "…", score: 0.8,
+      matchedBy: "fts",
     });
   });
 
   it("reads an explicit note citation unchanged", () => {
-    const row = { type: "note", noteId: "n1", title: null, snippet: "s", score: 0.5, matchedBy: "vec" };
+    const row = {
+      type: "note", noteId: "n1", title: null, createdAt: null, snippet: "s", score: 0.5,
+      matchedBy: "vec",
+    };
     expect(readCitation(row)).toEqual(row);
   });
 
@@ -86,5 +90,31 @@ describe("readCitation", () => {
     expect(readCitation("nope")).toBeNull();
     expect(readCitation({ type: "web" })).toBeNull();          // no url
     expect(readCitation({ title: "no ids at all" })).toBeNull(); // neither noteId nor url
+  });
+
+  // THE BACKWARD-COMPATIBILITY GUARD, second edition. Stage C3 added `type` and defaulted its
+  // absence; this adds `createdAt` and defaults its absence to null. Every chat_messages row
+  // written before today has citations with no date, and there is no backfill -- the column is
+  // jsonb and rewriting a user's conversation history is not worth a migration. Rendering a
+  // missing date as anything but nothing is how a reloaded transcript starts asserting dates
+  // nobody wrote.
+  it("reads a citation with no createdAt as having no date", () => {
+    expect(readCitation({
+      type: "note", noteId: "n1", title: null, snippet: "s", score: 1, matchedBy: "fts",
+    })).toMatchObject({ createdAt: null });
+  });
+
+  it("reads a createdAt when there is one", () => {
+    expect(readCitation({
+      type: "note", noteId: "n1", title: null, snippet: "s", score: 1, matchedBy: "fts",
+      createdAt: "2026-08-12T03:00:00.000Z",
+    })).toMatchObject({ createdAt: "2026-08-12T03:00:00.000Z" });
+  });
+
+  it("ignores a createdAt that is not a string", () => {
+    expect(readCitation({
+      type: "note", noteId: "n1", title: null, snippet: "s", score: 1, matchedBy: "fts",
+      createdAt: 1_754_000_000,
+    })).toMatchObject({ createdAt: null });
   });
 });

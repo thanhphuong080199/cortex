@@ -1,3 +1,4 @@
+import { formatNoteDate, formatToday } from "@cortex/shared";
 import type { ThreadTurn } from "./context.js";
 import type { Citation } from "./retrieve.js";
 
@@ -10,11 +11,40 @@ const LANGUAGE_RULE =
   "Reply in the same language the user wrote in. Do not translate their words, their tags, " +
   "or their notes into another language.";
 
-const renderHistory = (history: ThreadTurn[]) =>
+/**
+ * The temporal anchor, on both prompts that read the user's own material.
+ *
+ * Two facts and one rule, and the rule is the part that fixes the observed defect: the date
+ * beside a note makes "mai" RESOLVABLE, but the model still resolves it against today unless
+ * it is told not to. The last sentence exists because "your appointment is tomorrow morning"
+ * about an appointment four days gone is not a small error -- it is the assistant confidently
+ * inventing a future.
+ *
+ * Vietnamese, matching LANGUAGE_RULE's reasoning: an English block inside an otherwise
+ * Vietnamese prompt nudges the reply toward English.
+ */
+const temporalRule = (now: Date, timeZone: string) =>
+  `Hôm nay là ${formatToday(now, timeZone)}.\n` +
+  "Mỗi note và mỗi lượt hội thoại bên dưới có ngày trong ngoặc. Từ chỉ thời gian bên trong " +
+  "chúng (\"mai\", \"hôm qua\", \"tuần tới\", \"thứ 3 tới\") tính từ NGÀY VIẾT của note hoặc " +
+  "lượt đó, KHÔNG phải từ hôm nay. Nếu một mốc thời gian đã qua, nói rõ là đã qua — đừng nói " +
+  "về nó như việc sắp xảy ra. Note không có ngày thì đừng đoán ngày cho nó. Riêng note hoặc " +
+  "câu hỏi ở cuối cùng — cái người dùng vừa viết — là của HÔM NAY.";
+
+// `timeZone` is optional here (not on the two answer/acknowledge builders) solely so
+// buildChitchatPrompt -- which has no clock at all -- can keep calling this with one argument.
+// Its own history renders with no dates, which is correct: small talk carries no temporal rule
+// to anchor them against.
+const renderHistory = (history: ThreadTurn[], timeZone?: string) =>
   history.length === 0
     ? ""
     : `\n\nEarlier in this conversation:\n${history
-        .map((t) => `${t.role === "user" ? "User" : "You"}: ${t.content}`)
+        .map((t) => {
+          const on = timeZone ? formatNoteDate(t.createdAt, timeZone) : null;
+          // The date has been on every ThreadTurn since C1 and was dropped here. "Mai" said
+          // three turns ago is anchored to the turn, not to now, exactly like a note's is.
+          return `${on ? `(${on}) ` : ""}${t.role === "user" ? "User" : "You"}: ${t.content}`;
+        })
         .join("\n")}`;
 
 // `"failed"` is a distinct third state from an empty array, and the distinction is the whole
@@ -22,14 +52,19 @@ const renderHistory = (history: ThreadTurn[]) =>
 // retrieval never ran to completion (the search RPC or the embed call threw). Collapsing the two
 // into "no citations" makes the model assert "the user has no notes matching this" on a turn
 // where the server never actually got to look -- a false claim, not a hedge.
-const renderCitations = (citations: Citation[] | "failed") =>
+const renderCitations = (citations: Citation[] | "failed", timeZone: string) =>
   citations === "failed"
     ? "\n\nThe user's notes could not be searched right now (a technical failure, not an empty " +
       "corpus). Say so plainly. Do not claim they have no notes on this."
     : citations.length === 0
       ? "\n\nThe user has no notes matching this."
       : `\n\nThe user's own notes:\n${citations
-          .map((c, i) => `[${i + 1}] ${c.title ? `${c.title}: ` : ""}${c.snippet}`)
+          .map((c, i) => {
+            // Spread-if in string form: a citation with no date renders with no parenthesis at
+            // all, never "()" or "(null)". Everything in this prompt is read as fact.
+            const on = c.createdAt ? formatNoteDate(c.createdAt, timeZone) : null;
+            return `[${i + 1}] ${on ? `(${on}) ` : ""}${c.title ? `${c.title}: ` : ""}${c.snippet}`;
+          })
           .join("\n")}`;
 
 /**
@@ -43,11 +78,14 @@ export function buildAnswerPrompt(a: {
   question: string;
   citations: Citation[] | "failed";
   history: ThreadTurn[];
+  timeZone: string;
+  now: Date;
 }): string {
   return [
     "You are the user's second brain and conversational assistant. Answer their question using " +
       "their own notes first.",
     LANGUAGE_RULE,
+    temporalRule(a.now, a.timeZone),
     "Cite the notes you used by their bracketed number, like [1].",
     "If their notes do not fully answer the question, you may fill the gap -- from the web, or " +
       "from your own general knowledge -- but say plainly that it is not from their notes " +
@@ -58,8 +96,8 @@ export function buildAnswerPrompt(a: {
     "You may search the web when their notes cannot answer the question, or when the question " +
       "is time-sensitive. Answer from their notes first.",
     "Never present web content as the user's own thinking. Say where something came from.",
-    renderCitations(a.citations),
-    renderHistory(a.history),
+    renderCitations(a.citations, a.timeZone),
+    renderHistory(a.history, a.timeZone),
     `\n\nTheir question: ${a.question}`,
   ].join("\n");
 }
@@ -75,10 +113,13 @@ export function buildAcknowledgePrompt(a: {
   tags: string[];
   related: Citation[] | "failed";
   history: ThreadTurn[];
+  timeZone: string;
+  now: Date;
 }): string {
   return [
     "The user just saved a note. Acknowledge it in one or two sentences.",
     LANGUAGE_RULE,
+    temporalRule(a.now, a.timeZone),
     // Named in words, never interpolated raw: `${a.domain}` on a null renders the string "null"
     // into the prompt, and an empty tag list renders a dangling "You tagged it: ." -- both are
     // things the model then has to interpret.
@@ -88,8 +129,8 @@ export function buildAcknowledgePrompt(a: {
     "Mention what you attached, briefly. If any of their earlier notes below are genuinely " +
       "related, say so and cite them like [1].",
     "The user did not ask a question. Do not answer one, and do not invent one to answer.",
-    renderCitations(a.related),
-    renderHistory(a.history),
+    renderCitations(a.related, a.timeZone),
+    renderHistory(a.history, a.timeZone),
     `\n\nTheir note: ${a.note}`,
   ].join("\n");
 }

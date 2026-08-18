@@ -77,6 +77,7 @@ export class AssistantController {
           sessionId: body.sessionId,
           content: body.content,
           createdAt: body.createdAt,
+          timeZone: body.timeZone,
           budgetUsd,
           signal: abort.signal,
         },

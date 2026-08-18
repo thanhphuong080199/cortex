@@ -162,6 +162,25 @@ describe("AssistantBox", () => {
     expect(screen.queryByText("ghi chú chưa lưu", { selector: ".bubble.user p" })).toBeNull();
   });
 
+  it("sends the browser's time zone with the turn", async () => {
+    const bodies: string[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/notes")) return new Response(JSON.stringify({ id: "n1" }), { status: 201 });
+      bodies.push(String(init?.body ?? ""));
+      return sse([["done", { messageId: "m1", sessionId: "s1" }]]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" initialTurns={[]} />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    // Whatever the test runner's zone is -- asserting a literal would pin the CI machine's
+    // configuration, which is not the claim. The claim is that a real zone is sent.
+    const sent = JSON.parse(bodies[0]!) as { timeZone?: string };
+    expect(sent.timeZone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  });
+
   it("retrying re-submits the same text and can succeed the second time", async () => {
     const calls: string[] = [];
     let noteAttempt = 0;
@@ -213,7 +232,7 @@ describe("the transcript", () => {
   it("renders a past turn's note and web provenance in the same split blocks", () => {
     render(<AssistantBox token="t" initialTurns={[turn({
       citations: [
-        { type: "note", noteId: "n1", title: "Dune", snippet: "s", score: 1, matchedBy: "fts" },
+        { type: "note", noteId: "n1", title: "Dune", createdAt: null, snippet: "s", score: 1, matchedBy: "fts" },
         { type: "web", url: "https://a.example", title: "a" },
       ],
     })]} />);
@@ -246,7 +265,7 @@ describe("the transcript", () => {
   it("falls back to the snippet when a cited note has no title", () => {
     render(<AssistantBox token="t" initialTurns={[turn({
       citations: [{
-        type: "note", noteId: "n1", title: null,
+        type: "note", noteId: "n1", title: null, createdAt: null,
         snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng", score: 1, matchedBy: "fts",
       }],
     })]} />);
@@ -256,9 +275,23 @@ describe("the transcript", () => {
 
   it("prefers a real title over the snippet", () => {
     render(<AssistantBox token="t" initialTurns={[turn({
-      citations: [{ type: "note", noteId: "n1", title: "Dune", snippet: "body", score: 1, matchedBy: "fts" }],
+      citations: [{ type: "note", noteId: "n1", title: "Dune", createdAt: null, snippet: "body", score: 1, matchedBy: "fts" }],
     })]} />);
     expect(screen.getByText("Dune")).toBeInTheDocument();
+  });
+
+  // The same information the prompt gets, shown to the user -- so "why did it say that?" is
+  // answerable by looking. It also makes five citations from five different days legible as five
+  // different notes, which "Untitled" x5 never was.
+  it("shows each cited note's date", () => {
+    render(<AssistantBox token="t" initialTurns={[{
+      id: "a1", role: "assistant", content: "…", incomplete: false,
+      citations: [{
+        type: "note", noteId: "n1", title: null, snippet: "Ngày mai có hẹn đi xem spiderman",
+        score: 1, matchedBy: "fts", createdAt: "2026-08-12T03:00:00.000Z",
+      }],
+    }]} />);
+    expect(screen.getByText(/12-08-2026/)).toBeInTheDocument();
   });
 
   // The naive version double-renders the last turn: once from the box's streaming state and

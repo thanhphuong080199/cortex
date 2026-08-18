@@ -3,8 +3,15 @@ import type { ThreadTurn } from "./context.js";
 import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
 import type { Citation } from "./retrieve.js";
 
+// Module-level so every pre-existing call site below can pass the now-required `timeZone`/`now`
+// without each test inventing its own clock -- only the temporal-anchoring tests below care
+// about the actual values.
+const NOW = new Date("2026-08-16T04:00:00.000Z");
+const TZ = "Asia/Ho_Chi_Minh";
+
 const cite = (over: Partial<Citation> = {}): Citation => ({
-  type: "note", noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts", ...over,
+  type: "note", noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts",
+  createdAt: null, ...over,
 });
 
 const turn = (role: ThreadTurn["role"], content: string): ThreadTurn => ({
@@ -17,7 +24,9 @@ describe("buildAnswerPrompt", () => {
   // but renders the user's own tag "thể dục" as "exercise" has rewritten their notes back at
   // them.
   it("tells the model to answer in the user's language and not to translate their words", () => {
-    const p = buildAnswerPrompt({ question: "tôi ngủ mấy tiếng?", citations: [], history: [] });
+    const p = buildAnswerPrompt({
+      question: "tôi ngủ mấy tiếng?", citations: [], history: [], timeZone: TZ, now: NOW,
+    });
     expect(p).toMatch(/same language/i);
     expect(p).toMatch(/do not translate/i);
   });
@@ -29,7 +38,7 @@ describe("buildAnswerPrompt", () => {
     const p = buildAnswerPrompt({
       question: "q",
       citations: [cite({ noteId: "a", snippet: "first" }), cite({ noteId: "b", snippet: "second" })],
-      history: [],
+      history: [], timeZone: TZ, now: NOW,
     });
     // Paired with the heading, not asserted in isolation: `toContain("[1] first")` alone
     // survives deleting "The user's own notes:", and that heading is the only thing telling the
@@ -41,13 +50,15 @@ describe("buildAnswerPrompt", () => {
     const p = buildAnswerPrompt({
       question: "q",
       citations: [cite({ title: "Giấc ngủ", snippet: "ngủ 5 tiếng" })],
-      history: [],
+      history: [], timeZone: TZ, now: NOW,
     });
     expect(p).toContain("[1] Giấc ngủ: ngủ 5 tiếng");
   });
 
   it("tells the model there are no matching notes, and that it may answer from general knowledge instead", () => {
-    const empty = buildAnswerPrompt({ question: "q", citations: [], history: [] });
+    const empty = buildAnswerPrompt({
+      question: "q", citations: [], history: [], timeZone: TZ, now: NOW,
+    });
     expect(empty).toMatch(/no notes matching/i);
     expect(empty).toMatch(/general knowledge/i);
     expect(empty).toMatch(/say plainly/i);
@@ -55,7 +66,7 @@ describe("buildAnswerPrompt", () => {
     // shows up as a missing citation, and a prompt that tells the model there is nothing to
     // read WHILE handing it notes is the harder failure to spot in an eval.
     const withNotes = buildAnswerPrompt({
-      question: "q", citations: [cite({ snippet: "first" })], history: [],
+      question: "q", citations: [cite({ snippet: "first" })], history: [], timeZone: TZ, now: NOW,
     });
     expect(withNotes).not.toMatch(/no notes matching/i);
   });
@@ -65,15 +76,19 @@ describe("buildAnswerPrompt", () => {
   // nothing" and must not be said with the same words -- the empty-corpus line is a claim the
   // server does not get to make when it never actually looked.
   it("says the search itself failed, distinct from finding nothing and from finding notes", () => {
-    const failed = buildAnswerPrompt({ question: "q", citations: "failed", history: [] });
+    const failed = buildAnswerPrompt({
+      question: "q", citations: "failed", history: [], timeZone: TZ, now: NOW,
+    });
     expect(failed).toMatch(/could not be searched/i);
     expect(failed).not.toMatch(/no notes matching/i);
 
-    const empty = buildAnswerPrompt({ question: "q", citations: [], history: [] });
+    const empty = buildAnswerPrompt({
+      question: "q", citations: [], history: [], timeZone: TZ, now: NOW,
+    });
     expect(empty).not.toMatch(/could not be searched/i);
 
     const withNotes = buildAnswerPrompt({
-      question: "q", citations: [cite({ snippet: "first" })], history: [],
+      question: "q", citations: [cite({ snippet: "first" })], history: [], timeZone: TZ, now: NOW,
     });
     expect(withNotes).not.toMatch(/could not be searched/i);
   });
@@ -81,8 +96,9 @@ describe("buildAnswerPrompt", () => {
   // The single most important string in the prompt, and the one nothing else asserts: every
   // other test here passes with the question line deleted.
   it("carries the question itself", () => {
-    expect(buildAnswerPrompt({ question: "tôi ngủ mấy tiếng?", citations: [], history: [] }))
-      .toContain("Their question: tôi ngủ mấy tiếng?");
+    expect(buildAnswerPrompt({
+      question: "tôi ngủ mấy tiếng?", citations: [], history: [], timeZone: TZ, now: NOW,
+    })).toContain("Their question: tôi ngủ mấy tiếng?");
   });
 
   // Task 5 built the rolling window; this is the only thing that proves it is rendered. The
@@ -92,18 +108,21 @@ describe("buildAnswerPrompt", () => {
       question: "q",
       citations: [],
       history: [turn("user", "câu hỏi cũ"), turn("assistant", "câu trả lời cũ")],
+      timeZone: TZ, now: NOW,
     });
     expect(p).toContain("User: câu hỏi cũ");
     expect(p).toContain("You: câu trả lời cũ");
   });
 
   it("adds no history section at all on the first turn", () => {
-    expect(buildAnswerPrompt({ question: "q", citations: [], history: [] }))
+    expect(buildAnswerPrompt({ question: "q", citations: [], history: [], timeZone: TZ, now: NOW }))
       .not.toMatch(/earlier in this conversation/i);
   });
 
   it("tells the answer prompt when it may search and what it may never claim", () => {
-    const p = buildAnswerPrompt({ question: "Dune 3 khi nào?", citations: [], history: [] });
+    const p = buildAnswerPrompt({
+      question: "Dune 3 khi nào?", citations: [], history: [], timeZone: TZ, now: NOW,
+    });
     expect(p).toMatch(/time-sensitive/i);
     expect(p).toMatch(/never present web content as the user's own/i);
   });
@@ -113,6 +132,7 @@ describe("buildAcknowledgePrompt", () => {
   it("carries what was attached, so the reply can name it", () => {
     const p = buildAcknowledgePrompt({
       note: "hôm nay tôi chạy bộ", domain: "health", tags: ["thể dục"], related: [], history: [],
+      timeZone: TZ, now: NOW,
     });
     // Each value paired with the label that claims it. Asserting mere presence cannot tell the
     // two apart: swap domain and tags in the renderer and the prompt reads "You filed it under:
@@ -128,7 +148,7 @@ describe("buildAcknowledgePrompt", () => {
   // list renders a dangling "You tagged it: ." -- both are prompts the model has to interpret.
   it("names the absence of a domain and of tags in words", () => {
     const p = buildAcknowledgePrompt({
-      note: "n", domain: null, tags: [], related: [], history: [],
+      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW,
     });
     expect(p).toContain("You filed it under: no domain");
     expect(p).toContain("You tagged it: nothing");
@@ -136,15 +156,16 @@ describe("buildAcknowledgePrompt", () => {
   });
 
   it("forbids inventing a question that was not asked", () => {
-    expect(buildAcknowledgePrompt({ note: "n", domain: null, tags: [], related: [], history: [] }))
-      .toMatch(/did not ask/i);
+    expect(buildAcknowledgePrompt({
+      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW,
+    })).toMatch(/did not ask/i);
   });
 
   // The rule lives in a shared constant, so testing it on one builder does not test it on the
   // other: dropping the constant from this call site alone is a one-line change.
   it("carries the language rule too", () => {
     const p = buildAcknowledgePrompt({
-      note: "n", domain: null, tags: [], related: [], history: [],
+      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW,
     });
     expect(p).toMatch(/same language/i);
     expect(p).toMatch(/do not translate/i);
@@ -152,13 +173,13 @@ describe("buildAcknowledgePrompt", () => {
 
   it("says the search itself failed, distinct from finding nothing and from finding notes", () => {
     const failed = buildAcknowledgePrompt({
-      note: "n", domain: null, tags: [], related: "failed", history: [],
+      note: "n", domain: null, tags: [], related: "failed", history: [], timeZone: TZ, now: NOW,
     });
     expect(failed).toMatch(/could not be searched/i);
     expect(failed).not.toMatch(/no notes matching/i);
 
     const empty = buildAcknowledgePrompt({
-      note: "n", domain: null, tags: [], related: [], history: [],
+      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW,
     });
     expect(empty).not.toMatch(/could not be searched/i);
   });
@@ -166,6 +187,7 @@ describe("buildAcknowledgePrompt", () => {
   it("numbers the related notes the same way the answer prompt does", () => {
     const p = buildAcknowledgePrompt({
       note: "n", domain: null, tags: [], related: [cite({ snippet: "ghi chú cũ" })], history: [],
+      timeZone: TZ, now: NOW,
     });
     expect(p).toContain("The user's own notes:\n[1] ghi chú cũ");
   });
@@ -174,6 +196,7 @@ describe("buildAcknowledgePrompt", () => {
     const p = buildAcknowledgePrompt({
       note: "n", domain: null, tags: [], related: [],
       history: [turn("user", "câu hỏi cũ"), turn("assistant", "câu trả lời cũ")],
+      timeZone: TZ, now: NOW,
     });
     expect(p).toContain("User: câu hỏi cũ");
     expect(p).toContain("You: câu trả lời cũ");
@@ -184,6 +207,7 @@ describe("buildAcknowledgePrompt", () => {
   it("does not tell the acknowledge prompt about searching", () => {
     const p = buildAcknowledgePrompt({
       note: "hôm nay mình ngủ 5 tiếng", domain: "health", tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW,
     });
     expect(p).not.toMatch(/search/i);
   });
@@ -217,5 +241,92 @@ describe("buildChitchatPrompt", () => {
   // It is not the answer branch either: there are no citations to cite and nothing was searched.
   it("does not ask for citations", () => {
     expect(buildChitchatPrompt({ text: "hello", history: [] })).not.toMatch(/\[1\]/);
+  });
+});
+
+const dated = (createdAt: string | null): Citation => ({
+  type: "note", noteId: "n1", title: null,
+  snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng",
+  score: 1, matchedBy: "fts", createdAt,
+});
+
+describe("temporal anchoring", () => {
+  it("tells the answer prompt what today is", () => {
+    const p = buildAnswerPrompt({
+      question: "phim gì", citations: [], history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toContain("16-08-2026");
+  });
+
+  it("tells the acknowledge prompt what today is", () => {
+    const p = buildAcknowledgePrompt({
+      note: "hôm nay mình chạy bộ", domain: null, tags: [], related: [],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toContain("16-08-2026");
+  });
+
+  // THE DEFECT, PINNED. A note written on 12-08 saying "sáng mai" was reported as an
+  // appointment for tomorrow, on 16-08. The date beside the snippet is what makes 13-08
+  // derivable at all.
+  it("dates each cited note", () => {
+    const p = buildAnswerPrompt({
+      question: "phim gì", citations: [dated("2026-08-12T03:00:00.000Z")],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toContain("(12-08-2026)");
+  });
+
+  // Half the fix. The date alone still lets the model read "mai" as tomorrow -- it has to be
+  // told which anchor to measure from, and told that a past moment must be reported as past.
+  it("says relative time inside a note is measured from that note's date", () => {
+    const p = buildAnswerPrompt({
+      question: "phim gì", citations: [dated("2026-08-12T03:00:00.000Z")],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toMatch(/ngày viết|written/i);
+    expect(p).toMatch(/đã qua|already past/i);
+  });
+
+  // A pre-existing citation has no date, and the prompt must simply not date it. A rendered
+  // "(null)" or a today-defaulted date would be an assertion the model then reasons from.
+  it("renders an undated citation with no date at all", () => {
+    const p = buildAnswerPrompt({
+      question: "phim gì", citations: [dated(null)], history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toContain("Ngày mai có hẹn");
+    expect(p).not.toContain("(null)");
+    expect(p).not.toContain("()");
+  });
+
+  // History has carried createdAt on every turn since C1 and renderHistory has always thrown
+  // it away. "Mai" said three turns ago has the same problem as "mai" written in a note.
+  it("dates each turn of the conversation", () => {
+    const p = buildAnswerPrompt({
+      question: "thế còn gì nữa", citations: [], timeZone: TZ, now: NOW,
+      history: [{ role: "user", content: "mai đi xem phim nhé", createdAt: "2026-08-12T03:00:00.000Z" }],
+    });
+    expect(p).toContain("12-08-2026");
+  });
+
+  // Small talk needs no clock, and buildChitchatPrompt (stage C4) takes no timeZone at all.
+  // Asserted so nobody "completes" the set later: every token in that prompt is paid for on
+  // every "haha ok".
+  it("leaves the chitchat prompt without a date header", () => {
+    expect(buildChitchatPrompt({ text: "haha ok", history: [] })).not.toContain("16-08-2026");
+  });
+
+  // THE ORIGINAL DEFECT, ONE STEP EARLIER. "Ngày mai có hẹn đi xem spiderman" is not a citation
+  // read back later -- it is the fresh capture itself, in the acknowledge branch, at the moment
+  // it is written. It carries no createdAt of its own (it's live input, not a row), so read
+  // literally, "note không có ngày thì đừng đoán ngày cho nó" would tell the model to leave ITS
+  // date ambiguous too -- which is backwards: a note the user is submitting right now is, by
+  // construction, from today.
+  it("tells the acknowledge prompt the trailing note itself is from today", () => {
+    const p = buildAcknowledgePrompt({
+      note: "Ngày mai có hẹn đi xem spiderman", domain: null, tags: [], related: [],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toMatch(/HÔM NAY/);
   });
 });

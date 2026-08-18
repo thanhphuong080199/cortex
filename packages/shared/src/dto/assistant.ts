@@ -21,6 +21,17 @@ export const assistantInput = z
     content: z.string().min(1).max(100_000).optional(),
     /** An offline capture's real timestamp, not the reconnect time. Same field NoteService takes. */
     createdAt: z.string().datetime().optional(),
+    /**
+     * The caller's IANA time zone, e.g. "Asia/Ho_Chi_Minh". Web reads it from
+     * `Intl.DateTimeFormat().resolvedOptions().timeZone`, which needs no permission and no
+     * stored setting -- and which follows the user when they travel, unlike a column would.
+     * Mobile does not send it yet (see `stream.ts`'s Hermes/ICU caveat).
+     *
+     * Optional, and never trusted: the server runs it through `resolveTimeZone` before it
+     * reaches Intl. The cap is a sanity bound on an untrusted string, not a real limit -- the
+     * longest IANA identifier is about 30 characters.
+     */
+    timeZone: z.string().max(64).optional(),
   })
   .strict();
 
@@ -50,6 +61,13 @@ export interface Citation {
   type: "note";
   noteId: string;
   title: string | null;
+  /**
+   * When the note was WRITTEN. The anchor every relative expression inside it is measured
+   * from -- "mai" in a note from 12-08 means 13-08, and without this the model resolves it
+   * against today. Nullable because a row that somehow arrives without one must render no
+   * date rather than a wrong one.
+   */
+  createdAt: string | null;
   snippet: string;
   score: number;
   matchedBy: string;
@@ -86,6 +104,7 @@ export function readCitation(raw: unknown): AnyCitation | null {
     type: "note",
     noteId: r.noteId,
     title: typeof r.title === "string" ? r.title : null,
+    createdAt: typeof r.createdAt === "string" ? r.createdAt : null,
     snippet: typeof r.snippet === "string" ? r.snippet : "",
     score: typeof r.score === "number" ? r.score : 0,
     matchedBy: typeof r.matchedBy === "string" ? r.matchedBy : "",

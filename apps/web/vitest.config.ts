@@ -20,5 +20,9 @@ export default defineConfig({
     environment: "node",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     setupFiles: ["./vitest.setup.ts"],
+    // Pinned so date-formatting assertions (provenance.tsx renders with the machine's own
+    // Intl zone) don't silently depend on where the test runs -- a fixture UTC timestamp near
+    // midnight renders a different calendar day west of roughly UTC-3 otherwise.
+    env: { TZ: "UTC" },
   },
 });
