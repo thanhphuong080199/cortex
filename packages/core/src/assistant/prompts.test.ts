@@ -244,6 +244,51 @@ describe("buildChitchatPrompt", () => {
   });
 });
 
+describe("the recall rule", () => {
+  const args = {
+    citations: [cite({ snippet: "mắt mỏi khi đọc lâu" })],
+    history: [],
+    timeZone: "Asia/Ho_Chi_Minh",
+    now: new Date("2026-08-18T03:00:00.000Z"),
+  };
+
+  // Both branches reference the user's own past notes, and both produced the reported tone.
+  // Applying the rule to only one of them fixes half the complaint.
+  it("reaches both prompts that cite the user's notes", () => {
+    for (const p of [
+      buildAnswerPrompt({ question: "mỏi mắt ăn gì", ...args }),
+      buildAcknowledgePrompt({ note: "dạo này mỏi mắt", domain: null, tags: [],
+        related: args.citations, history: [], timeZone: args.timeZone, now: args.now }),
+    ]) {
+      expect(p).toMatch(/recall|remember|nhắc/i);
+    }
+  });
+
+  // The two phrasings actually observed, named in the prompt so the model has something
+  // concrete to avoid. A rule that only says "be natural" is a rule with no failure mode.
+  it("names the report phrasings it is forbidding", () => {
+    const p = buildAnswerPrompt({ question: "mỏi mắt ăn gì", ...args });
+    expect(p).toMatch(/Đã lưu ghi chú/);
+    expect(p).toMatch(/Trong các ghi chú của bạn/);
+  });
+
+  // THE HALF THAT GETS DROPPED. "Do not sound mechanical" alone reads as "stop citing", and a
+  // model that stops emitting [1] takes traceability with it -- the citations are still the
+  // only link between a claim and the note behind it. The rule must forbid the FRAMING and
+  // require the bracket in the same breath.
+  it("keeps the bracket citation while changing how it is introduced", () => {
+    const p = buildAnswerPrompt({ question: "mỏi mắt ăn gì", ...args });
+    expect(p).toMatch(/\[1\]/);
+  });
+
+  // Chitchat has no citations and no filing to talk about. Adding the rule there would be a
+  // paragraph of instruction about a situation that cannot arise on that branch.
+  it("stays off the chitchat prompt", () => {
+    expect(buildChitchatPrompt({ text: "haha ok", history: [] }))
+      .not.toMatch(/Trong các ghi chú của bạn/);
+  });
+});
+
 const dated = (createdAt: string | null): Citation => ({
   type: "note", noteId: "n1", title: null,
   snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng",

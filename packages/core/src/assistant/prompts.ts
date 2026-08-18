@@ -12,6 +12,33 @@ const LANGUAGE_RULE =
   "or their notes into another language.";
 
 /**
+ * How a past note gets brought up. On BOTH prompts that read the user's own material, because
+ * both produced the reported tone.
+ *
+ * The observed replies -- "Đã lưu ghi chú của bạn vào mục không phân loại... nó hoàn toàn
+ * trùng khớp với ghi chú trước đó của bạn [1]" and "Trong các ghi chú của bạn [1, 3] có nhắc
+ * đến việc bạn đang thắc mắc..." -- are not a template this file emits. Nothing here asked for
+ * that shape; the prompts said "cite them like [1]" and nothing about phrasing, so the model
+ * chose a match report. The fix is an instruction, not a template.
+ *
+ * The second half is load-bearing and is the half a later edit will drop: "do not sound
+ * mechanical" on its own reads as "stop citing", and a model that stops emitting [1] takes
+ * every link between a claim and the note behind it. The bracket is required in the same
+ * sentence that forbids the framing.
+ *
+ * Vietnamese examples, matching LANGUAGE_RULE's reasoning: the phrasings being ruled out are
+ * Vietnamese phrasings, and an English paraphrase of them is not the thing to avoid.
+ */
+const RECALL_RULE =
+  "When one of their past notes is relevant, bring it up the way a person would recall " +
+  "something you told them -- \"bạn có nhắc chuyện này rồi\", \"lần trước bạn có hỏi...\" -- " +
+  "inline, in the middle of what you are saying. Do not report a database match: never " +
+  "\"Trong các ghi chú của bạn [1, 3] có nhắc đến...\", never \"Đã lưu ghi chú của bạn vào " +
+  "mục...\", and never state that a match was found or that something is identical to an " +
+  "earlier note. Still carry the bracket, like [1], so they can trace it -- change how you " +
+  "introduce the note, not whether you cite it.";
+
+/**
  * The temporal anchor, on both prompts that read the user's own material.
  *
  * Two facts and one rule, and the rule is the part that fixes the observed defect: the date
@@ -87,6 +114,7 @@ export function buildAnswerPrompt(a: {
     LANGUAGE_RULE,
     temporalRule(a.now, a.timeZone),
     "Cite the notes you used by their bracketed number, like [1].",
+    RECALL_RULE,
     "If their notes do not fully answer the question, you may fill the gap -- from the web, or " +
       "from your own general knowledge -- but say plainly that it is not from their notes " +
       "(e.g. \"Trong note của bạn không có, nhưng theo mình biết...\").",
@@ -126,8 +154,12 @@ export function buildAcknowledgePrompt(a: {
     `You filed it under: ${a.domain ?? "no domain"}. You tagged it: ${
       a.tags.length > 0 ? a.tags.join(", ") : "nothing"
     }.`,
+    // The filing confirmation STAYS. The complaint was about phrasing, not about the
+    // acknowledgement telling the user what was attached -- that is the content this branch
+    // exists to deliver (parent spec §6, obligation 3).
     "Mention what you attached, briefly. If any of their earlier notes below are genuinely " +
       "related, say so and cite them like [1].",
+    RECALL_RULE,
     "The user did not ask a question. Do not answer one, and do not invent one to answer.",
     renderCitations(a.related, a.timeZone),
     renderHistory(a.history, a.timeZone),
