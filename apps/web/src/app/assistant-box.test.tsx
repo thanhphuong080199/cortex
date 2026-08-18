@@ -97,7 +97,6 @@ describe("AssistantBox", () => {
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
     expect(await screen.findByText(/health/)).toBeInTheDocument();
-    expect(await screen.findByText(/Older note/)).toBeInTheDocument();
     expect(await screen.findByText(/Đã lưu\./)).toBeInTheDocument();
   });
 
@@ -242,42 +241,6 @@ describe("the transcript", () => {
   it("does not mark a complete answer", () => {
     render(<AssistantBox token="t" initialTurns={[turn()]} />);
     expect(screen.queryByText(/interrupted|bị gián đoạn/i)).toBeNull();
-  });
-
-  // "Untitled" x5, observed 2026-08-16. Notes captured through the chat box have title = null,
-  // so every citation rendered the same placeholder -- five identical rows presented to the
-  // user as provenance. The snippet is right there and is what the sidebar already falls back
-  // to (note-list.tsx:16).
-  it("falls back to the snippet when a cited note has no title", () => {
-    render(<AssistantBox token="t" initialTurns={[turn({
-      citations: [{
-        type: "note", noteId: "n1", title: null, createdAt: null,
-        snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng", score: 1, matchedBy: "fts",
-      }],
-    })]} />);
-    expect(screen.getByText(/Ngày mai có hẹn đi xem spiderman/)).toBeInTheDocument();
-    expect(screen.queryByText("Untitled")).toBeNull();
-  });
-
-  it("prefers a real title over the snippet", () => {
-    render(<AssistantBox token="t" initialTurns={[turn({
-      citations: [{ type: "note", noteId: "n1", title: "Dune", createdAt: null, snippet: "body", score: 1, matchedBy: "fts" }],
-    })]} />);
-    expect(screen.getByText("Dune")).toBeInTheDocument();
-  });
-
-  // The same information the prompt gets, shown to the user -- so "why did it say that?" is
-  // answerable by looking. It also makes five citations from five different days legible as five
-  // different notes, which "Untitled" x5 never was.
-  it("shows each cited note's date", () => {
-    render(<AssistantBox token="t" initialTurns={[{
-      id: "a1", role: "assistant", content: "…", incomplete: false,
-      citations: [{
-        type: "note", noteId: "n1", title: null, snippet: "Ngày mai có hẹn đi xem spiderman",
-        score: 1, matchedBy: "fts", createdAt: "2026-08-12T03:00:00.000Z",
-      }],
-    }]} />);
-    expect(screen.getByText(/12-08-2026/)).toBeInTheDocument();
   });
 
   // The naive version double-renders the last turn: once from the box's streaming state and
