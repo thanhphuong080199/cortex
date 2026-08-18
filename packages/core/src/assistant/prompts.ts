@@ -28,7 +28,8 @@ const temporalRule = (now: Date, timeZone: string) =>
   "Mỗi note và mỗi lượt hội thoại bên dưới có ngày trong ngoặc. Từ chỉ thời gian bên trong " +
   "chúng (\"mai\", \"hôm qua\", \"tuần tới\", \"thứ 3 tới\") tính từ NGÀY VIẾT của note hoặc " +
   "lượt đó, KHÔNG phải từ hôm nay. Nếu một mốc thời gian đã qua, nói rõ là đã qua — đừng nói " +
-  "về nó như việc sắp xảy ra. Note không có ngày thì đừng đoán ngày cho nó.";
+  "về nó như việc sắp xảy ra. Note không có ngày thì đừng đoán ngày cho nó. Riêng note hoặc " +
+  "câu hỏi ở cuối cùng — cái người dùng vừa viết — là của HÔM NAY.";
 
 // `timeZone` is optional here (not on the two answer/acknowledge builders) solely so
 // buildChitchatPrompt -- which has no clock at all -- can keep calling this with one argument.

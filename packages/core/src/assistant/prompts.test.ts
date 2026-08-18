@@ -315,4 +315,18 @@ describe("temporal anchoring", () => {
   it("leaves the chitchat prompt without a date header", () => {
     expect(buildChitchatPrompt({ text: "haha ok", history: [] })).not.toContain("16-08-2026");
   });
+
+  // THE ORIGINAL DEFECT, ONE STEP EARLIER. "Ngày mai có hẹn đi xem spiderman" is not a citation
+  // read back later -- it is the fresh capture itself, in the acknowledge branch, at the moment
+  // it is written. It carries no createdAt of its own (it's live input, not a row), so read
+  // literally, "note không có ngày thì đừng đoán ngày cho nó" would tell the model to leave ITS
+  // date ambiguous too -- which is backwards: a note the user is submitting right now is, by
+  // construction, from today.
+  it("tells the acknowledge prompt the trailing note itself is from today", () => {
+    const p = buildAcknowledgePrompt({
+      note: "Ngày mai có hẹn đi xem spiderman", domain: null, tags: [], related: [],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toMatch(/HÔM NAY/);
+  });
 });
