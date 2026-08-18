@@ -1,5 +1,5 @@
 "use client";
-import type { AnyCitation } from "@cortex/shared";
+import { formatNoteDate, type AnyCitation } from "@cortex/shared";
 
 /**
  * The notes/web split, for BOTH the turn that is streaming right now and every turn read back
@@ -17,10 +17,15 @@ import type { AnyCitation } from "@cortex/shared";
  * the sidebar, so a note is named the same way wherever it appears. Truncated because a snippet
  * is up to 240 characters (`left(n.content_text, 240)`, 00026) and this is a list item.
  */
-const label = (c: { title: string | null; snippet: string }) => {
+const label = (c: { title: string | null; snippet: string; createdAt: string | null }) => {
   const text = c.title?.trim() || c.snippet.split("\n")[0]?.trim() || "";
-  if (text === "") return "Untitled";
-  return text.length > 80 ? `${text.slice(0, 80)}…` : text;
+  const body = text === "" ? "Untitled" : text.length > 80 ? `${text.slice(0, 80)}…` : text;
+  // The same zone the prompt was rendered in, from the same function -- a UI that dated a note
+  // one day off from the answer above it would be worse than showing nothing.
+  const on = c.createdAt
+    ? formatNoteDate(c.createdAt, Intl.DateTimeFormat().resolvedOptions().timeZone)
+    : null;
+  return on ? `${on} · ${body}` : body;
 };
 
 export function Provenance(

@@ -46,6 +46,17 @@ export async function* streamAssistantTurn(args: {
     res = await doFetch(`${args.apiUrl}/assistant`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${args.token}` },
+      // `timeZone` is deliberately NOT sent here. Hermes ships `Intl`, but a Hermes build without
+      // full ICU data returns the literal string "UTC" for `resolvedOptions().timeZone`
+      // regardless of the device's actual setting -- and "UTC" is a valid IANA zone, so the
+      // server's `resolveTimeZone` would accept it silently, shifting every mobile citation date
+      // in a way nothing downstream detects. That is worse than sending nothing: an absent
+      // `timeZone` falls back server-side to Asia/Ho_Chi_Minh, which is correct for this corpus's
+      // actual users. Whether this build's Hermes actually returns "UTC" or a real zone could not
+      // be verified here -- there was no attached device or running emulator (checked 2026-08-18
+      // via `adb devices`, none attached) to run the compiled bundle in the real JS engine; a
+      // Node.js check would test a different ICU packaging than what ships on-device. Add the
+      // field only after that has been confirmed on an actual device or emulator.
       body: JSON.stringify({
         noteId: args.noteId, content: args.content, createdAt: args.createdAt,
       }),
