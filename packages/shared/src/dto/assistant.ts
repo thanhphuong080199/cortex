@@ -22,9 +22,10 @@ export const assistantInput = z
     /** An offline capture's real timestamp, not the reconnect time. Same field NoteService takes. */
     createdAt: z.string().datetime().optional(),
     /**
-     * The caller's IANA time zone, e.g. "Asia/Ho_Chi_Minh". Both clients read it from
+     * The caller's IANA time zone, e.g. "Asia/Ho_Chi_Minh". Web reads it from
      * `Intl.DateTimeFormat().resolvedOptions().timeZone`, which needs no permission and no
      * stored setting -- and which follows the user when they travel, unlike a column would.
+     * Mobile does not send it yet (see `stream.ts`'s Hermes/ICU caveat).
      *
      * Optional, and never trusted: the server runs it through `resolveTimeZone` before it
      * reaches Intl. The cap is a sanity bound on an untrusted string, not a real limit -- the

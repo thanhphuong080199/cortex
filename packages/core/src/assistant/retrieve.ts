@@ -20,7 +20,7 @@ export interface Citation {
   matchedBy: string;
 }
 
-/** A row exactly as `search_notes` returns it (supabase/migrations/00026_vietnamese_fts.sql). */
+/** A row exactly as `search_notes` returns it (supabase/migrations/00032_search_notes_created_at.sql). */
 interface SearchRow {
   note_id: string;
   title: string | null;
