@@ -276,9 +276,24 @@ describe("the recall rule", () => {
   // model that stops emitting [1] takes traceability with it -- the citations are still the
   // only link between a claim and the note behind it. The rule must forbid the FRAMING and
   // require the bracket in the same breath.
-  it("keeps the bracket citation while changing how it is introduced", () => {
+  it("keeps the bracket citation while changing how it is introduced (answer prompt)", () => {
     const p = buildAnswerPrompt({ question: "mỏi mắt ăn gì", ...args });
+    // Pre-existing "Cite the notes..." line already has [1], so we must assert on text unique
+    // to RECALL_RULE's own bracket-preservation clause, not just the bracket itself.
     expect(p).toMatch(/\[1\]/);
+    expect(p).toMatch(/still carry the bracket|change how you introduce/i);
+  });
+
+  // The bracket preservation must also appear on acknowledge, with the same safeguard against
+  // the pre-existing citation line being the only source.
+  it("keeps the bracket citation while changing how it is introduced (acknowledge prompt)", () => {
+    const p = buildAcknowledgePrompt({
+      note: "dạo này mỏi mắt", domain: null, tags: [], related: args.citations,
+      history: [], timeZone: args.timeZone, now: args.now,
+    });
+    // Pre-existing instruction line already mentions citing like [1], so isolate RECALL_RULE's own.
+    expect(p).toMatch(/\[1\]/);
+    expect(p).toMatch(/still carry the bracket|change how you introduce/i);
   });
 
   // Chitchat has no citations and no filing to talk about. Adding the rule there would be a
