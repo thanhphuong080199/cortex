@@ -390,3 +390,38 @@ describe("temporal anchoring", () => {
     expect(p).toMatch(/HÔM NAY/);
   });
 });
+
+describe("FORMAT_RULE", () => {
+  const answer = () => buildAnswerPrompt({
+    question: "mỏi mắt ăn gì", citations: [], history: [],
+    timeZone: "Asia/Ho_Chi_Minh", now: new Date("2026-08-18T03:00:00.000Z"),
+  });
+
+  it("asks for short conversational prose by default", () => {
+    expect(answer()).toMatch(/conversational|prose/i);
+    expect(answer()).toMatch(/short/i);
+  });
+
+  // THE HALF THAT GETS DROPPED, and the reason this is two assertions rather than one. A
+  // blanket "keep it short, no lists" degrades the turn that explicitly ASKED to enumerate --
+  // the omega-3 screenshot -- so the exception lives in the same constant as the default and
+  // must be greppable. Delete the exception clause and this goes red while the assertion above
+  // stays green, which is precisely the failure being guarded.
+  it("carries the explicit-request exception", () => {
+    expect(answer()).toContain("liệt kê");
+    expect(answer()).toMatch(/only when|exception/i);
+  });
+
+  // SCOPING. The natural mistake with a good rule is to apply it everywhere. Both other
+  // prompts already cap their own length -- "one or two sentences" and "one short, natural
+  // line" -- and a second, differently worded rule gives the model two constraints to
+  // reconcile where it currently has one.
+  it("stays off the acknowledge and chitchat prompts", () => {
+    const ack = buildAcknowledgePrompt({
+      note: "dạo này mỏi mắt", domain: null, tags: [], related: [], history: [],
+      timeZone: "Asia/Ho_Chi_Minh", now: new Date("2026-08-18T03:00:00.000Z"),
+    });
+    expect(ack).not.toContain("liệt kê");
+    expect(buildChitchatPrompt({ text: "haha ok", history: [] })).not.toContain("liệt kê");
+  });
+});

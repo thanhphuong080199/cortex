@@ -39,6 +39,35 @@ const RECALL_RULE =
   "introduce the note, not whether you cite it.";
 
 /**
+ * How long a reply should be and what shape it takes. On buildAnswerPrompt ONLY.
+ *
+ * Observed: a casual "mỏi mắt ăn gì" came back as a multi-section writeup with bolded category
+ * headers -- the same shape as a question that had explicitly asked to list things out. The
+ * prompt carried no shape guidance at all, so that was the model's default, not a template.
+ *
+ * BOTH halves are load-bearing and the second is the one a later edit will drop. A bare "keep
+ * it short, avoid lists" cap degrades the turn that genuinely asked to enumerate, so the
+ * exception is written into the same constant as the default rather than left to judgment.
+ * prompts.test.ts asserts each half separately for exactly that reason.
+ *
+ * It says nothing about markdown syntax. Both clients render markdown as of 2026-08-18, so
+ * `**bold**` is no longer literal punctuation on screen -- and a rule phrased around syntax
+ * would have to be rewritten the next time a client's rendering changes. The rule is about the
+ * SHAPE of the answer, which is stable.
+ *
+ * Not on buildAcknowledgePrompt ("one or two sentences") or buildChitchatPrompt ("one short,
+ * natural line"): both already cap themselves, and a second differently-worded length rule
+ * gives the model two constraints to reconcile where it has one.
+ */
+const FORMAT_RULE =
+  "Match the shape of the reply to the weight of the question. A short, casual question " +
+  "gets a short, conversational answer -- two or three sentences of prose, no headings and " +
+  "no list. Reach for headings or a numbered list only when the user actually asked to " +
+  "enumerate or compare (\"liệt kê\", \"các bước\", \"so sánh\", \"list out\"), or when the " +
+  "answer genuinely is a set of parallel items that prose would obscure. Structure is the " +
+  "exception, not the default shape of an answer.";
+
+/**
  * The temporal anchor, on both prompts that read the user's own material.
  *
  * Two facts and one rule, and the rule is the part that fixes the observed defect: the date
@@ -112,6 +141,7 @@ export function buildAnswerPrompt(a: {
     "You are the user's second brain and conversational assistant. Answer their question using " +
       "their own notes first.",
     LANGUAGE_RULE,
+    FORMAT_RULE,
     temporalRule(a.now, a.timeZone),
     "Cite the notes you used by their bracketed number, like [1].",
     RECALL_RULE,
