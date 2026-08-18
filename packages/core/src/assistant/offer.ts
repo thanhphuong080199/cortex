@@ -23,6 +23,35 @@ export interface Offer {
  */
 export const OFFER_MAX_CHARS = 400;
 
+/**
+ * PROVISIONAL, and deliberately not fixed by the spec (C5 §12.3): "a number invented at design
+ * time would be a number nobody later dares to change because it looks decided."
+ *
+ * 0.88 is a starting value, not a measured one. It sits above the cosine similarity of two
+ * merely related facts about the same topic and below that of two phrasings of one fact, on
+ * this embedding model, by estimate rather than by experiment.
+ *
+ * WHICH DIRECTION TO MOVE IT. Too high and a declined offer comes back in different words,
+ * which is the failure the decline path exists to prevent and is immediately visible to the
+ * user. Too low and a genuinely new fact is silently suppressed, which nobody ever sees. The
+ * asymmetry says to tune it DOWN from here against real declines, not up.
+ */
+export const OFFER_DEDUP_THRESHOLD = 0.88;
+
+/**
+ * Cosine similarity. Written out rather than pulled in: it is four lines, and the alternative
+ * is a dependency in a package whose whole point is not having many.
+ */
+const cosine = (a: number[], b: number[]): number => {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
+    dot += a[i]! * b[i]!; na += a[i]! * a[i]!; nb += b[i]! * b[i]!;
+  }
+  // Zero-length vectors are not "identical", they are unusable. Returning 0 makes them fail to
+  // suppress anything, which is the safe direction: the cost is one extra offer.
+  return na === 0 || nb === 0 ? 0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
+};
+
 const PROMPT =
   "The assistant just answered a question using knowledge that was NOT in the user's own " +
   "notes. Condense the single most useful fact it contributed into ONE standalone sentence " +
@@ -80,6 +109,45 @@ export async function proposeOffer(
 
     const statement = typeof value.statement === "string" ? value.statement.trim() : "";
     if (statement === "" || statement.length > OFFER_MAX_CHARS) return null;
+
+    // §12.3. One embed call per offer, metered like every other. Compared against BOTH 'rejected'
+    // and 'active' facts: a fact the user already keeps does not need offering either.
+    //
+    // Semantic, not textual, and that is the whole design. "The same fact" recurs in different
+    // words -- which is precisely why the row carries an embedding rather than a hash. An
+    // equality check here would let "Omega-3 có nhiều trong cá hồi" through against a declined
+    // "Cá hồi giàu omega-3", and the user would be offered the thing they just refused.
+    //
+    // A failure here skips the dedup rather than failing the offer. The worst case of skipping is
+    // being asked once more; the worst case of throwing is losing an offer to a transient read.
+    try {
+      const { vectors, inputTokens: embedIn, model: embedModel } = await deps.ai.embed([statement]);
+      const vector = vectors[0];
+      if (vector) {
+        try {
+          await recordUsage(deps.db, {
+            userId: a.userId, kind: "embed", model: embedModel, inputTokens: embedIn,
+            outputTokens: 0, source: "assistant", requestId: a.requestId,
+            contentChars: statement.length,
+          });
+        } catch (err) {
+          console.error(`[assistant] offer embed ledger failed (request ${a.requestId}): ${errorMessage(err)}`);
+        }
+
+        const { data: facts, error } = await deps.db
+          .from("memory_facts").select("statement, embedding")
+          .eq("user_id", a.userId).in("status", ["rejected", "active"]);
+        if (error) throw error;
+
+        for (const f of (facts ?? []) as { embedding: number[] | null }[]) {
+          if (f.embedding && cosine(vector, f.embedding) >= OFFER_DEDUP_THRESHOLD) return null;
+        }
+      }
+    } catch (err) {
+      // Never log the statement -- it is model output about the user's material (§15.6 rule 1).
+      console.error(`[assistant] offer dedup skipped (request ${a.requestId}): ${errorMessage(err)}`);
+    }
+
     return { statement, ...(a.sourceUrl !== undefined ? { sourceUrl: a.sourceUrl } : {}) };
   } catch (err) {
     console.error(`[assistant] offer failed (request ${a.requestId}): ${errorMessage(err)}`);

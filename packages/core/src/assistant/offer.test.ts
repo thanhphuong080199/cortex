@@ -57,3 +57,64 @@ describe("proposeOffer", () => {
       { userId: "u1", question: "q", answer: "a", requestId: "r1" })).resolves.toBeNull();
   });
 });
+
+describe("dedup against declined facts", () => {
+  // A db double whose memory_facts read returns whatever the test hands it, and an ai double
+  // whose embed() returns a fixed vector -- the similarity is decided by the STORED row, which
+  // is what the production code compares against.
+  const dbWith = (facts: { statement: string; embedding: number[] }[]) => ({
+    from: (t: string) => t === "memory_facts"
+      ? { select: () => ({ eq: () => ({ in: async () => ({ data: facts, error: null }) }) }) }
+      : { insert: async () => ({ data: null, error: null }) },
+  }) as never;
+
+  const aiWith = (statement: string, vector: number[]) => createFakeAi({
+    generateJson: async () => ({
+      value: { statement }, inputTokens: 10, outputTokens: 5, model: "fake-classify",
+    }),
+    embed: async () => ({ vectors: [vector], inputTokens: 5, model: "fake-embed" }),
+  });
+
+  // THE POINT OF THE WHOLE TASK. Same fact, different words -- a string comparison would miss
+  // it entirely, and the user would be offered the thing they just refused, phrased slightly
+  // differently. That is worse than never having built the decline path.
+  it("does not re-offer a fact the user already declined", async () => {
+    const out = await proposeOffer(
+      { db: dbWith([{ statement: "Cá hồi giàu omega-3.", embedding: [1, 0] }]),
+        ai: aiWith("Omega-3 có nhiều trong cá hồi.", [1, 0]) },
+      { userId: "u1", question: "q", answer: "a", requestId: "r1" },
+    );
+    expect(out).toBeNull();
+  });
+
+  it("still offers an unrelated fact", async () => {
+    const out = await proposeOffer(
+      { db: dbWith([{ statement: "Cá hồi giàu omega-3.", embedding: [1, 0] }]),
+        ai: aiWith("Vitamin A tốt cho mắt.", [0, 1]) },
+      { userId: "u1", question: "q", answer: "a", requestId: "r1" },
+    );
+    expect(out?.statement).toBe("Vitamin A tốt cho mắt.");
+  });
+
+  // §12.3: "A string comparison here would not work." This is the test that turns red if
+  // someone replaces the cosine with an equality check -- identical meaning, different string.
+  it("compares meaning rather than text", async () => {
+    const out = await proposeOffer(
+      { db: dbWith([{ statement: "hoàn toàn khác về mặt chữ", embedding: [1, 0] }]),
+        ai: aiWith("một câu không giống chút nào", [0.99, 0.14]) },
+      { userId: "u1", question: "q", answer: "a", requestId: "r1" },
+    );
+    expect(out, "near-identical vectors, unrelated strings").toBeNull();
+  });
+
+  // A dedup that fails must not cost the user the offer OR the turn. The read is a convenience;
+  // the worst case of skipping it is being asked once more, which is far better than an error.
+  it("still offers when the dedup read fails", async () => {
+    const broken = {
+      from: () => ({ select: () => ({ eq: () => ({ in: async () => ({ data: null, error: { message: "boom" } }) }) }) }),
+    } as never;
+    const out = await proposeOffer({ db: broken, ai: aiWith("Vitamin A tốt cho mắt.", [0, 1]) },
+      { userId: "u1", question: "q", answer: "a", requestId: "r1" });
+    expect(out?.statement).toBe("Vitamin A tốt cho mắt.");
+  });
+});
