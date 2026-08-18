@@ -60,6 +60,13 @@ export interface Citation {
   type: "note";
   noteId: string;
   title: string | null;
+  /**
+   * When the note was WRITTEN. The anchor every relative expression inside it is measured
+   * from -- "mai" in a note from 12-08 means 13-08, and without this the model resolves it
+   * against today. Nullable because a row that somehow arrives without one must render no
+   * date rather than a wrong one.
+   */
+  createdAt: string | null;
   snippet: string;
   score: number;
   matchedBy: string;
@@ -96,6 +103,7 @@ export function readCitation(raw: unknown): AnyCitation | null {
     type: "note",
     noteId: r.noteId,
     title: typeof r.title === "string" ? r.title : null,
+    createdAt: typeof r.createdAt === "string" ? r.createdAt : null,
     snippet: typeof r.snippet === "string" ? r.snippet : "",
     score: typeof r.score === "number" ? r.score : 0,
     matchedBy: typeof r.matchedBy === "string" ? r.matchedBy : "",

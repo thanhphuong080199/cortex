@@ -48,8 +48,38 @@ describe("retrieve", () => {
       userId: "u1", text: QUERY, requestId: "r1",
     });
     expect(out).toEqual([
-      { type: "note", noteId: "n1", title: "t", snippet: "s", score: 0.5, matchedBy: "both" },
+      {
+        type: "note", noteId: "n1", title: "t", createdAt: null, snippet: "s", score: 0.5,
+        matchedBy: "both",
+      },
     ]);
+  });
+
+  // The RPC is `any` on the TypeScript side, so a mistyped key (`createdAt` read off a
+  // snake_case row) compiles clean and silently produces undefined -- which JSON drops from the
+  // wire entirely. This is the same class of bug search.controller.ts's exact-key-set assertion
+  // exists for.
+  it("carries each note's created_at onto the citation", async () => {
+    const db = fakeDb({
+      rows: [{
+        note_id: "n1", title: "t", snippet: "s", score: 0.5, matched_by: "both",
+        created_at: "2026-08-12T03:00:00.000Z",
+      }],
+    });
+    const out = await retrieve({ db, ai: createFakeAi() }, {
+      userId: "u1", text: QUERY, requestId: "r1",
+    });
+    expect(out[0]).toMatchObject({ createdAt: "2026-08-12T03:00:00.000Z" });
+  });
+
+  it("does not invent a date when the row has none", async () => {
+    const db = fakeDb({
+      rows: [{ note_id: "n1", title: "t", snippet: "s", score: 0.5, matched_by: "both" }],
+    });
+    const out = await retrieve({ db, ai: createFakeAi() }, {
+      userId: "u1", text: QUERY, requestId: "r1",
+    });
+    expect(out[0]!.createdAt).toBeNull();
   });
 
   it("calls search_notes with the query text and the embedding of that text", async () => {

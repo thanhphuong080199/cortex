@@ -8,6 +8,13 @@ export interface Citation {
   type: "note";
   noteId: string;
   title: string | null;
+  /**
+   * When the note was WRITTEN. The anchor every relative expression inside it is measured
+   * from -- "mai" in a note from 12-08 means 13-08, and without this the model resolves it
+   * against today. Nullable because a row that somehow arrives without one must render no
+   * date rather than a wrong one.
+   */
+  createdAt: string | null;
   snippet: string;
   score: number;
   matchedBy: string;
@@ -17,6 +24,7 @@ export interface Citation {
 interface SearchRow {
   note_id: string;
   title: string | null;
+  created_at: string | null;
   snippet: string;
   score: number;
   matched_by: string;
@@ -88,6 +96,7 @@ export async function retrieve(
     type: "note" as const,
     noteId: r.note_id,
     title: r.title,
+    createdAt: r.created_at ?? null,
     snippet: r.snippet,
     score: r.score,
     matchedBy: r.matched_by,
