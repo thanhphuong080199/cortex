@@ -38,6 +38,23 @@ export const assistantInput = z
 export type AssistantInput = z.infer<typeof assistantInput>;
 
 /**
+ * `.strict()`, matching assistantInput: a body carrying a userId must be a 400, not a value the
+ * server quietly drops. The user id comes from the verified JWT and nowhere else.
+ *
+ * The statement cap matches createNoteInput's 100_000 rather than restating a smaller number --
+ * a value acceptable through POST /notes and rejected here would be the same note failing for
+ * no reason the user can see.
+ */
+export const saveAnswerInput = z
+  .object({
+    statement: z.string().min(1).max(100_000),
+    sourceUrl: z.string().url().max(2048).optional(),
+  })
+  .strict();
+
+export type SaveAnswerInput = z.infer<typeof saveAnswerInput>;
+
+/**
  * One row of the `citations` SSE event `POST /assistant` streams -- the OUTPUT half of the
  * contract, mirroring how `SearchResult` (search.ts, same directory) already documents the
  * reasoning for declaring a response shape once in `@cortex/shared` rather than letting each

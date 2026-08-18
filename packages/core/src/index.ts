@@ -10,4 +10,5 @@ export * from "./export/index.js";
 export * from "./assistant/context.js";
 export * from "./assistant/prompts.js";
 export * from "./assistant/retrieve.js";
+export * from "./assistant/save-answer.js";
 export * from "./assistant/turn.js";
