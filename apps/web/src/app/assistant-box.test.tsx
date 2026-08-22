@@ -541,6 +541,75 @@ describe("the loading phases", () => {
   });
 });
 
+const turnT = (id: string, createdAt: string): TranscriptTurn => ({
+  id, role: "user", content: `msg ${id}`, createdAt, citations: [], incomplete: false,
+});
+
+/**
+ * jsdom reports 0 for every layout property, so a scroll test that does not define them is
+ * asserting 0 === 0. These are defined on the prototype rather than the node because the
+ * component looks them up through a ref it owns.
+ */
+function stubScrollMetrics(scrollHeight: number) {
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true, get: () => scrollHeight,
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true, get: () => 400,
+  });
+}
+
+describe("loading older messages", () => {
+  // A PREPEND MUST NOT JUMP THE READER TO THE BOTTOM. This is the assertion that fails if
+  // someone puts `turns` back into the autoscroll effect's dependency list -- the single most
+  // likely regression here, and one no snapshot would show.
+  //
+  // `fetchOlder` is injected rather than reached through createClient() + a stubbed global
+  // fetch: createBrowserClient (apps/web/src/lib/supabase/client.ts) throws synchronously --
+  // "Your project's URL and API key are required" -- because NEXT_PUBLIC_SUPABASE_URL/ANON_KEY
+  // are unset in this test environment, before it ever issues a request a fetch stub could
+  // intercept. The assertions below are exactly the ones the brief specifies; only how the
+  // fetch is reached differs.
+  it("does not scroll to the bottom when older messages arrive", async () => {
+    stubScrollMetrics(2000);
+    const fetchOlder = async () => ({
+      turns: [turnT("old", "2026-08-19T02:00:00.000Z")].map((t) => ({ ...t, content: "cũ hơn" })),
+      hasMore: false,
+    });
+
+    render(
+      <AssistantBox token="t" userId="u1" hasMore
+        initialTurns={[turnT("a", "2026-08-20T02:00:00.000Z")]} fetchOlder={fetchOlder} />,
+    );
+    const scroller = document.querySelector(".chat-scroll") as HTMLElement;
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    await waitFor(() => expect(screen.getByText("cũ hơn")).toBeInTheDocument());
+    // Anchored, not pinned: 2000 would be the bottom.
+    expect(scroller.scrollTop).not.toBe(2000);
+  });
+
+  // A SHORT page is the end of the thread. Without this, the affordance stays forever and the
+  // user keeps pulling against a query that will never return anything again.
+  it("stops offering more once a short page comes back", async () => {
+    stubScrollMetrics(2000);
+    const fetchOlder = async () => ({ turns: [], hasMore: false });
+
+    render(
+      <AssistantBox token="t" userId="u1" hasMore
+        initialTurns={[turnT("a", "2026-08-20T02:00:00.000Z")]} fetchOlder={fetchOlder} />,
+    );
+    expect(screen.getByText(/Cuộn lên để xem thêm/)).toBeInTheDocument();
+
+    const scroller = document.querySelector(".chat-scroll") as HTMLElement;
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    await waitFor(() => expect(screen.queryByText(/Cuộn lên để xem thêm/)).toBeNull());
+  });
+});
+
 describe("Markdown", () => {
   it("renders emphasis as elements rather than literal asterisks", () => {
     const { container } = render(<Markdown>{"**Cá hồi** tốt cho mắt."}</Markdown>);

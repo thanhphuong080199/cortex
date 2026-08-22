@@ -196,6 +196,13 @@ a.back:hover { color: var(--text); }
   color: var(--muted); font-size: 15px;
 }
 
+/* The scroll-to-load-more affordance, first child of .chat-scroll so it sits above the oldest
+   loaded turn -- exactly where the reader's eye lands after a page prepends above it. */
+.chat-older {
+  align-self: center; margin: 0 0 4px;
+  color: var(--muted); font-size: 12.5px;
+}
+
 /* A quiet rule with a date on it -- the thread's only structural break now that the session
    boundary is gone from the UI. */
 .day-separator {

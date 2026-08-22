@@ -2,6 +2,8 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { dayKey, daySeparatorLabel, readEvents, type AnyCitation, type Citation, type Offer, type WebCitation } from "@cortex/shared";
 import { api } from "@/lib/api";
+import { createClient } from "@/lib/supabase/client";
+import { fetchOlderTurns, type TranscriptClient } from "@/lib/transcript";
 import { Provenance } from "./provenance";
 import { Markdown } from "./markdown";
 
@@ -38,12 +40,28 @@ export interface TranscriptTurn {
  * the sidebar's widgets exist only as accelerators, never as the primary path.
  */
 export function AssistantBox(
-  // userId/hasMore: settled in the signature now so the contract is fixed in one place, but
-  // neither is read yet -- Task 5's pagination query is what consumes them. Renamed on
-  // destructure (not the prop names) so eslint's no-unused-vars (argsIgnorePattern: "^_",
-  // packages/config/eslint.base.mjs) doesn't fail the build in the meantime.
-  { token, userId: _userId, initialTurns, hasMore: _hasMore }:
-    { token: string; userId: string; initialTurns?: TranscriptTurn[]; hasMore?: boolean },
+  {
+    token, userId, initialTurns, hasMore,
+    // Overridable only for tests: the real default calls createClient()
+    // (apps/web/src/lib/supabase/client.ts), which throws in the jsdom test environment because
+    // NEXT_PUBLIC_SUPABASE_URL/ANON_KEY are unset there -- createBrowserClient checks eagerly,
+    // before ever making a request, so no amount of stubbing global fetch reaches it. Tests pass
+    // a fake here instead; no caller outside a test ever does.
+    //
+    // Cast to TranscriptClient rather than left inferred: the real SupabaseClient's generics are
+    // deep enough that structurally checking it against TranscriptClient's chained call shape
+    // inline hits TS2589 ("Type instantiation is excessively deep and possibly infinite"). The
+    // cast is where that structural match is asserted once, instead of on every call site.
+    fetchOlder = (before: string) =>
+      fetchOlderTurns(createClient() as unknown as TranscriptClient, userId, before),
+  }:
+    {
+      token: string;
+      userId: string;
+      initialTurns?: TranscriptTurn[];
+      hasMore?: boolean;
+      fetchOlder?: (before: string) => ReturnType<typeof fetchOlderTurns>;
+    },
 ) {
   const [turns, setTurns] = useState<TranscriptTurn[]>(initialTurns ?? []);
   const [text, setText] = useState("");
@@ -62,6 +80,8 @@ export function AssistantBox(
   // only when the user acts on it (accept/decline) or the next submit() starts.
   const [offer, setOffer] = useState<Offer | null>(null);
   const [online, setOnline] = useState(true);
+  const [more, setMore] = useState(hasMore ?? false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Mirrors `answer` without the stale-closure lag: the SSE event loop is one long-lived async
   // function whose closure captured `answer` at call time, so `setAnswer` updates the state the
@@ -103,15 +123,43 @@ export function AssistantBox(
         ? "Đang lưu…"
         : "Đang tìm câu trả lời…";
 
-  // Keeps the newest turn in view -- turns, the reply bubble, the loading indicator and errors
-  // all land at the bottom of an ever-growing thread, exactly the case a chat UI has to
-  // autoscroll for.
+  // Keeps the newest turn in view -- the reply bubble, the loading indicator and errors all
+  // land at the bottom of an ever-growing thread, exactly the case a chat UI has to autoscroll
+  // for. Only the LIVE parts of the turn scroll the thread down. `turns` was in this list, and
+  // with pagination it must not be: loading older messages prepends to the front, and an effect
+  // that pins to the bottom on every `turns` change would undo the scroll-anchoring in
+  // loadOlder() below instantly. Because `turns` leaves this list, a newly sent message needs
+  // its own explicit scroll-to-bottom -- added at the end of the optimistic-bubble block in
+  // submit().
   useEffect(() => {
     // `scrollTop =` rather than `.scrollTo(...)`: it's a plain property every DOM
     // implementation (including jsdom, where this component's tests run) supports, with
     // no smooth-scroll API surface to be missing.
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [turns, attached, citations, web, answer, status, error, phase]);
+  }, [attached, citations, web, answer, status, error, phase]);
+
+  // Scroll-anchored, and this is the fiddly half. Prepending rows moves everything the user was
+  // reading downward by the height of what arrived; capturing scrollHeight before the paint and
+  // restoring the delta after it is what keeps their place. Without it the thread jumps to the
+  // top on every page and the user cannot read backwards at all.
+  async function loadOlder() {
+    const el = scrollRef.current;
+    const oldest = turns[0];
+    if (!el || !oldest || loadingOlder || !more) return;
+    setLoadingOlder(true);
+    const heightBefore = el.scrollHeight;
+    try {
+      const { turns: older, hasMore: stillMore } = await fetchOlder(oldest.createdAt);
+      setTurns((prev) => [...older, ...prev]);
+      setMore(stillMore);
+      requestAnimationFrame(() => { el.scrollTop = el.scrollHeight - heightBefore; });
+    } catch {
+      // Leave `more` alone: a failed fetch is not proof the thread ended, and setting it false
+      // would make one dropped request look permanently like the beginning of history.
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
 
   async function submit() {
     if (!text.trim() || busy) return;
@@ -149,6 +197,11 @@ export function AssistantBox(
       createdAt: new Date().toISOString(),
     }]);
     setText("");
+    // The user just pressed Send; their own bubble must be visible. Explicit now that `turns`
+    // no longer drives the autoscroll effect.
+    requestAnimationFrame(() => {
+      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    });
 
     let note: { id: string };
     try {
@@ -367,7 +420,17 @@ export function AssistantBox(
 
   return (
     <div className="chat-pane">
-      <div className="chat-scroll" ref={scrollRef}>
+      <div
+        className="chat-scroll"
+        ref={scrollRef}
+        onScroll={(e) => { if (e.currentTarget.scrollTop < 80) void loadOlder(); }}
+      >
+        {more && (
+          <p className="chat-older" role="status">
+            {loadingOlder ? "Đang tải…" : "Cuộn lên để xem thêm"}
+          </p>
+        )}
+
         {turns.length === 0 && !hasReply && (
           <p className="chat-empty">What are you thinking?</p>
         )}
