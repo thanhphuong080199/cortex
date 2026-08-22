@@ -227,11 +227,12 @@ add one spec for scroll-up-to-load-more.
 
 ### 9. Consequences accepted
 
-**9.1 There is no longer any way to delete a note.** Trash and restore existed only inside the
-note editor. After this stage a mis-typed or regretted line stays in the corpus permanently and
-retrieval keeps surfacing it. Deleting by asking the assistant is a real feature and does not
-exist. Recorded as a debt, deliberately not solved by keeping a trash screen — the user's ruling
-was one chat box, and a half-kept browser is the worst of both.
+**9.1 There is no longer any way to delete a note, and the replacement is S4.** Trash and restore
+existed only inside the note editor. From the moment this stage merges until S4 ships, a mis-typed
+or regretted line stays in the corpus permanently and retrieval keeps surfacing it. Deliberately
+not solved by keeping a trash screen — the user's ruling was one chat box, and a half-kept browser
+is the worst of both. The direction is recorded in §10 as S4; the window between the two stages is
+the cost of taking them in this order, and it is accepted knowingly rather than overlooked.
 
 **9.2 Notes the assistant saved on its own are now invisible.** Stage C5's save-answer, the offer,
 and the decline all keep working and keep feeding retrieval; the `saved` filter chip that made
@@ -251,7 +252,14 @@ What is lost is the tap. §10's S2 and S3 are what make the loss temporary.
 ### 10. The roadmap this stage was split out of
 
 Agreed with the user on 2026-08-22 and recorded so the next stage inherits it. Each gets its own
-brainstorm, spec and plan; each merges alone.
+brainstorm, spec and plan; each merges alone. The order settled on is **S3 → S2 → S4**, cheapest
+and most isolated first, with the one that edits every turn's prompt path judged against the
+finished shell.
+
+One thing to watch rather than decide now: §9.1's gap opens the day S1 merges and only S4 closes
+it. If living without any way to retract a note turns out to bite before S2 is done, S4 moves up.
+That is a judgement to make from use, and the trigger is named here so the reordering is a
+decision rather than a scramble.
 
 **S3 — mood synthesised per session.** Not real time. A scheduled job summarises a chat session
 that has gone idle into a mood reading. The user's framing: gather the data first, decide how to
@@ -261,6 +269,33 @@ seconds behind an advisory lock, and a second scheduled job fits beside it. **It
 `checkins`.** `turn.ts` already records why in a comment: a job writing check-ins would manufacture
 mood history the user never reported. It needs its own table, and mixing the two writers is the
 mistake to avoid, not a shortcut to consider.
+
+**S4 — letting go of what is no longer true.** Raised by the user on 2026-08-22 as the answer to
+§9.1, and explicitly deferred by them on the grounds that it needs a lot of brainstorming. It is
+two mechanisms, and separating them is the first thing the brainstorm should do because they have
+different tables and very different risk:
+
+- *Told, in conversation.* "giờ tôi không còn làm việc đó nữa" should retire what the assistant
+  had been recording, in the same turn, without a form. Most of the schema for this was designed
+  in `00005` and never built: `memory_facts.status` already has `'archived'`, `superseded_by`
+  already points at the fact that replaced it, and `memory_revisions.action` already enumerates
+  `'archive'` and `'update'` with an `actor` of `'agent'` or `'user'`. Notes have their own
+  vocabulary for the same idea in `lifecycle`. **Which of the two a given sentence should move is
+  the design question**, and answering "both, always" is how a stray remark quietly archives a
+  month of work.
+- *Noticed, on a schedule.* A job that reviews the corpus and decides what is still worth keeping.
+  `memory_revisions.action` already lists `'decay'`, so the audit trail for this was anticipated
+  too. It shares a home with S3's job and possibly its cadence.
+
+`packages/core/src/memory/` does not exist. Nothing reads or writes `memory_facts` today except
+C5's declined-offer rows, so S4 is building the consumer these tables were designed for, not
+extending a running system.
+
+Two constraints S4 inherits from this stage and cannot design around: **nothing may be hard
+deleted** — every retirement is a status change with a revision row, because a wrong inference is
+then a mistake and not a loss; and **chat is the only surface left**, so whatever the assistant
+retires it has to be able to say so, and the user has to be able to say no. §1 removed the screen
+where a person could have reviewed this quietly on their own.
 
 **S2 — the assistant asks a follow-up.** "hôm nay tôi mới đi xem phim" should draw out *which
 film, and was it any good* over a couple of turns, ending in a real `media_items` row. Most of the
@@ -280,7 +315,9 @@ it.
 - No change to the assistant turn: routing, prompts, retrieval, grounding, offers and declines are
   all untouched.
 - No change to enrichment, embedding, dedupe or the 60-second sweep.
-- No new way to delete a note (§9.1), and no trash screen kept back to provide one.
+- No new way to delete, archive or retract a note (§9.1), and no trash screen kept back to provide
+  one. S4 is that work and none of it starts here — not the conversational retraction, not the
+  scheduled review, and not a first `packages/core/src/memory/` module to hang them on.
 - No device-written `chat_messages` and no `chat_sessions` replication (§9.3).
 - No conversation list, no naming or managing of past conversations — one continuous thread is the
   whole of §3.
