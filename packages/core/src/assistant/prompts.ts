@@ -21,10 +21,17 @@ const LANGUAGE_RULE =
  * that shape; the prompts said "cite them like [1]" and nothing about phrasing, so the model
  * chose a match report. The fix is an instruction, not a template.
  *
- * The second half is load-bearing and is the half a later edit will drop: "do not sound
- * mechanical" on its own reads as "stop citing", and a model that stops emitting [1] takes
- * every link between a claim and the note behind it. The bracket is required in the same
- * sentence that forbids the framing.
+ * The second half USED to require the bracket, on the reasoning that dropping it takes every
+ * link between a claim and the note behind it. That reasoning described an intent the product
+ * never realised: nothing ever read `[2]` back out -- Provenance renders web sources only, mobile
+ * has no note-citation UI, and the citations sent to either client come from retrieval directly,
+ * never from numbers parsed out of the reply. So a WRONG `[2]` was invisible to everyone,
+ * including the user. Reported as unreadable on 2026-08-22 ("[1, 2] nhìn không biết gì hết").
+ *
+ * A date is the replacement, and it is a strictly better link for this product: the user can
+ * check it with no UI at all, and a wrong one is visible immediately. It also preserves what the
+ * bracket was actually doing -- forcing the model to point at a specific retrieved row instead of
+ * producing a vague "bạn từng nói...".
  *
  * Vietnamese examples, matching LANGUAGE_RULE's reasoning: the phrasings being ruled out are
  * Vietnamese phrasings, and an English paraphrase of them is not the thing to avoid.
@@ -33,10 +40,12 @@ const RECALL_RULE =
   "When one of their past notes is relevant, bring it up the way a person would recall " +
   "something you told them -- \"bạn có nhắc chuyện này rồi\", \"lần trước bạn có hỏi...\" -- " +
   "inline, in the middle of what you are saying. Do not report a database match: never " +
-  "\"Trong các ghi chú của bạn [1, 3] có nhắc đến...\", never \"Đã lưu ghi chú của bạn vào " +
+  "\"Trong các ghi chú của bạn có nhắc đến...\", never \"Đã lưu ghi chú của bạn vào " +
   "mục...\", and never state that a match was found or that something is identical to an " +
-  "earlier note. Still carry the bracket, like [1], so they can trace it -- change how you " +
-  "introduce the note, not whether you cite it.";
+  "earlier note. Anchor the recall so they can place it: say WHEN they wrote it (\"hôm 18/8 " +
+  "bạn có nhắc...\"), or name the note's title if it has one. Never use a bracketed number. " +
+  "If a note below shows no date and no title, do not invent an anchor for it -- recall it " +
+  "with no anchor at all.";
 
 /**
  * How long a reply should be and what shape it takes. On buildAnswerPrompt ONLY.
@@ -140,11 +149,14 @@ const renderCitations = (citations: Citation[] | "failed", timeZone: string) =>
     : citations.length === 0
       ? "\n\nThe user has no notes matching this."
       : `\n\nThe user's own notes:\n${citations
-          .map((c, i) => {
+          .map((c) => {
             // Spread-if in string form: a citation with no date renders with no parenthesis at
             // all, never "()" or "(null)". Everything in this prompt is read as fact.
             const on = c.createdAt ? formatNoteDate(c.createdAt, timeZone) : null;
-            return `[${i + 1}] ${on ? `(${on}) ` : ""}${c.title ? `${c.title}: ` : ""}${c.snippet}`;
+            // A bullet, not "[n]". Numbering the input while forbidding brackets in the output
+            // is a prompt arguing with itself, and the model will occasionally echo the very
+            // thing just banned.
+            return `- ${on ? `(${on}) ` : ""}${c.title ? `${c.title}: ` : ""}${c.snippet}`;
           })
           .join("\n")}`;
 
@@ -168,7 +180,6 @@ export function buildAnswerPrompt(a: {
     LANGUAGE_RULE,
     FORMAT_RULE,
     temporalRule(a.now, a.timeZone),
-    "Cite the notes you used by their bracketed number, like [1].",
     RECALL_RULE,
     "If their notes do not fully answer the question, you may fill the gap -- from the web, or " +
       "from your own general knowledge -- but say plainly that it is not from their notes " +
@@ -219,7 +230,7 @@ export function buildAcknowledgePrompt(a: {
     // acknowledgement telling the user what was attached -- that is the content this branch
     // exists to deliver (parent spec §6, obligation 3).
     "Mention what you attached, briefly. If any of their earlier notes below are genuinely " +
-      "related, say so and cite them like [1].",
+      "related, say so and say when they wrote it.",
     RECALL_RULE,
     "The user did not ask a question. Do not answer one, and do not invent one to answer.",
     // Spread-in rather than an empty string: an ordinary acknowledgement must carry no

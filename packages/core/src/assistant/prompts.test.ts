@@ -43,7 +43,7 @@ describe("buildAnswerPrompt", () => {
     // Paired with the heading, not asserted in isolation: `toContain("[1] first")` alone
     // survives deleting "The user's own notes:", and that heading is the only thing telling the
     // model the snippets below are the user's rather than the assistant's own.
-    expect(p).toContain("The user's own notes:\n[1] first\n[2] second");
+    expect(p).toContain("The user's own notes:\n- first\n- second");
   });
 
   it("renders a note's title beside its snippet when it has one", () => {
@@ -52,7 +52,7 @@ describe("buildAnswerPrompt", () => {
       citations: [cite({ title: "Giấc ngủ", snippet: "ngủ 5 tiếng" })],
       history: [], timeZone: TZ, now: NOW,
     });
-    expect(p).toContain("[1] Giấc ngủ: ngủ 5 tiếng");
+    expect(p).toContain("- Giấc ngủ: ngủ 5 tiếng");
   });
 
   it("tells the model there are no matching notes, and that it may answer from general knowledge instead", () => {
@@ -190,7 +190,7 @@ describe("buildAcknowledgePrompt", () => {
       note: "n", domain: null, tags: [], related: [cite({ snippet: "ghi chú cũ" })], history: [],
       timeZone: TZ, now: NOW, verify: false,
     });
-    expect(p).toContain("The user's own notes:\n[1] ghi chú cũ");
+    expect(p).toContain("The user's own notes:\n- ghi chú cũ");
   });
 
   it("renders the conversation history with each side labelled", () => {
@@ -274,28 +274,47 @@ describe("the recall rule", () => {
     expect(p).toMatch(/Trong các ghi chú của bạn/);
   });
 
-  // THE HALF THAT GETS DROPPED. "Do not sound mechanical" alone reads as "stop citing", and a
-  // model that stops emitting [1] takes traceability with it -- the citations are still the
-  // only link between a claim and the note behind it. The rule must forbid the FRAMING and
-  // require the bracket in the same breath.
-  it("keeps the bracket citation while changing how it is introduced (answer prompt)", () => {
-    const p = buildAnswerPrompt({ question: "mỏi mắt ăn gì", ...args });
-    // Pre-existing "Cite the notes..." line already has [1], so we must assert on text unique
-    // to RECALL_RULE's own bracket-preservation clause, not just the bracket itself.
-    expect(p).toMatch(/\[1\]/);
-    expect(p).toMatch(/still carry the bracket|change how you introduce/i);
+  // The bracket is gone from ALL FOUR sites, which is why this asserts on the built prompt rather
+  // than on any one instruction line. Removing three of the four leaves the model still modelling
+  // brackets off renderCitations' numbering, and every per-site assertion would still be green.
+  it("emits no bracket citation anywhere in the answer prompt", () => {
+    const p = buildAnswerPrompt({
+      question: "q",
+      citations: [cite({ snippet: "first" }), cite({ snippet: "second" })],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).not.toMatch(/\[\d/);
   });
 
-  // The bracket preservation must also appear on acknowledge, with the same safeguard against
-  // the pre-existing citation line being the only source.
-  it("keeps the bracket citation while changing how it is introduced (acknowledge prompt)", () => {
+  it("emits no bracket citation anywhere in the acknowledge prompt", () => {
     const p = buildAcknowledgePrompt({
-      note: "dạo này mỏi mắt", domain: null, tags: [], related: args.citations,
-      history: [], timeZone: args.timeZone, now: args.now, verify: false,
+      note: "n", domain: null, tags: [], related: [cite({ snippet: "ghi chú cũ" })],
+      history: [], timeZone: TZ, now: NOW, verify: false,
     });
-    // Pre-existing instruction line already mentions citing like [1], so isolate RECALL_RULE's own.
-    expect(p).toMatch(/\[1\]/);
-    expect(p).toMatch(/still carry the bracket|change how you introduce/i);
+    expect(p).not.toMatch(/\[\d/);
+  });
+
+  // What REPLACES the bracket, and the reason it is a date: a wrong `[2]` is invisible to every
+  // party including the user, because nothing reads it back. A wrong date is visible immediately.
+  // Both prompts, because RECALL_RULE is on both.
+  it("tells the model to anchor a recall to when the note was written", () => {
+    const p = buildAnswerPrompt({
+      question: "q", citations: [cite({ snippet: "s", createdAt: "2026-08-18T02:00:00Z" })],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toMatch(/ngày|khi nào|when they wrote/i);
+    expect(p).toMatch(/do not invent|đừng đoán|no anchor/i);
+  });
+
+  // THE HALF THAT MUST SURVIVE. RECALL_RULE's first clause forbids the database-match framing
+  // the user complained about in the first place; an edit that removes the bracket and takes
+  // this with it re-opens a bug that was already closed.
+  it("still forbids reporting a database match", () => {
+    const p = buildAnswerPrompt({
+      question: "q", citations: [cite({ snippet: "s" })], history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toContain("Trong các ghi chú của bạn");
+    expect(p).toMatch(/never state that a match was found/i);
   });
 
   // Chitchat has no citations and no filing to talk about. Adding the rule there would be a
