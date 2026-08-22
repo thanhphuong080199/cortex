@@ -61,7 +61,10 @@ describe("default ACL revocation (00009_revoke_default_grants.sql)", () => {
 // risk a DROP-and-CREATE introduces. `_test_has_function_privilege` is 00032's own companion to
 // `_test_has_table_privilege` above, added there for the same reason: the suite reaches Postgres
 // only through PostgREST, with no direct psql connection to introspect pg_catalog from.
-describe("search_notes execute grant (00032_search_notes_created_at.sql)", () => {
+//
+// 00035_search_notes_source_type.sql performed the same DROP for the same reason. This block
+// needs no edit to cover it -- it asserts against the live signature, which is unchanged.
+describe("search_notes execute grant (00032, 00035)", () => {
   const SEARCH_NOTES_SIG = "public.search_notes(uuid, text, extensions.vector(1536), int)";
 
   it.each(["authenticated", "anon"])("%s holds no EXECUTE on search_notes", async (role) => {
