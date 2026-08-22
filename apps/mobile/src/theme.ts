@@ -29,6 +29,6 @@ export const DARK: Theme = {
  * that frame. Light is the safe landing -- a dark theme flashed over a white system background
  * is the more jarring of the two mistakes.
  */
-export function themeFor(scheme: "light" | "dark" | null | undefined): Theme {
+export function themeFor(scheme: "light" | "dark" | "unspecified" | null | undefined): Theme {
   return scheme === "dark" ? DARK : LIGHT;
 }
