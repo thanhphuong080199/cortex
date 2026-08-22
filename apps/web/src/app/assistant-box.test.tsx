@@ -46,7 +46,7 @@ describe("AssistantBox", () => {
         : sse([["done", { messageId: "m1", sessionId: "s1" }]]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "hôm nay tôi chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -67,7 +67,7 @@ describe("AssistantBox", () => {
     globalThis.fetch = (async (url: string) =>
       String(url).endsWith("/notes") ? notePromise : sse([["done", { messageId: "m1", sessionId: "s1" }]])) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ buổi sáng");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -93,7 +93,7 @@ describe("AssistantBox", () => {
             ["token", { text: "Đã lưu." }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -108,7 +108,7 @@ describe("AssistantBox", () => {
         ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
         : new Response("boom", { status: 500 })) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "ghi chú");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -121,7 +121,7 @@ describe("AssistantBox", () => {
         ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
         : sse([["declined", { reason: "budget" }]])) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "ghi chú");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -139,7 +139,7 @@ describe("AssistantBox", () => {
       return new Response("boom", { status: 500 });
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     const textarea = screen.getByLabelText(/what are you thinking/i);
     await userEvent.type(textarea, "ghi chú chưa lưu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
@@ -171,7 +171,7 @@ describe("AssistantBox", () => {
       return sse([["done", { messageId: "m1", sessionId: "s1" }]]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -196,7 +196,7 @@ describe("AssistantBox", () => {
       return sse([["done", { messageId: "m1", sessionId: "s1" }]]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     const textarea = screen.getByLabelText(/what are you thinking/i);
     await userEvent.type(textarea, "ghi chú chưa lưu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
@@ -229,7 +229,7 @@ describe("AssistantBox", () => {
       ]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -262,7 +262,7 @@ describe("AssistantBox", () => {
       ]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -293,7 +293,7 @@ describe("AssistantBox", () => {
       ]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -316,7 +316,7 @@ describe("AssistantBox", () => {
             ["done", { messageId: "m1", sessionId: "s1" }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -326,12 +326,13 @@ describe("AssistantBox", () => {
 });
 
 const turn = (over: Partial<TranscriptTurn> = {}): TranscriptTurn => ({
-  id: "t1", role: "assistant", content: "Đã lưu.", citations: [], incomplete: false, ...over,
+  id: "t1", role: "assistant", content: "Đã lưu.", citations: [], incomplete: false,
+  createdAt: "2026-08-22T00:00:00.000Z", ...over,
 });
 
 describe("the transcript", () => {
   it("renders both sides of a past turn", () => {
-    render(<AssistantBox token="t" initialTurns={[
+    render(<AssistantBox token="t" userId="u1" initialTurns={[
       turn({ id: "u1", role: "user", content: "hôm nay tôi chạy bộ" }),
       turn({ id: "a1", role: "assistant", content: "Đã lưu vào health." }),
     ]} />);
@@ -345,14 +346,14 @@ describe("the transcript", () => {
   // the `content` column alone, an interrupted answer and a short answer are the same string.
   // Only the flag can tell them apart, and only the pane can say so.
   it("marks an interrupted answer as interrupted", () => {
-    render(<AssistantBox token="t" initialTurns={[
+    render(<AssistantBox token="t" userId="u1" initialTurns={[
       turn({ content: "Theo notes của bạn thì", incomplete: true }),
     ]} />);
     expect(screen.getByText(/interrupted|bị gián đoạn/i)).toBeInTheDocument();
   });
 
   it("does not mark a complete answer", () => {
-    render(<AssistantBox token="t" initialTurns={[turn()]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[turn()]} />);
     expect(screen.queryByText(/interrupted|bị gián đoạn/i)).toBeNull();
   });
 
@@ -368,7 +369,7 @@ describe("the transcript", () => {
             ["done", { messageId: "m1", sessionId: "s1" }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -389,7 +390,7 @@ describe("the transcript", () => {
             ["done", { messageId: "m1", sessionId: "s1" }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -428,7 +429,7 @@ describe("the transcript", () => {
       ]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     const textarea = screen.getByLabelText(/what are you thinking/i);
     const send = screen.getByRole("button", { name: /send/i });
 
@@ -471,7 +472,7 @@ describe("the transcript", () => {
             ["error", { message: "boom" }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -502,7 +503,7 @@ describe("the loading phases", () => {
 
   it("says it is saving before anything comes back", async () => {
     stubbed(() => stalling([]));
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await send();
     expect(await screen.findByRole("status")).toHaveTextContent(/lưu|saving/i);
   });
@@ -515,7 +516,7 @@ describe("the loading phases", () => {
       ["attached", { domain: "media", domainMeta: {}, tags: ["phim"] }],
       ["citations", { citations: [] }],
     ]));
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await send();
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent(/tìm câu trả lời|answer/i));
@@ -528,14 +529,14 @@ describe("the loading phases", () => {
       ["attached", { domain: null, domainMeta: {}, tags: [] }],
       ["token", { text: "Theo notes của bạn" }],
     ]));
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await send();
     await screen.findByText(/Theo notes của bạn/);
     expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("shows no indicator when nothing is in flight", () => {
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     expect(screen.queryByRole("status")).toBeNull();
   });
 });

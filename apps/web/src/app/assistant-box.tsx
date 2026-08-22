@@ -27,6 +27,8 @@ export interface TranscriptTurn {
   citations: AnyCitation[];
   /** retrieval_meta.incomplete: the stream died mid-answer. Shown, never hidden. */
   incomplete: boolean;
+  /** ISO. Feeds the day separators (Task 4) and the pagination cursor (Task 5). */
+  createdAt: string;
 }
 
 /**
@@ -36,7 +38,12 @@ export interface TranscriptTurn {
  * the sidebar's widgets exist only as accelerators, never as the primary path.
  */
 export function AssistantBox(
-  { token, initialTurns }: { token: string; initialTurns?: TranscriptTurn[] },
+  // userId/hasMore: settled in the signature now so the contract is fixed in one place, but
+  // neither is read yet -- Task 5's pagination query is what consumes them. Renamed on
+  // destructure (not the prop names) so eslint's no-unused-vars (argsIgnorePattern: "^_",
+  // packages/config/eslint.base.mjs) doesn't fail the build in the meantime.
+  { token, userId: _userId, initialTurns, hasMore: _hasMore }:
+    { token: string; userId: string; initialTurns?: TranscriptTurn[]; hasMore?: boolean },
 ) {
   const [turns, setTurns] = useState<TranscriptTurn[]>(initialTurns ?? []);
   const [text, setText] = useState("");
@@ -139,6 +146,7 @@ export function AssistantBox(
     const tempId = `pending-${t0}`;
     setTurns((prev) => [...prev, {
       id: tempId, role: "user", content: pendingText, citations: [], incomplete: false,
+      createdAt: new Date().toISOString(),
     }]);
     setText("");
 
@@ -180,6 +188,7 @@ export function AssistantBox(
         content: answerRef.current,
         citations: [...citationsRef.current, ...(webRef.current?.sources ?? [])],
         incomplete,
+        createdAt: new Date().toISOString(),
       }]);
       setAttached(null);
       setAnswer("");
