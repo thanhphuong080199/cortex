@@ -57,7 +57,9 @@ export function Chat() {
     if (!live?.settled) return;
     const t = setTimeout(() => setLive(null), RETIRE_TIMEOUT_MS);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on noteId+settled, not on `live` itself (there is no
+    // react-hooks/exhaustive-deps rule configured in this repo's eslint config to silence) --
+    // see the comment above for why re-arming on every `live` identity change is wrong here.
   }, [live?.noteId, live?.settled]);
 
   const items = useMemo(
