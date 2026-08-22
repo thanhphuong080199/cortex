@@ -203,8 +203,14 @@ those flows prove, and where each proof goes:
 Deleting the note editor removes the only client that can produce a conflicting edit, so the
 conflict-copy scenario cannot be staged from a device at all. `notes/service.ts`'s server-side
 resolution keeps its unit tests and stays correct; what is retired is the end-to-end scenario and
-the client machinery that fed it (`edit-base.ts`, `note-edits.ts`, and `note_edit_base` in the
-local schema).
+the two client modules that fed it, `edit-base.ts` and `note-edits.ts`.
+
+The local `note_edit_base` table **stays**, and so does the connector branch that reads it.
+`connector.ts` queries that table directly in `uploadData` and attaches `base_content` to a notes
+`PATCH`; with no editor left, no such `PATCH` is ever generated and the query simply returns
+nothing. Removing it would mean surgery on the upload path — the one path that must never break,
+because it is how a note captured offline reaches the server. A dead local table costs nothing;
+an unnecessary edit to `uploadData` could cost captures.
 
 Playwright: delete `search-filter.spec.ts`, `edit-persist.spec.ts` and `checkin-media.spec.ts`;
 strip `capture.spec.ts` down to the capture-through-the-box half; keep `assistant-box.spec.ts`;
