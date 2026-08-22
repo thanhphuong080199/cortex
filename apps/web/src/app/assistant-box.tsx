@@ -406,10 +406,6 @@ export function AssistantBox(
     });
   }
 
-  if (!online) {
-    return <div className="banner" role="status">Offline — capture is disabled until the connection returns.</div>;
-  }
-
   const hasReply =
     attached !== null || citations.length > 0 || web !== null || answer !== "" || status !== null;
 
@@ -518,6 +514,12 @@ export function AssistantBox(
         </p>
       )}
 
+      {!online && (
+        <p className="chat-offline" role="status">
+          Mất mạng — chưa gửi được. Hội thoại cũ vẫn xem được.
+        </p>
+      )}
+
       <form
         className="chat-composer"
         onSubmit={(e) => { e.preventDefault(); void submit(); }}
@@ -527,7 +529,7 @@ export function AssistantBox(
           value={text}
           placeholder="What are you thinking?"
           aria-label="What are you thinking?"
-          disabled={busy}
+          disabled={busy || !online}
           onChange={(e) => {
             setText(e.target.value);
             // Reset before measuring: scrollHeight never shrinks on its own, so without the
@@ -545,7 +547,7 @@ export function AssistantBox(
             void submit();
           }}
         />
-        <button type="submit" disabled={busy}>Send</button>
+        <button type="submit" disabled={busy || !online}>Send</button>
       </form>
     </div>
   );

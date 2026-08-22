@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantBox, type TranscriptTurn } from "./assistant-box";
@@ -359,6 +359,44 @@ describe("AssistantBox", () => {
 
     await waitFor(() => expect(screen.getByText("ok")).toBeInTheDocument());
     expect(screen.queryByRole("group", { name: "Lưu vào notes?" })).toBeNull();
+  });
+});
+
+// A leaked `false` from any test above would make every later test in this file render the
+// offline notice instead of whatever that test actually exercises -- restored unconditionally,
+// not just by the tests that set it.
+afterEach(() => {
+  Object.defineProperty(navigator, "onLine", { configurable: true, get: () => true });
+});
+
+describe("going offline", () => {
+  const stored = (
+    { id: "a", role: "user", content: "câu cũ của tôi", createdAt: "2026-08-20T02:00:00.000Z",
+      citations: [], incomplete: false } as TranscriptTurn
+  );
+
+  function goOffline() {
+    Object.defineProperty(navigator, "onLine", { configurable: true, get: () => false });
+    window.dispatchEvent(new Event("offline"));
+  }
+
+  // THE THREAD MUST SURVIVE. Until 2026-08-22 this component returned a bare banner INSTEAD OF
+  // ITSELF when offline -- survivable while a sidebar still rendered the notes, and not now:
+  // the user would lose everything on screen the moment a train entered a tunnel.
+  it("keeps the thread on screen when the connection drops", async () => {
+    render(<AssistantBox token="t" userId="u1" initialTurns={[stored]} />);
+    goOffline();
+    await waitFor(() => expect(screen.getByText(/Mất mạng/)).toBeInTheDocument());
+    expect(screen.getByText("câu cũ của tôi")).toBeInTheDocument();
+  });
+
+  // Sending is genuinely impossible -- the note goes through POST /notes. A composer that
+  // silently fails is worse than one that explains, so both controls go down together.
+  it("disables sending while offline", async () => {
+    render(<AssistantBox token="t" userId="u1" initialTurns={[stored]} />);
+    goOffline();
+    await waitFor(() => expect(screen.getByRole("button", { name: /send/i })).toBeDisabled());
+    expect(screen.getByLabelText(/what are you thinking/i)).toBeDisabled();
   });
 });
 

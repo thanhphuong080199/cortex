@@ -27,6 +27,9 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* One column, one chat: the whole viewport is the header + the thread + the composer,
+     stacked, with the thread the only part that scrolls. */
+  display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden;
 }
 
 .wrap { max-width: 760px; margin: 0 auto; padding: 24px 20px 64px; }
@@ -155,52 +158,36 @@ ul.notes .row-actions { display: flex; gap: 6px; margin-top: 9px; }
 a.back { color: var(--muted); font-size: 13.5px; text-decoration: none; }
 a.back:hover { color: var(--text); }
 
-/* ---- Home: one chat box, everything else tucked into a sidebar ---- */
+/* ---- One column, one chat ---- */
 
-.app-shell { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
-
-.sidebar-toggle {
-  position: fixed; top: 14px; left: 14px; z-index: 30;
-  font-size: 17px; line-height: 1; padding: 7px 11px;
+.chat-header {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 10px;
+  max-width: 720px; width: 100%; margin: 0 auto; padding: 10px 16px;
+  background: var(--bg); border-bottom: 1px solid var(--line);
 }
-
-.sidebar-scrim {
-  position: fixed; inset: 0; z-index: 19; background: rgb(0 0 0 / 0.35);
-}
-
-.sidebar {
-  position: fixed; inset: 0 auto 0 0; z-index: 20; width: min(300px, 86vw);
-  overflow-y: auto; padding: 24px 18px 32px; background: var(--bg);
-  border-right: 1px solid var(--line);
-  transform: translateX(-100%);
-  transition: transform 0.18s ease;
-}
-.app-shell.sidebar-open .sidebar { transform: translateX(0); }
-
-.sidebar .topbar h1 { font-size: 18px; }
-.sidebar-signout { margin-top: 18px; }
-.sidebar-signout button { width: 100%; }
-
-.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.chat-title { font-weight: 600; letter-spacing: -0.01em; }
+.chat-header .conn { margin-left: auto; font-size: 12px; color: var(--muted); }
+.chat-header .conn.offline { color: var(--danger); }
+.chat-header .menu-toggle { padding: 4px 9px; line-height: 1; }
+.chat-menu { position: absolute; top: 44px; right: 12px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 4px; }
 
 .chat-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-
 .chat-scroll {
   flex: 1; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column; gap: 10px;
-  padding: 56px 16px 16px; max-width: 760px; width: 100%; margin: 0 auto;
+  padding: 16px; max-width: 720px; width: 100%; margin: 0 auto;
+}
+.chat-older { align-self: center; color: var(--muted); font-size: 12px; margin: 0 0 4px; }
+.chat-offline {
+  max-width: 720px; width: 100%; margin: 0 auto; padding: 0 16px 6px;
+  color: var(--danger); font-size: 13px;
 }
 
 .chat-empty {
   flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--muted); font-size: 15px;
-}
-
-/* The scroll-to-load-more affordance, first child of .chat-scroll so it sits above the oldest
-   loaded turn -- exactly where the reader's eye lands after a page prepends above it. */
-.chat-older {
-  align-self: center; margin: 0 0 4px;
-  color: var(--muted); font-size: 12.5px;
 }
 
 /* A quiet rule with a date on it -- the thread's only structural break now that the session
@@ -241,9 +228,13 @@ a.back:hover { color: var(--text); }
 .bubble.user {
   align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px;
 }
+/* NOT a bubble, unlike the user's message. A reply is allowed a table or a numbered list
+   (FORMAT_RULE), and both need the column's full width -- a 78% bubble squeezes exactly the
+   output the format rule deliberately permits. */
 .bubble.assistant {
-  align-self: flex-start; background: var(--panel); border: 1px solid var(--line);
-  border-bottom-left-radius: 4px; display: flex; flex-direction: column; gap: 6px;
+  align-self: stretch; max-width: 100%;
+  background: none; border: none; border-radius: 0; padding: 10px 2px;
+  display: flex; flex-direction: column; gap: 6px;
 }
 .bubble.assistant .attached { margin: 0; color: var(--muted); font-size: 12.5px; }
 .bubble.assistant .citations { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--muted); }
@@ -286,17 +277,11 @@ a.back:hover { color: var(--text); }
 .offer p { margin: 0; flex: 1; min-width: 160px; }
 .offer button { flex-shrink: 0; padding: 4px 10px; font-size: 12.5px; }
 
-.chat-error { max-width: 760px; width: 100%; margin: 0 auto 8px; padding: 0 16px; }
+.chat-error { max-width: 720px; width: 100%; margin: 0 auto 8px; padding: 0 16px; }
 
 .chat-composer {
   display: flex; gap: 10px; align-items: flex-end;
-  max-width: 760px; width: 100%; margin: 0 auto; padding: 12px 16px 20px;
+  max-width: 720px; width: 100%; margin: 0 auto; padding: 12px 16px 20px;
 }
 .chat-composer textarea { max-height: 200px; }
 .chat-composer button { flex-shrink: 0; padding: 10px 16px; }
-
-@media (min-width: 860px) {
-  .sidebar-toggle, .sidebar-scrim { display: none; }
-  .sidebar { position: static; width: 300px; flex-shrink: 0; transform: none; transition: none; }
-  .chat-scroll { padding-top: 24px; }
-}
