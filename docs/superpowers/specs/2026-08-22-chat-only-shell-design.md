@@ -1,6 +1,6 @@
 # Stage S1: the chat-only shell
 
-Status: designed and approved by the user on 2026-08-22. Not implemented.
+Status: implemented and merged on 2026-08-22 (PR #26, `687ffa1`).
 
 This is the first of three stages agreed in the same session. The other two are recorded in §10
 so they are inherited as decisions rather than rediscovered as gaps.
@@ -327,6 +327,13 @@ Recorded here because they were recorded **only** in the tail of
 finished plan is a debt that gets lost. None is touched by S1; each is listed with where it
 belongs.
 
+**Where they went, decided 2026-08-22 after S1 merged.** 11.1, 11.5 and 11.6 are claimed by
+`2026-08-22-citations-tone-and-saving-design.md` (stage S1.5), together with two findings from
+using the shipped shell: a gap-filling disclaimer that fires on every turn, and the absence of
+any way to keep an answer. 11.2 remains S4's. 11.3 stays open and is explained rather than
+closed there — offers were too rare to measure, and S1.5 is what starts producing the data. 11.4
+remains a judgement over sustained use.
+
 Two items from that list are **closed** and are not repeated below. Mobile markdown turned out
 never to have been attempted — PR #24 touched no mobile file — so S1 §5 re-runs the spike rather
 than inheriting an unknown. And "scrollback across earlier sessions" plus "chat history on
@@ -368,6 +375,21 @@ present, and that `buildAcknowledgePrompt` and `buildChitchatPrompt` do not carr
 replies actually get shorter is checked by a person, and **both halves must be checked**: a casual
 question coming back as prose, *and* a request to enumerate still coming back as a list. Checking
 only the first is how the exception clause gets deleted later.
+
+**11.6 Bracket citations (`[1]`, `[2, 3]`) are stapled onto natural sentences with nothing to
+point to.** `RECALL_RULE` and the standalone "cite the notes you used by their bracketed number"
+line in `buildAnswerPrompt` / `buildAcknowledgePrompt` (`prompts.ts`) keep the bracket even after
+asking the model to phrase the recall naturally, on the reasoning that dropping it loses the only
+link between a claim and the note behind it. Nothing today reads that link back out: web's
+`Provenance` component renders web sources only (its own comment records why the note list was
+removed on 2026-08-18), mobile has no note-citations UI at all, and the `citations` sent to either
+client come from retrieval directly, not from numbers parsed out of the reply text — so the
+bracket is decorative in the current product. Reported by the user on 2026-08-22 as unreadable
+("[1, 2] nhìn không biết gì hết"); their stated preference is to drop the bracket outright rather
+than build a footnote UI to justify keeping it, but this needs its own brainstorm before it's
+touched — including whether an internal-only marker should survive for a footnote UI to pick up
+later. **Not S1's** — it is a `prompts.ts` change, and §"Out of scope" below already excludes any
+change to the assistant's prompts from this stage.
 
 ## Out of scope
 
