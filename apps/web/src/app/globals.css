@@ -196,6 +196,13 @@ a.back:hover { color: var(--text); }
   color: var(--muted); font-size: 15px;
 }
 
+/* A quiet rule with a date on it -- the thread's only structural break now that the session
+   boundary is gone from the UI. */
+.day-separator {
+  align-self: center; margin: 8px 0 2px;
+  color: var(--muted); font-size: 12px; letter-spacing: 0.02em;
+}
+
 .bubble { max-width: 78%; padding: 10px 14px; border-radius: 16px; }
 /* pre-wrap is still right for a USER bubble, which is raw text with real newlines in it.
    Inside .markdown the block structure already carries the newlines, so keeping it there

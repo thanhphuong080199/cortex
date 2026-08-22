@@ -59,3 +59,39 @@ export function formatToday(now: Date, timeZone: string): string {
   const capitalised = weekday.replace(/(^|\s)(\p{Ll})/gu, (_m, sp: string, c: string) => sp + c.toUpperCase());
   return `${capitalised}, ${formatNoteDate(now.toISOString(), timeZone)}`;
 }
+
+/**
+ * A sortable calendar-day key in the given zone: "2026-08-19".
+ *
+ * `en-CA` because it yields ISO order (`YYYY-MM-DD`) in every runtime — the same trick
+ * formatNoteDate uses with `en-GB`, and for the same reason: assembling the parts by hand
+ * through `formatToParts` is two more chances to get locale ordering subtly wrong.
+ *
+ * The zone is the entire point. 18:30Z is still the 18th in UTC and already the 19th here, and
+ * evening is when this corpus is written (see DEFAULT_TIME_ZONE) -- so a UTC key puts every
+ * separator a day late.
+ */
+export function dayKey(iso: string, timeZone: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(d);
+}
+
+/**
+ * What a day separator says: "Hôm nay", "Hôm qua", or "18 thg 8".
+ *
+ * Compared through dayKey rather than by subtracting milliseconds: "yesterday" is a calendar
+ * relationship, and 25 hours ago can be either today or two days back depending on where the
+ * local midnight fell.
+ */
+export function daySeparatorLabel(iso: string, now: Date, timeZone: string): string {
+  const key = dayKey(iso, timeZone);
+  if (key === "") return "";
+  if (key === dayKey(now.toISOString(), timeZone)) return "Hôm nay";
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  if (key === dayKey(yesterday.toISOString(), timeZone)) return "Hôm qua";
+  return new Intl.DateTimeFormat("vi-VN", { timeZone, day: "numeric", month: "short" })
+    .format(new Date(iso));
+}

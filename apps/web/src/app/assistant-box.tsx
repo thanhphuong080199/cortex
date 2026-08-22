@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
-import { readEvents, type AnyCitation, type Citation, type Offer, type WebCitation } from "@cortex/shared";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { dayKey, daySeparatorLabel, readEvents, type AnyCitation, type Citation, type Offer, type WebCitation } from "@cortex/shared";
 import { api } from "@/lib/api";
 import { Provenance } from "./provenance";
 import { Markdown } from "./markdown";
@@ -360,6 +360,11 @@ export function AssistantBox(
   const hasReply =
     attached !== null || citations.length > 0 || web !== null || answer !== "" || status !== null;
 
+  // Read once per render, not per row: Intl resolution is not free and the answer cannot change
+  // between two rows of the same paint.
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const now = new Date();
+
   return (
     <div className="chat-pane">
       <div className="chat-scroll" ref={scrollRef}>
@@ -367,22 +372,37 @@ export function AssistantBox(
           <p className="chat-empty">What are you thinking?</p>
         )}
 
-        {turns.map((t) => (
-          t.role === "user" ? (
-            <div key={t.id} className="bubble user"><p>{t.content}</p></div>
-          ) : (
-            <div key={t.id} className="bubble assistant">
-              <Provenance citations={t.citations} />
-              {t.content && <div className="answer"><Markdown>{t.content}</Markdown></div>}
-              {t.incomplete && (
-                // An interrupted answer and a short answer are the same string in `content`.
-                // Only retrieval_meta.incomplete tells them apart, and the user is the one who
-                // needs to know -- the model is already shielded from it at turn.ts:134.
-                <p className="interrupted" role="note">Câu trả lời bị gián đoạn (interrupted).</p>
+        {turns.map((t, i) => {
+          const prev = i > 0 ? turns[i - 1] : undefined;
+          const key = dayKey(t.createdAt, timeZone);
+          // A separator before the FIRST row too (prev === undefined): the top of a loaded page
+          // is a day boundary as far as the reader is concerned, and without it the oldest
+          // visible day is the only undated one on screen.
+          const showSeparator = key !== "" && (prev === undefined || dayKey(prev.createdAt, timeZone) !== key);
+          return (
+            <Fragment key={t.id}>
+              {showSeparator && (
+                <p className="day-separator" role="separator">
+                  {daySeparatorLabel(t.createdAt, now, timeZone)}
+                </p>
               )}
-            </div>
-          )
-        ))}
+              {t.role === "user" ? (
+                <div className="bubble user"><p>{t.content}</p></div>
+              ) : (
+                <div className="bubble assistant">
+                  <Provenance citations={t.citations} />
+                  {t.content && <div className="answer"><Markdown>{t.content}</Markdown></div>}
+                  {t.incomplete && (
+                    // An interrupted answer and a short answer are the same string in `content`.
+                    // Only retrieval_meta.incomplete tells them apart, and the user is the one who
+                    // needs to know -- the model is already shielded from it at turn.ts:134.
+                    <p className="interrupted" role="note">Câu trả lời bị gián đoạn (interrupted).</p>
+                  )}
+                </div>
+              )}
+            </Fragment>
+          );
+        })}
 
         {hasReply && (
           <div className="bubble assistant">
