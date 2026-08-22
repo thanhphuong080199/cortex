@@ -528,8 +528,22 @@ export function AssistantBox(
           placeholder="What are you thinking?"
           aria-label="What are you thinking?"
           disabled={busy}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void submit(); }}
+          onChange={(e) => {
+            setText(e.target.value);
+            // Reset before measuring: scrollHeight never shrinks on its own, so without the
+            // first line the box grows and never comes back down after a delete.
+            e.target.style.height = "auto";
+            e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
+          }}
+          onKeyDown={(e) => {
+            // Shift+Enter is a newline; the browser's default already does that, so the only
+            // job here is to NOT intercept it. Cmd/Ctrl+Enter is kept as well -- it was the
+            // only way to send until 2026-08-22 and muscle memory is cheap to honour.
+            if (e.key !== "Enter") return;
+            if (e.shiftKey) return;
+            e.preventDefault();
+            void submit();
+          }}
         />
         <button type="submit" disabled={busy}>Send</button>
       </form>

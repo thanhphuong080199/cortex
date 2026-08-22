@@ -36,6 +36,43 @@ const stalling = (events: [string, unknown][]) =>
     { status: 200, headers: { "content-type": "text/event-stream" } },
   );
 
+describe("the composer", () => {
+  function stubFetch(calls: string[]) {
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url));
+      return String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([["done", { messageId: "m1", sessionId: "s1" }]]);
+    }) as typeof fetch;
+  }
+
+  it("sends on Enter", async () => {
+    const calls: string[] = [];
+    stubFetch(calls);
+    render(<AssistantBox token="t" userId="u1" />);
+    const box = screen.getByLabelText(/what are you thinking/i);
+    await userEvent.type(box, "gửi bằng enter");
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(calls.some((c) => c.endsWith("/notes"))).toBe(true));
+  });
+
+  // THE HALF THAT GETS DROPPED. A box where Enter sends must still let the user write a second
+  // line, and this corpus is full of multi-line captures. Implementing only the test above
+  // yields a composer that cannot type a paragraph -- and nothing else would notice.
+  it("inserts a newline on Shift+Enter and does not send", async () => {
+    const calls: string[] = [];
+    stubFetch(calls);
+    render(<AssistantBox token="t" userId="u1" />);
+    const box = screen.getByLabelText(/what are you thinking/i) as HTMLTextAreaElement;
+    await userEvent.type(box, "dòng một");
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
+    await userEvent.type(box, "dòng hai");
+
+    expect(box.value).toContain("\n");
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe("AssistantBox", () => {
   it("saves the note before it opens the stream", async () => {
     const calls: string[] = [];
