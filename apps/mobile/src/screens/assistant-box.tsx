@@ -11,6 +11,7 @@ import { createInFlightGuard } from "../lib/in-flight";
 import { offlineAnswer, type OfflineMatch } from "../lib/assistant/offline-answer";
 import { streamAssistantTurn, StreamUnavailableError, type BoxEvent } from "../lib/assistant/stream";
 import { supabase } from "../lib/supabase";
+import type { LiveTurn } from "../lib/transcript";
 
 /**
  * One box. It replaces quick capture, and in Tasks 7 and 8 the check-in widget and the media
@@ -19,8 +20,17 @@ import { supabase } from "../lib/supabase";
  * The order is the whole design: the local INSERT is the deliverable and everything after it is
  * a bonus, so the note is durable before any network exists. A failed local write is the ONLY
  * case where text can be lost, and the only one that keeps the box's contents.
+ *
+ * Since Task 12 this component runs a turn but does not render its answer -- the transcript in
+ * chat.tsx does, from `chat_messages` rows. `onLive` hands the screen the in-flight turn so it
+ * can render it before the server's rows have replicated: called with the fresh turn right after
+ * the local note write succeeds, updated on every `token` event, and cleared with `null` in the
+ * same `finally` that already governs every other exit path. `buildTranscript`'s dedup (keyed on
+ * the note's own id) covers the window between that clear and the replicated rows landing --
+ * clearing anywhere earlier than the turn's own natural end would just be a second, redundant
+ * place for the same bug to hide.
  */
-export function AssistantBox() {
+export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => void }) {
   const db = usePowerSync();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -29,7 +39,6 @@ export function AssistantBox() {
   const [attached, setAttached] = useState<Extract<BoxEvent, { type: "attached" }> | null>(null);
   const [mood, setMood] = useState<{ checkinId: string; mood: number } | null>(null);
   const [web, setWeb] = useState<Extract<BoxEvent, { type: "web" }> | null>(null);
-  const [answer, setAnswer] = useState("");
   const [matches, setMatches] = useState<OfflineMatch[]>([]);
   const run = useRef(createInFlightGuard()).current;
 
@@ -41,7 +50,6 @@ export function AssistantBox() {
       setAttached(null);
       setMood(null);
       setWeb(null);
-      setAnswer("");
       setMatches([]);
 
       const id = randomUUID();
@@ -51,6 +59,8 @@ export function AssistantBox() {
       // separate try around only the network call left those two exits with no `finally` at
       // all, so an empty-box tap -- or a genuine write failure -- left Send permanently
       // disabled. Same shape the deleted quick-capture.tsx used for its own `if (!wrote) return`.
+      // `onLive(null)` lives in this same finally for the same reason: one clear, on every exit
+      // path, is the only version of this that cannot leave a stale turn on screen.
       try {
         let wrote: boolean;
         try {
@@ -66,6 +76,8 @@ export function AssistantBox() {
         // is both faster and strictly safer.
         const asked = text;
         setText("");
+        onLive({ noteId: id, text: asked, answer: "", createdAt });
+        let answer = "";
 
         try {
           const { data: { session } } = await supabase.auth.getSession();
@@ -78,7 +90,10 @@ export function AssistantBox() {
           })) {
             if (ev.type === "attached") setAttached(ev);
             else if (ev.type === "web") setWeb(ev);
-            else if (ev.type === "token") setAnswer((a) => a + ev.text);
+            else if (ev.type === "token") {
+              answer += ev.text;
+              onLive({ noteId: id, text: asked, answer, createdAt });
+            }
             else if (ev.type === "mood") {
               // Mirrored locally under the server's id so undo has a row to delete before
               // replication catches up. See lib/checkins.ts.
@@ -101,6 +116,7 @@ export function AssistantBox() {
         }
       } finally {
         setBusy(false);
+        onLive(null);
       }
     });
   }
@@ -114,8 +130,7 @@ export function AssistantBox() {
         multiline
         accessibilityLabel="Bạn đang nghĩ gì?"
         // testID, not the label: it becomes the Android resource-id, which is unique and
-        // stable. This screen has a second TextInput (the note-list search box) whose
-        // contentDescription is close enough to collide with a text matcher.
+        // stable, unlike an accessibilityLabel a text matcher could collide with.
         testID="box-input"
         style={{ minHeight: 96, borderWidth: 1, borderColor: "#ccc", borderRadius: 8, padding: 12 }}
       />
@@ -207,8 +222,6 @@ export function AssistantBox() {
           ))}
         </View>
       ) : null}
-
-      {answer ? <Text testID="box-answer">{answer}</Text> : null}
 
       {matches.map((m) => (
         <Text key={m.id} testID="box-offline-match">{m.snippet}</Text>

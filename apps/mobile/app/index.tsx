@@ -1,12 +1,11 @@
 import type { Session } from "@supabase/supabase-js";
+import { Stack } from "expo-router";
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Button, Text, View } from "react-native";
+import { ActivityIndicator, Button, Pressable, Text, View } from "react-native";
 import { signInWithGoogle, signOut } from "@/lib/auth";
 import { createInFlightGuard } from "@/lib/in-flight";
 import { supabase } from "@/lib/supabase";
-import { ExportButton } from "@/screens/export-button";
-import { NoteList } from "@/screens/note-list";
-import { AssistantBox } from "@/screens/assistant-box";
+import { Chat } from "@/screens/chat";
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
@@ -59,33 +58,41 @@ export default function Home() {
     });
   }
 
+  if (session) {
+    // Sign-out lives in the header now -- the only chrome left, matching web's `⋮`. `error`
+    // still renders below the chat: `signOut` wipes local data BEFORE calling Supabase and
+    // re-raises if the wipe did not finish. Fired-and-forgotten, a failed wipe leaves the user
+    // signed in with their notes still on the device -- the exact outcome the wipe exists to
+    // prevent, presented as a button that did nothing.
+    return (
+      <>
+        <Stack.Screen
+          options={{
+            headerTitle: "Cortex",
+            headerRight: () => (
+              <Pressable
+                onPress={() => void handleSignOut()}
+                disabled={loading}
+                accessibilityRole="button"
+                testID="sign-out"
+                style={{ paddingHorizontal: 12, opacity: loading ? 0.5 : 1 }}
+              >
+                <Text>Đăng xuất</Text>
+              </Pressable>
+            ),
+          }}
+        />
+        <Chat />
+        {error ? <Text style={{ color: "crimson", padding: 12 }}>{error}</Text> : null}
+      </>
+    );
+  }
+
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 16 }}>
-      {session ? (
-        // Everything on this screen is handed to NoteList, which scrolls it. As siblings of the
-        // list in a plain View, these fixed-height widgets left it `flex: 1` of nothing -- it
-        // rendered every row at zero height, with no scroll anywhere to reach them, and the
-        // screen looked exactly as though the user had no notes at all.
-        <View style={{ flex: 1, alignSelf: "stretch" }}>
-          <NoteList
-            header={<AssistantBox />}
-            footer={
-              <View style={{ alignItems: "center", gap: 8, padding: 16 }}>
-                <ExportButton />
-                <Text>Signed in as {session.user.email}</Text>
-                <Button title="Sign out" onPress={() => void handleSignOut()} disabled={loading} />
-                {error ? <Text style={{ color: "crimson" }}>{error}</Text> : null}
-              </View>
-            }
-          />
-        </View>
-      ) : (
-        <>
-          <Button title="Sign in with Google" onPress={() => void handleSignIn()} disabled={loading} />
-          {loading ? <ActivityIndicator /> : null}
-          {error ? <Text style={{ color: "crimson" }}>{error}</Text> : null}
-        </>
-      )}
+      <Button title="Sign in with Google" onPress={() => void handleSignIn()} disabled={loading} />
+      {loading ? <ActivityIndicator /> : null}
+      {error ? <Text style={{ color: "crimson" }}>{error}</Text> : null}
     </View>
   );
 }
