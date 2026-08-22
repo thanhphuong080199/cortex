@@ -108,5 +108,13 @@ export default async function globalSetup() {
   // which is the kind of coupling that passes locally and fails in CI.
   writeFileSync(TOKEN_FILE, data.session?.access_token ?? "", "utf8");
 
+  // Same self-contained principle, for the ONE value a file can't carry as cleanly as an env
+  // var: the seeded user's id, which a spec needs to scope an admin-client insert to the right
+  // owner (RLS requires it; there is no "insert as whoever the cookies say" shortcut through
+  // service-role). Set here, not read from the workflow: Playwright forks its worker processes
+  // AFTER globalSetup returns, so a `process.env` write here is visible in every spec, and nothing
+  // upstream of this file has to remember to export it.
+  if (data.user?.id) process.env.E2E_USER_ID = data.user.id;
+
   console.log(`[e2e] wrote ${jar.length} auth cookie(s) to ${AUTH_FILE}`);
 }

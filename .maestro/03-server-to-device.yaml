@@ -1,13 +1,14 @@
 # Mục 3 ("sửa 1 note trên web, đợi sync, tìm từ CŨ → không ra kết quả") and the one case in
 # mục 2 that is not about the app lock ("xóa vĩnh viễn 1 note trên web → biến mất khỏi điện
-# thoại").
+# thoại") used to be proved here, through the note list. The list is gone (S1 §1), and neither
+# case has a surface left to assert through: nothing in the chat UI can show that a note's body
+# changed or that a row was hard-deleted. What survives is the property both cases were really
+# testing -- a server-side write reaching the device on its own -- asserted one table over, since
+# chat_messages now replicates too (S1 §4).
 #
-# Both are pure server->device assertions, which makes this the flow most likely to catch the
-# open sync bug -- and the one that is meaningless if PowerSync is not actually running. If this
-# times out, check the powersync container before the app.
-#
-# See 02 for why subflows/scroll-to-top.yaml precedes the DOWN scrolls: the list header is
-# taller than the viewport, and `back` from a note leaves the list wherever it was.
+# Still the flow most likely to catch the open sync bug, and the one that is meaningless if
+# PowerSync is not actually running. If this times out, check the powersync container before the
+# app.
 appId: ${APP_ID}
 ---
 - launchApp:
@@ -19,103 +20,24 @@ appId: ${APP_ID}
 - runFlow: subflows/install-session.yaml
 - runFlow: subflows/wait-for-download.yaml
 
-# ---- the note as seeded ----
-- scrollUntilVisible:
-    element: "Edit target"
-    direction: DOWN
-    timeout: 30000
-- tapOn: "Edit target"
-- extendedWaitUntil:
-    visible: "ORIGINALBODY waiting to be edited from the server side."
-    timeout: 15000
-- back
-
-# ---- edit it on the server ----
-- runScript:
-    file: scripts/server-edit-note.js
-    env:
-      NOTE_ID: ${NOTE_EDIT_TARGET}
-      NEW_CONTENT: "REPLACEDBODY now says something else entirely."
-
-# The edit has to arrive on its own. No pull-to-refresh, no relaunch: `useQuery` is reactive, so
-# a synced change re-renders the open list by itself, and needing a nudge here would itself be
-# the bug.
+# Server->device replication, asserted through the transcript.
 #
-# `back` restored the list at the row we tapped, which is well below the search box, so this
-# returns to the top before coming down to it.
-- runFlow: subflows/scroll-to-top.yaml
-- scrollUntilVisible:
-    element:
-      id: "search-input"
-    direction: DOWN
-    timeout: 30000
-- tapOn:
-    id: "search-input"
-- inputText: "REPLACEDBODY"
-# The keyboard covers the rows, and scrollUntilVisible needs the element FULLY in the viewport.
-# See 02 for why this is safe only where the keyboard is known to be up.
-- hideKeyboard
-- scrollUntilVisible:
-    element: "Edit target"
-    direction: DOWN
+# This used to be proved by editing a note on the server and watching the note LIST update.
+# The list is gone (S1 §1), and chat_messages now replicates (S1 §4) -- so the same property is
+# asserted one table over. If this times out, check the powersync container before the app: a
+# dead download stream looks exactly like a broken screen from here.
+- runScript:
+    file: scripts/server-seed-chat-message.js
+    env:
+      CONTENT: "REPLICATEDFROMSERVER"
+
+# It has to arrive on its own. No pull-to-refresh, no relaunch: useQuery is reactive, and
+# needing a nudge here would itself be the bug.
+- extendedWaitUntil:
+    visible: "REPLICATEDFROMSERVER"
     timeout: 90000
 
-# ---- and the OLD word must now find nothing ----
-# This is the half that catches a stale FTS index: the row can be updated while content_text and
-# the search index still carry the old body, in which case the note is findable by both words.
-#
-# Back to the box first: eraseText types into whatever is focused, and the scroll above moved it.
-- runFlow: subflows/scroll-to-top.yaml
-- scrollUntilVisible:
-    element:
-      id: "search-input"
-    direction: DOWN
-    timeout: 30000
-- tapOn:
-    id: "search-input"
-- eraseText
-- inputText: "ORIGINALBODY"
-- hideKeyboard
-# "Nothing here yet." is ListEmptyComponent -- it renders where the rows would be, i.e. below the
-# header, so it needs the same scroll a row does.
-- scrollUntilVisible:
-    element: "Nothing here yet."
-    direction: DOWN
-    timeout: 30000
-- assertNotVisible: "Edit target"
-
-- runFlow: subflows/scroll-to-top.yaml
-- scrollUntilVisible:
-    element:
-      id: "search-input"
-    direction: DOWN
-    timeout: 30000
-- tapOn:
-    id: "search-input"
-- eraseText
-- hideKeyboard
-
-# ---- purge a different note on the server ----
-- runFlow: subflows/scroll-to-top.yaml
-- scrollUntilVisible:
-    element: "Purge target"
-    direction: DOWN
-    timeout: 30000
-
-- runScript:
-    file: scripts/server-purge-note.js
-    env:
-      NOTE_ID: ${NOTE_PURGE_TARGET}
-
-# A hard delete must remove it from the device, not merely hide it from the default view.
-# Deliberately NOT preceded by a scroll: the step above parked the view on the row, so this
-# watches it disappear. Scrolling first would let the assertion pass on an off-screen row.
-- extendedWaitUntil:
-    notVisible: "Purge target"
-    timeout: 90000
-
-# And it must stay gone across a relaunch -- i.e. it left local SQLite, rather than only
-# vanishing from a component's state.
+# And it must survive a relaunch -- i.e. it reached local SQLite rather than a component's state.
 - launchApp:
     clearState: false
 - runFlow:
@@ -123,23 +45,5 @@ appId: ${APP_ID}
       visible: "DEVELOPMENT SERVERS"
     file: subflows/dismiss-dev-launcher.yaml
 - extendedWaitUntil:
-    visible:
-      id: "box-input"
-    timeout: 30000
-# Asked of the search index rather than of the screen. A relaunch opens at the top of the list,
-# where no row is on screen at all, so a bare assertNotVisible here would pass whether the note
-# survived the purge or not.
-- scrollUntilVisible:
-    element:
-      id: "search-input"
-    direction: DOWN
-    timeout: 30000
-- tapOn:
-    id: "search-input"
-- inputText: "purge"
-- hideKeyboard
-- scrollUntilVisible:
-    element: "Nothing here yet."
-    direction: DOWN
-    timeout: 30000
-- assertNotVisible: "Purge target"
+    visible: "REPLICATEDFROMSERVER"
+    timeout: 60000

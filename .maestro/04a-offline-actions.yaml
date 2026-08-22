@@ -3,17 +3,16 @@
 # The radios are turned off BEFORE this flow and back on before 04b, by e2e/scripts/run-maestro.sh.
 # Maestro has no command for that. Splitting the flow is better than the alternative -- a
 # runScript shelling out to adb -- because `runScript` executes on the HOST, and that same
-# property is what lets the server-side edit below happen while the phone is offline.
+# property is what lets a server-side write happen while the phone is offline (see 03).
 #
 # `clearState: false`: this inherits the local database 03 left behind, already populated from
-# the sync stream. Wiping it here would leave nothing pre-existing to trash, which is the whole
-# point of step 2.
+# the sync stream.
 #
-# THE ROW ORDER MATTERS HERE. The list is `ORDER BY updated_at DESC` and seed.mjs writes in the
-# order Zarquon, Edit, Purge, Trash, Restore, Conflict, Apostrophe -- so on screen that is
-# Apostrophe, Conflict, Restore, Trash, ... Restore target is therefore ABOVE Trash target, and
-# Conflict target above both. Each step below returns to the top before scrolling down, because
-# a DOWN scroll for a row the previous step already passed runs to the end of the list instead.
+# Retired on 2026-08-22 with the screens that made them possible: offline trash/restore, the
+# editor's debounce, the FTS5 apostrophe case, and the conflict run. The conflict run is not
+# merely unasserted -- with no note editor, no device-side edit exists to conflict WITH, so the
+# scenario cannot be constructed. notes/service.ts's server-side resolution keeps its unit
+# tests. The apostrophe case keeps lib/fts.ts's.
 appId: ${APP_ID}
 ---
 - launchApp:
@@ -23,38 +22,14 @@ appId: ${APP_ID}
       visible: "DEVELOPMENT SERVERS"
     file: subflows/dismiss-dev-launcher.yaml
 
-# ---- precondition: the database 03 handed over ----
-# This is the ONLY flow that inherits state it did not create (01, 02 and 03 all clearState) and
-# it goes offline immediately, so a corpus that did not survive 03 cannot be recovered once the
-# steps below start. Assert it here, where the failure names the hand-off, rather than letting it
-# surface at step 7 as "Conflict target not found" -- which reads like a sync or a scroll bug and
-# costs a 30-minute CI cycle to tell apart from one.
-#
-# "Conflict target" is the probe because it is the row the most steps depend on and 03 leaves it
-# untouched. Offline already, so this waits on the LOCAL database only; 60s is for the emulator,
-# not for a download that is never coming.
-- scrollUntilVisible:
-    element: "Conflict target"
-    direction: DOWN
+# ---- 9. the pill goes offline ----
+# The negative half of 02's assertion. If this still says "Trực tuyến", either the radios did
+# not go down or PowerSync has not noticed, and nothing below means anything.
+- extendedWaitUntil:
+    visible: "Ngoại tuyến"
     timeout: 60000
-- runFlow: subflows/scroll-to-top.yaml
-
-# ---- 9. export must refuse, and say why ----
-# ExportButton reads useStatus().connected, so this is the negative half of the connected=true
-# assertion 02 makes. If it still says "Export all notes" here, either the radios did not go
-# down or PowerSync has not noticed. It lives in the list FOOTER, below every row, so reaching
-# it is a scroll rather than a wait.
-- scrollUntilVisible:
-    element: "Export needs a connection"
-    direction: DOWN
-    timeout: 60000
-- assertNotVisible: "Export all notes"
-
-- runFlow: subflows/scroll-to-top.yaml
 
 # ---- 1. capture offline ----
-# One local INSERT and nothing else (screens/quick-capture.tsx), so this must be
-# indistinguishable from the online case -- no spinner, no pending badge.
 - tapOn:
     id: "box-input"
 - inputText: ${CAPTURE_MARKER}
@@ -63,193 +38,30 @@ appId: ${APP_ID}
 - assertVisible:
     id: "box-input"
     text: "Bạn đang nghĩ gì?"
-- scrollUntilVisible:
-    element: ${CAPTURE_MARKER}
-    direction: DOWN
-    timeout: 15000
+- assertVisible: ${CAPTURE_MARKER}
 
 # ---- 5. double-tap Send ----
-# The in-flight guard (lib/in-flight.ts) has to collapse this to ONE note. `disabled={saving}`
-# cannot do it alone: state updates are async, so two taps in the same frame both read
-# saving === false and each one is a separate INSERT -- the second of which is invisible on
-# device until it syncs. The count is asserted server-side in 04b; this only creates the
-# condition.
-- runFlow: subflows/scroll-to-top.yaml
+# The in-flight guard has to collapse this to ONE note; `disabled={busy}` cannot, because state
+# updates are async and two taps in one frame both read busy === false. Counted server-side in
+# 04b by assert-offline-results.js; this only creates the condition.
 - tapOn:
     id: "box-input"
 - inputText: ${DOUBLE_TAP_MARKER}
 - doubleTapOn:
     id: "box-send"
 
-# ---- 4. FTS5 and the apostrophe ----
-# A bare quote is SYNTAX to FTS5's MATCH, so an unescaped query either errors or silently
-# matches nothing. note-list.tsx renders a query error as "Could not read notes on this
-# device.", which is why that string is asserted absent rather than just checking for a hit.
-#
-# (The web mirror of this asserts the opposite outcome on purpose: Postgres's english config
-# treats both halves of "don't" as stop words, so there an empty result is correct.)
-- scrollUntilVisible:
-    element:
-      id: "search-input"
-    direction: DOWN
-    timeout: 30000
-- tapOn:
-    id: "search-input"
-- inputText: "don't"
-# The keyboard hides the rows outright; see 02. Safe because it is definitely up here.
-- hideKeyboard
-- scrollUntilVisible:
-    element: "Apostrophe note"
-    direction: DOWN
-    timeout: 20000
-- assertNotVisible: "Could not read notes on this device."
-
-- runFlow: subflows/scroll-to-top.yaml
-- scrollUntilVisible:
-    element:
-      id: "search-input"
-    direction: DOWN
-    timeout: 30000
-- tapOn:
-    id: "search-input"
-- eraseText
-- hideKeyboard
-
-# ---- 2. trash a note that already existed ----
-# The CRITICAL case: a note trashed offline must STAY trashed through the reconnect, rather
-# than being resurrected by the download stream replaying the server's older copy.
-- runFlow: subflows/scroll-to-top.yaml
-- scrollUntilVisible:
-    element: "Trash target"
-    direction: DOWN
-    timeout: 30000
-- tapOn: "Trash target"
-- extendedWaitUntil:
-    visible: "Trash"
-    timeout: 20000
-- tapOn: "Trash"
-- extendedWaitUntil:
-    visible: "In trash"
-    timeout: 20000
-- back
-
-# ---- 6. type immediately, leave, come back ----
-# Two guards at once. The editor renders "Opening…" until BOTH the body and the conflict base
-# are seeded -- a keystroke landing before that sets `content`, so the base never seeds and
-# every later save silently returns early. And the debounce timer is deliberately NOT cleared
-# on unmount, so leaving within 800ms must still save rather than discard the typing.
-- runFlow: subflows/scroll-to-top.yaml
-- scrollUntilVisible:
-    element: "Restore target"
-    direction: DOWN
-    timeout: 30000
-- tapOn: "Restore target"
-- extendedWaitUntil:
-    visible: "Edits save automatically"
-    timeout: 20000
-- tapOn:
-    id: "editor-input"
-- inputText: "TYPEDFAST"
-# The keyboard has to go BEFORE the back, or the back never leaves the editor: Android gives the
-# IME first refusal on it and it is spent dismissing the keyboard. The step below would then be
-# looking for a list row while still on the editor.
-#
-# This does cost the sharpest version of the test -- "leave within the 800ms debounce" is less
-# certain with a command in between -- but the assertion that matters, that TYPEDFAST survived
-# the unmount, is unchanged, and a back that does not navigate tests nothing at all.
-- hideKeyboard
-- back
-# Look for it again rather than tapping where it was. `back` does restore the list at the scroll
-# offset we left, but the row is no longer AT that offset: the edit above bumped updated_at, and
-# the list is `ORDER BY updated_at DESC`, so the note moved to the top while the viewport stayed
-# put. The screenshot from the run that taught us this showed the list sitting on dune / vorpal
-# blade / Dune / Apostrophe / Conflict / Zarquon and the footer, with "Restore target" somewhere
-# above the fold.
-- runFlow: subflows/scroll-to-top.yaml
-- scrollUntilVisible:
-    element: "Restore target"
-    direction: DOWN
-    timeout: 30000
-- tapOn: "Restore target"
-# `.*` because Maestro treats a selector as a regex that must match the element's WHOLE text, and
-# this one is a multiline box holding the entire body -- the typing landed at the end of it, so
-# the text is "This note gets trashed and then restored while offline.TYPEDFAST". A bare
-# "TYPEDFAST" failed against exactly that, with the word plainly on screen in the screenshot.
-- extendedWaitUntil:
-    visible: ".*TYPEDFAST.*"
-    timeout: 20000
-
-# ---- 3. trash a note and restore it, both offline ----
-# Deliberately a DIFFERENT note from step 2's, which has to stay trashed. Trash and restore are
-# both plain local UPDATEs of deleted_at (lib/note-edits.ts), so the pair queues two ops on one
-# row -- and what must survive the reconnect is the NET result, not the first op or the last one
-# the server happens to apply.
-#
-# Still inside the editor from the step above; these are its controls, not list rows.
-- extendedWaitUntil:
-    visible: "Trash"
-    timeout: 20000
-- tapOn: "Trash"
-- extendedWaitUntil:
-    visible: "In trash"
-    timeout: 20000
-- tapOn:
-    id: "restore-button"
-# The control swaps back on its own: useQuery is reactive, so clearing deleted_at re-renders
-# this row. Waiting for "Trash" to return is therefore the assertion that the restore landed
-# locally, with no navigation and no refetch involved.
-- extendedWaitUntil:
-    visible: "Trash"
-    timeout: 20000
-- assertNotVisible: "In trash"
-- back
-
-# ---- 7. THE CONFLICT RUN ----
-# Edit the note on the device, offline...
-- runFlow: subflows/scroll-to-top.yaml
-- scrollUntilVisible:
-    element: "Conflict target"
-    direction: DOWN
-    timeout: 30000
-- tapOn: "Conflict target"
-- extendedWaitUntil:
-    visible: "Edits save automatically"
-    timeout: 20000
-- tapOn:
-    id: "editor-input"
-- eraseText
-- inputText: "DEVICEBODY written on the phone while offline."
-# The debounce has to fire before leaving, or there is no queued edit to conflict with.
-- extendedWaitUntil:
-    visible: "Saved on this device"
-    timeout: 20000
-# Again: the keyboard would eat the back press and leave us on the editor.
-- hideKeyboard
-- back
-
-# ...and edit the SAME note differently on the server. runScript runs on the HOST, whose network
-# is untouched, so this reaches the API even though the emulator's radios are down. That is what
-# makes the conflict run automatable at all -- no browser, no second device.
-- runScript:
-    file: scripts/server-edit-note.js
-    env:
-      NOTE_ID: ${NOTE_CONFLICT_TARGET}
-      NEW_CONTENT: "SERVERBODY written on the web while the phone was offline."
-
 # ---- 8. offline, the box answers from the local index ----
-- runFlow: subflows/scroll-to-top.yaml
+# THE ONE THAT NOW CARRIES THE MOST WEIGHT. With no note list, this is the only remaining proof
+# that notes actually reached local SQLite: offlineAnswer() reads the device's own FTS index,
+# so a hit here cannot come from the network.
 - tapOn:
     id: "box-input"
 - inputText: "định giá"
 - tapOn:
     id: "box-send"
-# No network, so this must resolve from local SQLite alone and quickly. A timeout here means
-# the offline branch is reaching for the network.
 - extendedWaitUntil:
     visible:
       id: "box-status"
     timeout: 5000
-
-# Mục 4 step 3 is covered above, on "Restore target". It was not, until note-editor.tsx gained
-# the Restore control it had been missing since Task 13 -- `restoreNote` existed and was
-# unit-tested, and no screen ever imported it.
+- assertVisible:
+    id: "box-offline-match"

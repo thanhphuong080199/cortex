@@ -1,9 +1,15 @@
-// Post-reconnect assertions the device cannot make about itself: exact row counts, the shape of
-// the conflict copy, and whether created_at kept the capture time.
+// Post-reconnect assertions the device cannot make about itself: exact row counts, and whether
+// created_at kept the capture time.
 //
 // Runs on the HOST against PostgREST, with the USER's token so RLS applies exactly as the app's
 // own reads do. A service-role key here would prove rows exist while saying nothing about
 // whether their owner can see them.
+//
+// Retired on 2026-08-22 alongside 04a's trash/restore/conflict sections: the trashed-note and
+// conflict-copy assertions that used to live here counted server state 04a no longer creates
+// (no offline trash, no offline restore, no device-side edit to conflict with -- see 04a's own
+// retirement comment). What's left are the two properties 04a still stages: the offline capture
+// uploading, and the double-tapped Send collapsing to one note.
 
 var REST = SUPABASE_URL + "/rest/v1";
 
@@ -53,51 +59,6 @@ if (dbl.length !== 1) {
   );
 }
 
-/* ---- 7. the conflict copy ---- */
-var original = get("/notes?select=id,content,lifecycle&id=eq." + NOTE_CONFLICT_TARGET);
-if (original.length !== 1) {
-  throw new Error("the original conflict note is gone from the server entirely");
-}
-if (original[0].content.indexOf("SERVERBODY") !== 0) {
-  throw new Error(
-    "the original note must keep the WEB body; it holds: " + original[0].content
-  );
-}
-
-var copies = eventually(function () {
-  var r = get("/notes?select=id,content,lifecycle&content=like.DEVICEBODY*&deleted_at=is.null");
-  return r.length >= 1 ? r : null;
-}, "the conflict copy carrying the device body");
-
-if (copies.length !== 1) {
-  throw new Error("expected exactly 1 conflict copy, found " + copies.length);
-}
-if (copies[0].id === NOTE_CONFLICT_TARGET) {
-  // The failure this whole run exists to catch: the device's edit applied on top of the
-  // server's instead of forking, i.e. silent last-write-wins.
-  throw new Error("the device body overwrote the original rather than making a copy");
-}
-if (copies[0].lifecycle !== "inbox") {
-  throw new Error("the conflict copy must land in inbox, got: " + copies[0].lifecycle);
-}
-
-/* ---- 2. the offline trash stuck ---- */
-var trashed = eventually(function () {
-  var r = get("/notes?select=id,deleted_at&id=eq." + NOTE_TRASH_TARGET);
-  return r.length === 1 && r[0].deleted_at !== null ? r : null;
-}, "the offline trash to reach the server and stay");
-
-/* ---- 3. the offline trash-then-restore netted out to "not trashed" ---- */
-// Two ops on one row, queued in order. A server that applied them out of order, or that kept
-// only the first, would leave this note in the trash -- and on the device it would silently
-// vanish from every view except `trash`, which is indistinguishable from it never having been
-// restored at all.
-eventually(function () {
-  var r = get("/notes?select=id,deleted_at&id=eq." + NOTE_RESTORE_TARGET);
-  if (r.length !== 1) throw new Error("the restored note is gone from the server entirely");
-  return r[0].deleted_at === null ? r : null;
-}, "the offline restore to win over the offline trash on the same row");
-
 /* ---- mục 5. created_at is the CAPTURE time, not the upload time ---- */
 // The note was captured minutes before the radios came back. If created_at were stamped when
 // the server received it, it would be seconds old rather than minutes.
@@ -110,5 +71,4 @@ if (ageMs < 20000) {
   );
 }
 
-output.conflictCopyId = copies[0].id;
 output.capturedNoteId = captured[0].id;
