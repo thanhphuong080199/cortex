@@ -24,11 +24,13 @@ import type { LiveTurn } from "../lib/transcript";
  * Since Task 12 this component runs a turn but does not render its answer -- the transcript in
  * chat.tsx does, from `chat_messages` rows. `onLive` hands the screen the in-flight turn so it
  * can render it before the server's rows have replicated: called with the fresh turn right after
- * the local note write succeeds, updated on every `token` event, and cleared with `null` in the
- * same `finally` that already governs every other exit path. `buildTranscript`'s dedup (keyed on
- * the note's own id) covers the window between that clear and the replicated rows landing --
- * clearing anywhere earlier than the turn's own natural end would just be a second, redundant
- * place for the same bug to hide.
+ * the local note write succeeds, and updated on every `token` event.
+ *
+ * The `finally` that governs every exit path does NOT clear `live` to `null` (final whole-branch
+ * review finding -- it used to, and that was the bug). It marks the turn `settled: true` instead,
+ * keeping the last known text/answer. `chat.tsx` owns the actual retirement, because it's the
+ * only place with access to the replicated rows needed to retire on evidence rather than on a
+ * timer that has no idea whether the answer actually made it to the table yet.
  */
 export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => void }) {
   const db = usePowerSync();
@@ -54,13 +56,16 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
 
       const id = randomUUID();
       const createdAt = new Date().toISOString();
+      // Hoisted above the try so `finally` can still see the turn's last known state -- it needs
+      // that to mark the turn settled rather than clear it (see the class doc). Stays `null`
+      // for the two exit paths that never got as far as calling `onLive` at all (the write
+      // failing, or an empty box), so `finally` has nothing to settle for those.
+      let turn: LiveTurn | null = null;
       // One try/finally around the whole turn, not two: `busy` must clear on EVERY exit path,
       // including the local-write branch's `if (!wrote) return` and its `catch`. A second,
       // separate try around only the network call left those two exits with no `finally` at
       // all, so an empty-box tap -- or a genuine write failure -- left Send permanently
       // disabled. Same shape the deleted quick-capture.tsx used for its own `if (!wrote) return`.
-      // `onLive(null)` lives in this same finally for the same reason: one clear, on every exit
-      // path, is the only version of this that cannot leave a stale turn on screen.
       try {
         let wrote: boolean;
         try {
@@ -76,8 +81,9 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
         // is both faster and strictly safer.
         const asked = text;
         setText("");
-        onLive({ noteId: id, text: asked, answer: "", createdAt });
         let answer = "";
+        turn = { noteId: id, text: asked, answer, createdAt };
+        onLive(turn);
 
         try {
           const { data: { session } } = await supabase.auth.getSession();
@@ -92,7 +98,8 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
             else if (ev.type === "web") setWeb(ev);
             else if (ev.type === "token") {
               answer += ev.text;
-              onLive({ noteId: id, text: asked, answer, createdAt });
+              turn = { noteId: id, text: asked, answer, createdAt };
+              onLive(turn);
             }
             else if (ev.type === "mood") {
               // Mirrored locally under the server's id so undo has a row to delete before
@@ -116,7 +123,12 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
         }
       } finally {
         setBusy(false);
-        onLive(null);
+        // NOT onLive(null). The turn may still be waiting on chat_messages to replicate --
+        // clearing here regardless would blank a fully-written answer the instant the stream
+        // ends, before its row has necessarily landed. `settled: true` tells chat.tsx it may now
+        // start looking for that evidence; chat.tsx (which owns `rows`) decides when retiring is
+        // actually safe. See transcript.ts's `LiveTurn.settled` doc and `liveHasReplicated`.
+        if (turn) onLive({ ...turn, settled: true });
       }
     });
   }

@@ -32,7 +32,11 @@ body {
   display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden;
 }
 
-.wrap { max-width: 760px; margin: 0 auto; padding: 24px 20px 64px; }
+/* flex:1/min-height:0/overflow-y:auto (final whole-branch review finding): body is a fixed-height
+   flex column with overflow:hidden for the chat layout's sake (only .chat-scroll is meant to
+   scroll). `.wrap`'s one remaining consumer, error.tsx, is a direct body child too, so without
+   its own scroll behavior a long error message had nowhere to go -- body clipped it outright. */
+.wrap { max-width: 760px; margin: 0 auto; padding: 24px 20px 64px; flex: 1; min-height: 0; overflow-y: auto; }
 
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
 .topbar h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
@@ -75,9 +79,14 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
   background: var(--bg); border-bottom: 1px solid var(--line);
 }
 .chat-title { font-weight: 600; letter-spacing: -0.01em; }
-.chat-header .conn { margin-left: auto; font-size: 12px; color: var(--muted); }
+.chat-header .conn { font-size: 12px; color: var(--muted); }
 .chat-header .conn.offline { color: var(--danger); }
-.chat-header .menu-toggle { padding: 4px 9px; line-height: 1; }
+/* margin-left: auto lives here, not on .conn (final whole-branch review finding): the online
+   .conn span is `hidden` -> display:none -> out of flow entirely, so nothing pushed the menu
+   toggle right in the normal (online) state -- only .conn's own offline appearance happened to
+   push it. .menu-toggle is the one element always present, so it's the one that must carry the
+   auto margin. */
+.chat-header .menu-toggle { margin-left: auto; padding: 4px 9px; line-height: 1; }
 .chat-menu { position: absolute; top: 44px; right: 12px; background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px; padding: 4px; }
 

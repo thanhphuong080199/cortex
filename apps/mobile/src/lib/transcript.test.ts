@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscript, type ChatRow } from "./transcript";
+import { buildTranscript, liveHasReplicated, type ChatRow } from "./transcript";
 
 const tz = "Asia/Ho_Chi_Minh";
 const now = new Date("2026-08-22T03:00:00.000Z");
@@ -131,6 +131,23 @@ describe("buildTranscript", () => {
     expect(messages[1]).toMatchObject({ role: "assistant", content: "Cá", id: "live-answer-n1" });
   });
 
+  // FINAL WHOLE-BRANCH REVIEW FINDING. `live.text` is `assistant-box.tsx`'s raw, untrimmed
+  // textarea value; `row.content` is always trimmed server-side (capture.ts, turn.ts). A
+  // multiline capture with routine trailing whitespace -- exactly the shape a `multiline`
+  // TextInput produces -- must still dedup, or the live bubble never retires.
+  it("dedups the live turn even when the client text carries whitespace the server trimmed", () => {
+    const items = buildTranscript([
+      row({
+        id: "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        created_at: "2026-08-22T02:30:01.000Z", content: "mỏi mắt ăn gì",
+      }),
+    ], {
+      noteId: "n1", text: "mỏi mắt ăn gì \n", answer: "",
+      createdAt: "2026-08-22T02:30:00.000Z",
+    }, now, tz);
+    expect(items.filter((i) => i.kind === "message")).toHaveLength(1);
+  });
+
   it("marks an interrupted answer from retrieval_meta", () => {
     const items = buildTranscript([
       row({ id: "a", created_at: "2026-08-22T02:00:00.000Z", role: "assistant",
@@ -158,5 +175,50 @@ describe("buildTranscript", () => {
     ], { noteId: "n9", text: "x", answer: "y", createdAt: "2026-08-22T03:00:00.000Z" }, now, tz);
     const ids = items.map((i) => i.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+// THE RETIREMENT SIGNAL. `chat.tsx` calls this once a turn is `settled` to decide whether it is
+// safe to clear `live` -- retiring on a timer alone (the bug this whole fix exists for) blanks a
+// fully-written answer the instant the stream ends, before its row has necessarily replicated.
+describe("liveHasReplicated", () => {
+  const live = {
+    noteId: "n1", text: "mỏi mắt ăn gì", answer: "Cá hồi.",
+    createdAt: "2026-08-22T02:30:00.000Z", settled: true,
+  };
+
+  it("is false with no rows at all", () => {
+    expect(liveHasReplicated([], live)).toBe(false);
+  });
+
+  // The common case: a token arrived, so the assistant's row -- written last -- is the evidence
+  // that matters. The user's row replicating first (routine; see turn.ts) must not count.
+  it("waits for the assistant's row when the turn produced an answer", () => {
+    const userOnly = [row({
+      id: "u1", created_at: "2026-08-22T02:30:01.000Z", content: "mỏi mắt ăn gì",
+    })];
+    expect(liveHasReplicated(userOnly, live)).toBe(false);
+
+    const both = [...userOnly, row({
+      id: "a1", role: "assistant", created_at: "2026-08-22T02:30:05.000Z", content: "Cá hồi.",
+    })];
+    expect(liveHasReplicated(both, live)).toBe(true);
+  });
+
+  // No token ever arrived (offline/error): there is no answer half to wait for at all, so the
+  // user's own row is the only evidence that can ever exist.
+  it("accepts the user's row alone when the turn never produced an answer", () => {
+    const noAnswer = { ...live, answer: "" };
+    const userOnly = [row({
+      id: "u1", created_at: "2026-08-22T02:30:01.000Z", content: "mỏi mắt ăn gì",
+    })];
+    expect(liveHasReplicated(userOnly, noAnswer)).toBe(true);
+  });
+
+  it("ignores an assistant row with different content", () => {
+    const wrongText = [row({
+      id: "a1", role: "assistant", created_at: "2026-08-22T02:30:05.000Z", content: "Something else.",
+    })];
+    expect(liveHasReplicated(wrongText, live)).toBe(false);
   });
 });

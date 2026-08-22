@@ -18,11 +18,14 @@ appId: ${APP_ID}
     visible: "Trực tuyến"
     timeout: 180000
 
-# ---- 1. the offline capture survived the round trip ----
-- extendedWaitUntil:
-    visible: ${CAPTURE_MARKER}
-    timeout: 60000
-
+# The UI-level "the offline capture survived the round trip" check that used to live here is
+# gone (final whole-branch review finding, removed 2026-08-22): it waited for ${CAPTURE_MARKER}
+# to reappear in the transcript, which it structurally cannot -- an offline capture is a `notes`
+# INSERT only, no assistant turn ever runs for it, so no `chat_messages` row is ever written and
+# this always timed out. `assert-offline-results.js` below is the actual proof this step wanted:
+# it polls PostgREST for the `notes` row itself (id, created_at), which is where the capture
+# really landed.
+#
 # ---- everything that can only be counted ----
 - runScript:
     file: scripts/assert-offline-results.js

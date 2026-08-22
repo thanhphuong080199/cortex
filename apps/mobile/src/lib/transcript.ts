@@ -20,9 +20,17 @@ export interface ChatRow {
  * `gen_random_uuid()` the server assigns on insert; see `turn.ts` and migration 00006). `noteId`
  * is therefore only good for React keys and for telling turns apart from each other, never for
  * matching against a replicated row -- see the dedup note below.
+ *
+ * `settled` (final whole-branch review finding): true once `AssistantBox`'s `finally` has run --
+ * no more tokens are coming, for better or worse (success, offline, or error). It is NOT a
+ * signal to stop rendering the overlay; `chat.tsx` uses it only to know when it may START looking
+ * for replication evidence (`liveHasReplicated`) before retiring `live` to `null`. Retiring on
+ * `settled` alone, without that evidence, is the bug this field exists to prevent: the assistant's
+ * row routinely replicates AFTER the SSE stream reports done, so clearing the overlay the instant
+ * it settles makes a fully-written answer blink off screen and reappear a moment later.
  */
 export interface LiveTurn {
-  noteId: string; text: string; answer: string; createdAt: string;
+  noteId: string; text: string; answer: string; createdAt: string; settled?: boolean;
 }
 
 export type Item =
@@ -62,13 +70,50 @@ const LIVE_MATCH_WINDOW_MS = 60_000;
  * little early for an unrelated turn -- the live overlay still shows the right text either way,
  * because it renders from `live`, not from the matched row. A false negative (no match found in
  * time) self-heals on the next render once `AssistantBox`'s `finally` clears `live` to `null`.
+ *
+ * Both sides are trimmed before comparing (final whole-branch review finding). `live.text`
+ * comes from `assistant-box.tsx`'s `const asked = text` -- the raw, untrimmed textarea value --
+ * while the persisted `row.content` is always trimmed (`capture.ts`'s `.trim()` on the way into
+ * `notes`, and the server writes `chat_messages.content` from that same trimmed
+ * `note.content_text`, turn.ts). A multiline capture with routine trailing whitespace would
+ * otherwise never match, silently defeating the dedup for exactly the input shape this app
+ * exists to take (a `multiline` TextInput).
  */
 function matchesLive(row: ChatRow, live: LiveTurn): boolean {
-  if (row.role !== "user" || row.content !== live.text) return false;
+  if (row.role !== "user" || row.content.trim() !== live.text.trim()) return false;
   const rowMs = Date.parse(row.created_at);
   const liveMs = Date.parse(live.createdAt);
   if (Number.isNaN(rowMs) || Number.isNaN(liveMs)) return false;
   return Math.abs(rowMs - liveMs) <= LIVE_MATCH_WINDOW_MS;
+}
+
+/**
+ * The assistant-side twin of `matchesLive`, used only to decide when it is safe to retire a
+ * SETTLED live turn (see `liveHasReplicated`). Same reasoning, same trim, same window: the
+ * server writes `chat_messages.content` verbatim from the generated text, so an exact (trimmed)
+ * match against `live.answer` is the only signal available -- there is no shared id here either.
+ */
+function matchesLiveAnswer(row: ChatRow, live: LiveTurn): boolean {
+  if (row.role !== "assistant" || row.content.trim() !== live.answer.trim()) return false;
+  const rowMs = Date.parse(row.created_at);
+  const liveMs = Date.parse(live.createdAt);
+  if (Number.isNaN(rowMs) || Number.isNaN(liveMs)) return false;
+  return Math.abs(rowMs - liveMs) <= LIVE_MATCH_WINDOW_MS;
+}
+
+/**
+ * Whether replication has produced evidence that `live` is safe to retire. Checks whichever
+ * half is the last one written: if a token ever arrived, the assistant's row is the one that
+ * settles last (it's a single insert of the final text, after generation finishes), so that's
+ * the row worth waiting for; if no token ever arrived (an offline/error turn with nothing to
+ * show), there is no assistant row to wait for at all -- the user's own row is the only evidence
+ * that can ever exist, and for a genuinely offline turn even that will never arrive (see
+ * `chat.tsx`'s timeout backstop for that case).
+ */
+export function liveHasReplicated(rows: ChatRow[], live: LiveTurn): boolean {
+  return live.answer !== ""
+    ? rows.some((r) => matchesLiveAnswer(r, live))
+    : rows.some((r) => matchesLive(r, live));
 }
 
 /**

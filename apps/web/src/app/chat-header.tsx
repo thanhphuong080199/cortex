@@ -1,4 +1,5 @@
 "use client";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 /**
@@ -10,8 +11,15 @@ import { useEffect, useState } from "react";
  * The connection dot is not decoration either. `ExportButton`'s label was the plainest proof
  * that the client was online -- e2e keyed on it -- and export went with the sidebar. This is
  * its replacement, for the user and for the suite.
+ *
+ * Renders nothing on `/login` (final whole-branch review finding): the root layout mounts this
+ * unconditionally, and a signed-out visitor was getting a sign-out menu for a session that
+ * doesn't exist. Checked with `usePathname` here rather than moving the mount out of
+ * `layout.tsx`, since that layout is a server component and this is the one place already
+ * paying the "use client" cost.
  */
 export function ChatHeader() {
+  const pathname = usePathname();
   const [online, setOnline] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -23,6 +31,8 @@ export function ChatHeader() {
     window.addEventListener("offline", down);
     return () => { window.removeEventListener("online", up); window.removeEventListener("offline", down); };
   }, []);
+
+  if (pathname?.startsWith("/login")) return null;
 
   return (
     <header className="chat-header">

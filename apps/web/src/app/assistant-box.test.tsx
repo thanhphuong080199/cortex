@@ -432,6 +432,33 @@ describe("the transcript", () => {
     expect(screen.queryByText(/interrupted|bị gián đoạn/i)).toBeNull();
   });
 
+  // Final whole-branch review finding: this logic (assistant-box.tsx:434-440) had no test at
+  // all. Timestamps are picked far from any plausible local-midnight ambiguity -- noon UTC, and
+  // three days apart for the "different day" case -- so the assertion holds regardless of the
+  // test runner's TZ.
+  describe("day separators", () => {
+    it("renders one separator per calendar day, not per message", () => {
+      render(<AssistantBox token="t" userId="u1" initialTurns={[
+        turn({ id: "a", createdAt: "2026-08-20T12:00:00.000Z", content: "hôm qua" }),
+        turn({ id: "b", createdAt: "2026-08-20T13:00:00.000Z", content: "vẫn hôm qua" }),
+        turn({ id: "c", createdAt: "2026-08-22T12:00:00.000Z", content: "hôm nay" }),
+      ]} />);
+      expect(screen.getAllByRole("separator")).toHaveLength(2);
+    });
+
+    it("puts a separator before the very first message too", () => {
+      render(<AssistantBox token="t" userId="u1" initialTurns={[
+        turn({ id: "a", createdAt: "2026-08-22T12:00:00.000Z" }),
+      ]} />);
+      const [separator] = screen.getAllByRole("separator");
+      const bubble = screen.getByText("Đã lưu.");
+      expect(separator).toBeDefined();
+      expect(
+        separator!.compareDocumentPosition(bubble) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+  });
+
   // The naive version double-renders the last turn: once from the box's streaming state and
   // once from the transcript it was just appended to. The box owns what is still streaming;
   // the transcript owns everything that is done.

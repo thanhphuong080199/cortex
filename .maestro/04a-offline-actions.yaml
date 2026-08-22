@@ -38,7 +38,16 @@ appId: ${APP_ID}
 - assertVisible:
     id: "box-input"
     text: "Bạn đang nghĩ gì?"
-- assertVisible: ${CAPTURE_MARKER}
+# extendedWaitUntil, not a bare assertVisible (final whole-branch review finding): this text
+# only exists via the live-turn overlay (no server round trip while offline, so no chat_messages
+# row is ever written for it -- assert-offline-results.js proves the durable half against
+# /notes). AssistantBox's `finally` no longer clears that overlay the instant the stream attempt
+# fails; chat.tsx keeps it up to RETIRE_TIMEOUT_MS waiting for replication evidence that can
+# never arrive here. A bare assertVisible raced that window and could fire before or after the
+# overlay had a chance to settle.
+- extendedWaitUntil:
+    visible: ${CAPTURE_MARKER}
+    timeout: 3000
 
 # ---- 5. double-tap Send ----
 # The in-flight guard has to collapse this to ONE note; `disabled={busy}` cannot, because state

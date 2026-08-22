@@ -1,12 +1,20 @@
 import { useQuery } from "@powersync/react-native";
 import { useColorScheme } from "react-native";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FlatList, KeyboardAvoidingView, Platform, Text, View } from "react-native";
 
 import { AssistantBox } from "./assistant-box";
 import { ConnectionPill } from "../components/connection-pill";
-import { buildTranscript, type ChatRow, type Item, type LiveTurn } from "../lib/transcript";
+import { buildTranscript, liveHasReplicated, type ChatRow, type Item, type LiveTurn } from "../lib/transcript";
 import { themeFor } from "../theme";
+
+// How long to keep a SETTLED live turn on screen once no more replication evidence can be
+// expected -- the backstop for turns that will never get a matching row at all (an offline
+// capture: `turn.ts` never runs, so no `chat_messages` row is ever written for it; see the
+// final whole-branch review's Maestro findings). Generous enough that a normal online turn is
+// almost always retired by `liveHasReplicated` well before this fires -- this is the fallback
+// for the case where evidence can never arrive, not the common path.
+const RETIRE_TIMEOUT_MS = 8_000;
 
 /**
  * The whole app. Until 2026-08-22 this screen was a note list with the chat box wedged in as
@@ -34,6 +42,23 @@ export function Chat() {
      FROM chat_messages ORDER BY created_at DESC LIMIT ?`,
     [limit],
   );
+
+  // Retire a SETTLED live turn the instant its row(s) replicate -- checked on every reactive
+  // `rows` update, which is exactly the signal PowerSync gives us when a new row lands.
+  useEffect(() => {
+    if (live?.settled && liveHasReplicated(rows, live)) setLive(null);
+  }, [rows, live]);
+
+  // The backstop, armed exactly once per settled turn (keyed on noteId + settled, not on `rows`
+  // -- re-arming on every row change would let an unrelated replication event keep pushing this
+  // out forever). Its cleanup fires when `live` changes for ANY reason, including the effect
+  // above clearing it early, which cancels the now-pointless timer.
+  useEffect(() => {
+    if (!live?.settled) return;
+    const t = setTimeout(() => setLive(null), RETIRE_TIMEOUT_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live?.noteId, live?.settled]);
 
   const items = useMemo(
     () => buildTranscript([...rows].reverse(), live, new Date(), Intl.DateTimeFormat().resolvedOptions().timeZone),

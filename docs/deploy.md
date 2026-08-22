@@ -1316,33 +1316,43 @@ show it again.
 -- isolation layer: replication reads around RLS entirely (parent spec §15.5).
 create role powersync_role with replication bypassrls login password '<REDACTED>';
 
--- SELECT only, and only on the six synced tables. NOT "on all tables": this role has no
+-- SELECT only, and only on the seven synced tables (six from Phase 1b's original setup, plus
+-- chat_messages — added 2026-08-22 by migration 00034 for the mobile chat transcript; see
+-- "chat_messages joins the publication" below). NOT "on all tables": this role has no
 -- business seeing integrations.credentials.
 grant select on public.notes, public.tags, public.note_tags,
-                 public.links, public.media_items, public.checkins
+                 public.links, public.media_items, public.checkins, public.chat_messages
   to powersync_role;
 
 -- The publication MUST be named "powersync". Its SCOPE is ours to choose, and choosing
 -- matters: PowerSync's setup guide says `FOR ALL TABLES`, which would put
 -- integrations.credentials, note_chunks, usage_ledger and memory_revisions into the
 -- replication stream. The sync rules would filter them out -- but only after they had
--- left Postgres. Naming the six tables keeps them out of the stream entirely, giving a
+-- left Postgres. Naming the seven tables keeps them out of the stream entirely, giving a
 -- third isolation layer beneath the sync rules.
 create publication powersync for table
   public.notes, public.tags, public.note_tags,
-  public.links, public.media_items, public.checkins;
+  public.links, public.media_items, public.checkins, public.chat_messages;
 ```
 
-Verify immediately — this is the whole point of the step:
+Verify immediately — this is the whole point of the step. Being IN the publication is
+necessary but not sufficient: logical replication also requires the table-level GRANT above,
+which is a separate check (`bypassrls` bypasses row policies, not table grants) —
 
 ```sql
 select tablename from pg_publication_tables where pubname = 'powersync' order by tablename;
 ```
 
-Exactly six rows. Anything else (especially `integrations`) means
+Exactly seven rows. Anything else (especially `integrations`) means
 `drop publication powersync;` and create it again. `packages/db`'s
 `sync-rules-isolation.test.ts` asserts this same property through
 `_test_publication_tables`, so a later widening fails the suite rather than going unnoticed.
+
+```sql
+select has_table_privilege('powersync_role', 'public.chat_messages', 'SELECT');
+-- must be true -- run this for every table in the list above, not just chat_messages, since
+-- the publication query alone cannot tell you whether the GRANT was ever issued.
+```
 
 ### The publication is now also in a migration — `00016_powersync_publication.sql`
 
@@ -1367,7 +1377,8 @@ session:
 
 ```sql
 select * from _test_publication_tables('powersync');
--- checkins, links, media_items, note_tags, notes, tags -- exactly six rows
+-- checkins, links, media_items, note_tags, notes, tags -- exactly six rows (before 00034; see
+-- below for the seventh)
 ```
 
 **Run 2026-08-03: six rows, no `integrations`.** `sync-rules-isolation.test.ts` asserts this
@@ -1378,6 +1389,36 @@ A publication that lives only in a dashboard session is a layer nobody can revie
 restore. The migration is what makes the local stack and CI carry the same six-table scope the
 hosted project was given by hand — which is what lets the test run anywhere instead of
 skipping, as its first draft did everywhere.
+
+### chat_messages joins the publication — `00034_powersync_publication_chat_messages.sql`
+
+Stage S1 (2026-08-22) added the mobile chat transcript, and with it a seventh synced table:
+`chat_messages` must replicate to the device for the chat screen to work offline. Same
+guarded shape as `00016`, for the same reason (a bare `alter publication ... add table`
+errors on a relation already present, which is exactly the re-run-against-hosted case), plus
+one thing `00016` didn't need: a table-level `GRANT SELECT` to `powersync_role`, guarded
+behind `if exists (select 1 from pg_roles where rolname = 'powersync_role')` because that role
+does not exist on the local/CI stack (`e2e/powersync/up.sh` replicates as `postgres` there).
+
+**Final whole-branch review finding (Critical), fixed 2026-08-22 before this ever reached
+hosted:** the first version of this migration added the publication membership but never
+granted `powersync_role` SELECT on the table. Local and CI could never have caught this —
+neither runs PowerSync as that role — so it would have shipped as a silent, permanent empty
+transcript on every real device the moment `supabase db push` (without `--local`) applied it,
+discovered only by a human looking at a phone.
+
+**As of this fix wave, `00034` has NOT yet been applied to the hosted project** — Task 16's
+unflagged `supabase db push` is still deliberately deferred to a human (see the top-level
+Deploy checklist). When it is, verify BOTH properties, not just one — membership in the
+publication does not imply the grant exists, and vice versa:
+
+```sql
+select * from _test_publication_tables('powersync');
+-- checkins, links, media_items, note_tags, notes, tags, chat_messages -- exactly seven rows
+
+select has_table_privilege('powersync_role', 'public.chat_messages', 'SELECT');
+-- must be true
+```
 
 ## 2. PowerSync instance
 
