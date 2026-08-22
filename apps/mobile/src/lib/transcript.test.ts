@@ -42,15 +42,56 @@ describe("buildTranscript", () => {
     expect(items.filter((i) => i.kind === "message")).toHaveLength(1);
   });
 
-  // THE DEDUP, and the reason the live turn is keyed on noteId. The replicated rows arrive a
-  // second or two after the stream ends; for that window both exist, and without this the user
-  // watches their own message appear twice.
+  // THE DEDUP. `chat_messages.id` is a server-generated `gen_random_uuid()` -- turn.ts never
+  // sets it to the note's id -- so the replicated row's id here is a realistic-looking server
+  // UUID that shares NOTHING with `noteId: "n1"`. The match has to come from content, role and
+  // timing instead. The replicated rows arrive a second or two after the stream ends; for that
+  // window both exist, and without this the user watches their own message appear twice.
   it("drops the live turn once its rows have replicated", () => {
     const items = buildTranscript([
-      row({ id: "n1", created_at: "2026-08-22T02:30:00.000Z", content: "mỏi mắt ăn gì" }),
-      row({ id: "m1", created_at: "2026-08-22T02:30:05.000Z", role: "assistant", content: "Cá hồi." }),
+      row({
+        id: "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        created_at: "2026-08-22T02:30:01.000Z", content: "mỏi mắt ăn gì",
+      }),
+      row({
+        id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        created_at: "2026-08-22T02:30:05.000Z", role: "assistant", content: "Cá hồi.",
+      }),
     ], {
       noteId: "n1", text: "mỏi mắt ăn gì", answer: "Cá hồi.",
+      createdAt: "2026-08-22T02:30:00.000Z",
+    }, now, tz);
+    expect(items.filter((i) => i.kind === "message")).toHaveLength(2);
+  });
+
+  // A same-text ASSISTANT row must not stand in for the user's own message -- matching on
+  // content alone, without the role check, would drop the live turn against the wrong half of
+  // someone else's exchange.
+  it("does not dedup the live turn against a same-text row of the other role", () => {
+    const items = buildTranscript([
+      row({
+        id: "7c9e6679-7425-40de-944b-e07fc1f90ae7", role: "assistant",
+        created_at: "2026-08-22T02:30:01.000Z", content: "mỏi mắt ăn gì",
+      }),
+    ], {
+      noteId: "n1", text: "mỏi mắt ăn gì", answer: "",
+      createdAt: "2026-08-22T02:30:00.000Z",
+    }, now, tz);
+    // The row (assistant) plus the still-live user bubble (no answer token yet): 2 messages,
+    // not 1 -- the live turn was NOT dropped.
+    expect(items.filter((i) => i.kind === "message")).toHaveLength(2);
+  });
+
+  // A same-text row from far outside the match window is a different conversation, not this
+  // turn's replica -- e.g. the user asking the identical question again days later.
+  it("does not dedup the live turn against a same-text row outside the time window", () => {
+    const items = buildTranscript([
+      row({
+        id: "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        created_at: "2026-08-20T02:30:00.000Z", content: "mỏi mắt ăn gì",
+      }),
+    ], {
+      noteId: "n1", text: "mỏi mắt ăn gì", answer: "",
       createdAt: "2026-08-22T02:30:00.000Z",
     }, now, tz);
     expect(items.filter((i) => i.kind === "message")).toHaveLength(2);

@@ -15,8 +15,11 @@ export interface ChatRow {
 /**
  * The turn currently streaming. It exists in no table: the server writes both of its rows, and
  * only after the fact -- so while the answer is arriving the screen has to render a pair that
- * nothing has persisted. Keyed by `noteId` because that is the id the DEVICE generated before
- * the turn started, which is what makes the dedup below possible at all.
+ * nothing has persisted. `noteId` names the `notes` row the device captured for this turn -- it
+ * is NOT the id the replicated `chat_messages` row will carry (that id is a fresh
+ * `gen_random_uuid()` the server assigns on insert; see `turn.ts` and migration 00006). `noteId`
+ * is therefore only good for React keys and for telling turns apart from each other, never for
+ * matching against a replicated row -- see the dedup note below.
  */
 export interface LiveTurn {
   noteId: string; text: string; answer: string; createdAt: string;
@@ -36,14 +39,46 @@ function isIncomplete(meta: string | null): boolean {
   }
 }
 
+// How long after the live turn started a replicated row still counts as "that turn". Generous
+// on purpose: the server writes the user's row early (right after session/history resolution,
+// well before retrieval or generation), so it routinely lands before the SSE stream even
+// finishes -- a tight window would miss the common case, not just the rare one.
+const LIVE_MATCH_WINDOW_MS = 60_000;
+
+/**
+ * Whether `row` is the replicated copy of the live turn's OWN user message.
+ *
+ * There is no id to compare: `chat_messages.id` is a server-generated `gen_random_uuid()`
+ * (migration 00006_synthesis_chat.sql), unrelated to `live.noteId`, which is the id of the
+ * device-captured `notes` row. `turn.ts`'s insert never sets `chat_messages.id` to the note's
+ * id, so `row.id === live.noteId` can only ever match by coincidence -- it is a comparison
+ * across two different tables' primary keys. Content is what both sides actually agree on: the
+ * server writes the same text the device sent, verbatim, as the `content` column. Role and a
+ * time window narrow a same-text false positive (the user sending the identical line twice in
+ * one session) without needing the server to round-trip an id the schema doesn't carry.
+ *
+ * Remaining risk, both small and survivable: a false positive (a coincidentally-identical
+ * message from within the last minute retires the WRONG live turn) just makes the dedup fire a
+ * little early for an unrelated turn -- the live overlay still shows the right text either way,
+ * because it renders from `live`, not from the matched row. A false negative (no match found in
+ * time) self-heals on the next render once `AssistantBox`'s `finally` clears `live` to `null`.
+ */
+function matchesLive(row: ChatRow, live: LiveTurn): boolean {
+  if (row.role !== "user" || row.content !== live.text) return false;
+  const rowMs = Date.parse(row.created_at);
+  const liveMs = Date.parse(live.createdAt);
+  if (Number.isNaN(rowMs) || Number.isNaN(liveMs)) return false;
+  return Math.abs(rowMs - liveMs) <= LIVE_MATCH_WINDOW_MS;
+}
+
 /**
  * The rendered list, oldest first, with a day separator before the first message and at every
  * change of local calendar day.
  *
- * The live turn is appended LAST and dropped the moment a replicated row carries its noteId:
- * the server's rows land a second or two after the stream ends, and for that window both exist.
- * Without the drop the user watches their own message appear twice, which reads as a bug in
- * sending rather than in rendering.
+ * The live turn is appended LAST and dropped the moment a replicated row matches it (see
+ * `matchesLive`): the server's rows land a second or two after the stream ends, and for that
+ * window both exist. Without the drop the user watches their own message appear twice, which
+ * reads as a bug in sending rather than in rendering.
  */
 export function buildTranscript(
   rows: ChatRow[], live: LiveTurn | null, now: Date, timeZone: string,
@@ -65,7 +100,7 @@ export function buildTranscript(
     });
   }
 
-  if (live && !rows.some((r) => r.id === live.noteId)) {
+  if (live && !rows.some((r) => matchesLive(r, live))) {
     const key = dayKey(live.createdAt, timeZone);
     if (key !== "" && key !== lastKey) {
       items.push({ kind: "separator", id: `sep-${key}`, label: daySeparatorLabel(live.createdAt, now, timeZone) });

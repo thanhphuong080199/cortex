@@ -146,8 +146,13 @@ where one is generated anyway.
 **The live turn stays local state.** The streaming answer is not in `chat_messages` until the
 server finishes persisting it, so mobile appends the in-flight exchange at the bottom of the
 transcript from component state and drops it once the replicated rows arrive — the same
-substitution the web pane already performs. The dedup key is the note id the turn was started
-with, which the client generated and therefore knows before any row exists.
+substitution the web pane already performs. The dedup match is **not** an id comparison —
+`chat_messages.id` is a server-generated `gen_random_uuid()` (migration 00006) that `turn.ts`
+never sets to the client's note id, so the two are unrelated primary keys and can only collide by
+coincidence. The match is instead on the replicated row's `role`, its `content` (the server writes
+the same text the device sent, verbatim), and a generous time window around the turn's start —
+close enough to catch the row the server typically writes before the SSE stream even finishes,
+without being fooled by an unrelated row that merely repeats the same words days apart.
 
 ### 5. Mobile stops being ugly
 
