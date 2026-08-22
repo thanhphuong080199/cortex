@@ -11,7 +11,7 @@ const TZ = "Asia/Ho_Chi_Minh";
 
 const cite = (over: Partial<Citation> = {}): Citation => ({
   type: "note", noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts",
-  createdAt: null, ...over,
+  createdAt: null, authoredBy: "user", ...over,
 });
 
 const turn = (role: ThreadTurn["role"], content: string): ThreadTurn => ({
@@ -309,7 +309,7 @@ describe("the recall rule", () => {
 const dated = (createdAt: string | null): Citation => ({
   type: "note", noteId: "n1", title: null,
   snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng",
-  score: 1, matchedBy: "fts", createdAt,
+  score: 1, matchedBy: "fts", createdAt, authoredBy: "user",
 });
 
 describe("temporal anchoring", () => {

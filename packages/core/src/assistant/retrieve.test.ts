@@ -50,7 +50,7 @@ describe("retrieve", () => {
     expect(out).toEqual([
       {
         type: "note", noteId: "n1", title: "t", createdAt: null, snippet: "s", score: 0.5,
-        matchedBy: "both",
+        matchedBy: "both", authoredBy: "user",
       },
     ]);
   });
@@ -80,6 +80,28 @@ describe("retrieve", () => {
       userId: "u1", text: QUERY, requestId: "r1",
     });
     expect(out[0]!.createdAt).toBeNull();
+  });
+
+  // The three source types that are the assistant's own words, and one that is not. Table-driven
+  // because the mapping is a collapse, and a collapse tested on one value is satisfied by a
+  // hardcoded return.
+  it.each([
+    ["quick", "user"],
+    ["chat", "user"],
+    ["web_clip", "user"],
+    ["assistant", "assistant"],
+    ["web_search", "assistant"],
+  ])("maps source_type %s to authoredBy %s", async (sourceType, expected) => {
+    const db = fakeDb({
+      rows: [{
+        note_id: "n1", title: null, created_at: null, snippet: "s",
+        score: 1, matched_by: "fts", source_type: sourceType,
+      }],
+    });
+    const out = await retrieve({ db, ai: createFakeAi() }, {
+      userId: "u", text: "q", requestId: "r",
+    });
+    expect(out[0]!.authoredBy).toBe(expected);
   });
 
   it("calls search_notes with the query text and the embedding of that text", async () => {

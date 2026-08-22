@@ -18,6 +18,19 @@ export interface Citation {
   snippet: string;
   score: number;
   matchedBy: string;
+  /**
+   * Whose words this note is, collapsed from `notes.source_type` at the retrieval boundary.
+   *
+   * Binary rather than the raw nine-value enum on purpose: the only distinction the prompt needs
+   * is "your words" vs "my words", and passing the enum through would make prompts.ts responsible
+   * for a vocabulary it does not use -- so every future capture channel added to noteSourceType
+   * would become a thing someone must remember to handle there.
+   *
+   * 'assistant' and 'web_search' are both answers the user chose to keep (save-answer.ts picks
+   * between them on whether grounding produced a url). 'chitchat' never reaches here -- 00031
+   * excludes it inside search_notes.
+   */
+  authoredBy: "user" | "assistant";
 }
 
 /** A row exactly as `search_notes` returns it (supabase/migrations/00032_search_notes_created_at.sql). */
@@ -28,6 +41,7 @@ interface SearchRow {
   snippet: string;
   score: number;
   matched_by: string;
+  source_type: string;
 }
 
 /**
@@ -100,5 +114,8 @@ export async function retrieve(
     snippet: r.snippet,
     score: r.score,
     matchedBy: r.matched_by,
+    authoredBy: r.source_type === "assistant" || r.source_type === "web_search"
+      ? ("assistant" as const)
+      : ("user" as const),
   }));
 }
