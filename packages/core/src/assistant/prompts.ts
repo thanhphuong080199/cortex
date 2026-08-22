@@ -45,7 +45,10 @@ const RECALL_RULE =
   "earlier note. Anchor the recall so they can place it: say WHEN they wrote it (\"hôm 18/8 " +
   "bạn có nhắc...\"), or name the note's title if it has one. Never use a bracketed number. " +
   "If a note below shows no date and no title, do not invent an anchor for it -- recall it " +
-  "with no anchor at all.";
+  "with no anchor at all." +
+  " Some notes below are marked as your own earlier answers that they chose to keep. Never " +
+  "recall one of those as something they thought or wrote -- say it came from an answer you " +
+  "gave them before.";
 
 /**
  * How long a reply should be and what shape it takes. On buildAnswerPrompt ONLY.
@@ -153,10 +156,16 @@ const renderCitations = (citations: Citation[] | "failed", timeZone: string) =>
             // Spread-if in string form: a citation with no date renders with no parenthesis at
             // all, never "()" or "(null)". Everything in this prompt is read as fact.
             const on = c.createdAt ? formatNoteDate(c.createdAt, timeZone) : null;
+            // The label is a SUFFIX, after the snippet, so it reads as provenance rather than as
+            // part of the note's content. "mình"/"họ" rather than "I"/"they": the surrounding
+            // Vietnamese examples in RECALL_RULE set the register, and an English parenthetical
+            // inside an otherwise Vietnamese recall nudges the reply toward English
+            // (LANGUAGE_RULE's reasoning).
+            const mine = c.authoredBy === "assistant" ? " (câu trả lời của mình mà họ đã lưu)" : "";
             // A bullet, not "[n]". Numbering the input while forbidding brackets in the output
             // is a prompt arguing with itself, and the model will occasionally echo the very
             // thing just banned.
-            return `- ${on ? `(${on}) ` : ""}${c.title ? `${c.title}: ` : ""}${c.snippet}`;
+            return `- ${on ? `(${on}) ` : ""}${c.title ? `${c.title}: ` : ""}${c.snippet}${mine}`;
           })
           .join("\n")}`;
 

@@ -325,6 +325,39 @@ describe("the recall rule", () => {
   });
 });
 
+describe("a saved answer is labelled as the assistant's own words", () => {
+  // enums.ts has promised this since 00020 -- 'assistant' notes are "cited as something you
+  // saved, never as your own thinking" -- and until now there was no mechanism, because
+  // search_notes read source_type for the 0.8 down-weight and did not return it.
+  //
+  // The user's corpus holds approximately zero 'assistant' notes (saving one has required the
+  // automatic offer to fire, which is gated on a web-grounded answer), so this MUST be seeded.
+  // A test reading real data would assert nothing.
+  it("marks a saved answer as the assistant's own words, and leaves the user's notes unmarked", () => {
+    const p = buildAnswerPrompt({
+      question: "q",
+      citations: [
+        cite({ snippet: "tôi ngủ 5 tiếng", authoredBy: "user" }),
+        cite({ snippet: "omega-3 tốt cho mắt", authoredBy: "assistant" }),
+      ],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toContain("- omega-3 tốt cho mắt (câu trả lời của mình mà họ đã lưu)");
+    // The negative half: a label on every row would satisfy the assertion above and destroy the
+    // distinction the row exists to draw.
+    expect(p).toContain("- tôi ngủ 5 tiếng\n");
+  });
+
+  it("forbids recalling its own past words as the user's thinking", () => {
+    const p = buildAnswerPrompt({
+      question: "q", citations: [cite({ snippet: "s", authoredBy: "assistant" })],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toMatch(/your own (earlier )?(answer|words)/i);
+    expect(p).toMatch(/not.*something they thought|never as their own/i);
+  });
+});
+
 const dated = (createdAt: string | null): Citation => ({
   type: "note", noteId: "n1", title: null,
   snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng",
