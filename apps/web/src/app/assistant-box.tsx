@@ -1,7 +1,9 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
-import { readEvents, type AnyCitation, type Citation, type Offer, type WebCitation } from "@cortex/shared";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { dayKey, daySeparatorLabel, readEvents, type AnyCitation, type Citation, type Offer, type WebCitation } from "@cortex/shared";
 import { api } from "@/lib/api";
+import { createClient } from "@/lib/supabase/client";
+import { fetchOlderTurns, type TranscriptClient } from "@/lib/transcript";
 import { Provenance } from "./provenance";
 import { Markdown } from "./markdown";
 
@@ -27,6 +29,8 @@ export interface TranscriptTurn {
   citations: AnyCitation[];
   /** retrieval_meta.incomplete: the stream died mid-answer. Shown, never hidden. */
   incomplete: boolean;
+  /** ISO. Feeds the day separators (Task 4) and the pagination cursor (Task 5). */
+  createdAt: string;
 }
 
 /**
@@ -36,7 +40,28 @@ export interface TranscriptTurn {
  * the sidebar's widgets exist only as accelerators, never as the primary path.
  */
 export function AssistantBox(
-  { token, initialTurns }: { token: string; initialTurns?: TranscriptTurn[] },
+  {
+    token, userId, initialTurns, hasMore,
+    // Overridable only for tests: the real default calls createClient()
+    // (apps/web/src/lib/supabase/client.ts), which throws in the jsdom test environment because
+    // NEXT_PUBLIC_SUPABASE_URL/ANON_KEY are unset there -- createBrowserClient checks eagerly,
+    // before ever making a request, so no amount of stubbing global fetch reaches it. Tests pass
+    // a fake here instead; no caller outside a test ever does.
+    //
+    // Cast to TranscriptClient rather than left inferred: the real SupabaseClient's generics are
+    // deep enough that structurally checking it against TranscriptClient's chained call shape
+    // inline hits TS2589 ("Type instantiation is excessively deep and possibly infinite"). The
+    // cast is where that structural match is asserted once, instead of on every call site.
+    fetchOlder = (before: string) =>
+      fetchOlderTurns(createClient() as unknown as TranscriptClient, userId, before),
+  }:
+    {
+      token: string;
+      userId: string;
+      initialTurns?: TranscriptTurn[];
+      hasMore?: boolean;
+      fetchOlder?: (before: string) => ReturnType<typeof fetchOlderTurns>;
+    },
 ) {
   const [turns, setTurns] = useState<TranscriptTurn[]>(initialTurns ?? []);
   const [text, setText] = useState("");
@@ -55,6 +80,8 @@ export function AssistantBox(
   // only when the user acts on it (accept/decline) or the next submit() starts.
   const [offer, setOffer] = useState<Offer | null>(null);
   const [online, setOnline] = useState(true);
+  const [more, setMore] = useState(hasMore ?? false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Mirrors `answer` without the stale-closure lag: the SSE event loop is one long-lived async
   // function whose closure captured `answer` at call time, so `setAnswer` updates the state the
@@ -96,15 +123,43 @@ export function AssistantBox(
         ? "Đang lưu…"
         : "Đang tìm câu trả lời…";
 
-  // Keeps the newest turn in view -- turns, the reply bubble, the loading indicator and errors
-  // all land at the bottom of an ever-growing thread, exactly the case a chat UI has to
-  // autoscroll for.
+  // Keeps the newest turn in view -- the reply bubble, the loading indicator and errors all
+  // land at the bottom of an ever-growing thread, exactly the case a chat UI has to autoscroll
+  // for. Only the LIVE parts of the turn scroll the thread down. `turns` was in this list, and
+  // with pagination it must not be: loading older messages prepends to the front, and an effect
+  // that pins to the bottom on every `turns` change would undo the scroll-anchoring in
+  // loadOlder() below instantly. Because `turns` leaves this list, a newly sent message needs
+  // its own explicit scroll-to-bottom -- added at the end of the optimistic-bubble block in
+  // submit().
   useEffect(() => {
     // `scrollTop =` rather than `.scrollTo(...)`: it's a plain property every DOM
     // implementation (including jsdom, where this component's tests run) supports, with
     // no smooth-scroll API surface to be missing.
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [turns, attached, citations, web, answer, status, error, phase]);
+  }, [attached, citations, web, answer, status, error, phase]);
+
+  // Scroll-anchored, and this is the fiddly half. Prepending rows moves everything the user was
+  // reading downward by the height of what arrived; capturing scrollHeight before the paint and
+  // restoring the delta after it is what keeps their place. Without it the thread jumps to the
+  // top on every page and the user cannot read backwards at all.
+  async function loadOlder() {
+    const el = scrollRef.current;
+    const oldest = turns[0];
+    if (!el || !oldest || loadingOlder || !more) return;
+    setLoadingOlder(true);
+    const heightBefore = el.scrollHeight;
+    try {
+      const { turns: older, hasMore: stillMore } = await fetchOlder(oldest.createdAt);
+      setTurns((prev) => [...older, ...prev]);
+      setMore(stillMore);
+      requestAnimationFrame(() => { el.scrollTop = el.scrollHeight - heightBefore; });
+    } catch {
+      // Leave `more` alone: a failed fetch is not proof the thread ended, and setting it false
+      // would make one dropped request look permanently like the beginning of history.
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
 
   async function submit() {
     if (!text.trim() || busy) return;
@@ -139,8 +194,14 @@ export function AssistantBox(
     const tempId = `pending-${t0}`;
     setTurns((prev) => [...prev, {
       id: tempId, role: "user", content: pendingText, citations: [], incomplete: false,
+      createdAt: new Date().toISOString(),
     }]);
     setText("");
+    // The user just pressed Send; their own bubble must be visible. Explicit now that `turns`
+    // no longer drives the autoscroll effect.
+    requestAnimationFrame(() => {
+      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    });
 
     let note: { id: string };
     try {
@@ -180,6 +241,7 @@ export function AssistantBox(
         content: answerRef.current,
         citations: [...citationsRef.current, ...(webRef.current?.sources ?? [])],
         incomplete,
+        createdAt: new Date().toISOString(),
       }]);
       setAttached(null);
       setAnswer("");
@@ -344,36 +406,62 @@ export function AssistantBox(
     });
   }
 
-  if (!online) {
-    return <div className="banner" role="status">Offline — capture is disabled until the connection returns.</div>;
-  }
-
   const hasReply =
     attached !== null || citations.length > 0 || web !== null || answer !== "" || status !== null;
 
+  // Read once per render, not per row: Intl resolution is not free and the answer cannot change
+  // between two rows of the same paint.
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const now = new Date();
+
   return (
     <div className="chat-pane">
-      <div className="chat-scroll" ref={scrollRef}>
+      <div
+        className="chat-scroll"
+        ref={scrollRef}
+        onScroll={(e) => { if (e.currentTarget.scrollTop < 80) void loadOlder(); }}
+      >
+        {more && (
+          <p className="chat-older" role="status">
+            {loadingOlder ? "Đang tải…" : "Cuộn lên để xem thêm"}
+          </p>
+        )}
+
         {turns.length === 0 && !hasReply && (
           <p className="chat-empty">What are you thinking?</p>
         )}
 
-        {turns.map((t) => (
-          t.role === "user" ? (
-            <div key={t.id} className="bubble user"><p>{t.content}</p></div>
-          ) : (
-            <div key={t.id} className="bubble assistant">
-              <Provenance citations={t.citations} />
-              {t.content && <div className="answer"><Markdown>{t.content}</Markdown></div>}
-              {t.incomplete && (
-                // An interrupted answer and a short answer are the same string in `content`.
-                // Only retrieval_meta.incomplete tells them apart, and the user is the one who
-                // needs to know -- the model is already shielded from it at turn.ts:134.
-                <p className="interrupted" role="note">Câu trả lời bị gián đoạn (interrupted).</p>
+        {turns.map((t, i) => {
+          const prev = i > 0 ? turns[i - 1] : undefined;
+          const key = dayKey(t.createdAt, timeZone);
+          // A separator before the FIRST row too (prev === undefined): the top of a loaded page
+          // is a day boundary as far as the reader is concerned, and without it the oldest
+          // visible day is the only undated one on screen.
+          const showSeparator = key !== "" && (prev === undefined || dayKey(prev.createdAt, timeZone) !== key);
+          return (
+            <Fragment key={t.id}>
+              {showSeparator && (
+                <p className="day-separator" role="separator">
+                  {daySeparatorLabel(t.createdAt, now, timeZone)}
+                </p>
               )}
-            </div>
-          )
-        ))}
+              {t.role === "user" ? (
+                <div className="bubble user"><p>{t.content}</p></div>
+              ) : (
+                <div className="bubble assistant">
+                  <Provenance citations={t.citations} />
+                  {t.content && <div className="answer"><Markdown>{t.content}</Markdown></div>}
+                  {t.incomplete && (
+                    // An interrupted answer and a short answer are the same string in `content`.
+                    // Only retrieval_meta.incomplete tells them apart, and the user is the one who
+                    // needs to know -- the model is already shielded from it at turn.ts:134.
+                    <p className="interrupted" role="note">Câu trả lời bị gián đoạn (interrupted).</p>
+                  )}
+                </div>
+              )}
+            </Fragment>
+          );
+        })}
 
         {hasReply && (
           <div className="bubble assistant">
@@ -426,6 +514,12 @@ export function AssistantBox(
         </p>
       )}
 
+      {!online && (
+        <p className="chat-offline" role="status">
+          Mất mạng — chưa gửi được. Hội thoại cũ vẫn xem được.
+        </p>
+      )}
+
       <form
         className="chat-composer"
         onSubmit={(e) => { e.preventDefault(); void submit(); }}
@@ -435,11 +529,25 @@ export function AssistantBox(
           value={text}
           placeholder="What are you thinking?"
           aria-label="What are you thinking?"
-          disabled={busy}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void submit(); }}
+          disabled={busy || !online}
+          onChange={(e) => {
+            setText(e.target.value);
+            // Reset before measuring: scrollHeight never shrinks on its own, so without the
+            // first line the box grows and never comes back down after a delete.
+            e.target.style.height = "auto";
+            e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
+          }}
+          onKeyDown={(e) => {
+            // Shift+Enter is a newline; the browser's default already does that, so the only
+            // job here is to NOT intercept it. Cmd/Ctrl+Enter is kept as well -- it was the
+            // only way to send until 2026-08-22 and muscle memory is cheap to honour.
+            if (e.key !== "Enter") return;
+            if (e.shiftKey) return;
+            e.preventDefault();
+            void submit();
+          }}
         />
-        <button type="submit" disabled={busy}>Send</button>
+        <button type="submit" disabled={busy || !online}>Send</button>
       </form>
     </div>
   );

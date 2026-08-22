@@ -11,6 +11,7 @@ import { createInFlightGuard } from "../lib/in-flight";
 import { offlineAnswer, type OfflineMatch } from "../lib/assistant/offline-answer";
 import { streamAssistantTurn, StreamUnavailableError, type BoxEvent } from "../lib/assistant/stream";
 import { supabase } from "../lib/supabase";
+import type { LiveTurn } from "../lib/transcript";
 
 /**
  * One box. It replaces quick capture, and in Tasks 7 and 8 the check-in widget and the media
@@ -19,8 +20,19 @@ import { supabase } from "../lib/supabase";
  * The order is the whole design: the local INSERT is the deliverable and everything after it is
  * a bonus, so the note is durable before any network exists. A failed local write is the ONLY
  * case where text can be lost, and the only one that keeps the box's contents.
+ *
+ * Since Task 12 this component runs a turn but does not render its answer -- the transcript in
+ * chat.tsx does, from `chat_messages` rows. `onLive` hands the screen the in-flight turn so it
+ * can render it before the server's rows have replicated: called with the fresh turn right after
+ * the local note write succeeds, and updated on every `token` event.
+ *
+ * The `finally` that governs every exit path does NOT clear `live` to `null` (final whole-branch
+ * review finding -- it used to, and that was the bug). It marks the turn `settled: true` instead,
+ * keeping the last known text/answer. `chat.tsx` owns the actual retirement, because it's the
+ * only place with access to the replicated rows needed to retire on evidence rather than on a
+ * timer that has no idea whether the answer actually made it to the table yet.
  */
-export function AssistantBox() {
+export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => void }) {
   const db = usePowerSync();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -29,7 +41,6 @@ export function AssistantBox() {
   const [attached, setAttached] = useState<Extract<BoxEvent, { type: "attached" }> | null>(null);
   const [mood, setMood] = useState<{ checkinId: string; mood: number } | null>(null);
   const [web, setWeb] = useState<Extract<BoxEvent, { type: "web" }> | null>(null);
-  const [answer, setAnswer] = useState("");
   const [matches, setMatches] = useState<OfflineMatch[]>([]);
   const run = useRef(createInFlightGuard()).current;
 
@@ -41,11 +52,15 @@ export function AssistantBox() {
       setAttached(null);
       setMood(null);
       setWeb(null);
-      setAnswer("");
       setMatches([]);
 
       const id = randomUUID();
       const createdAt = new Date().toISOString();
+      // Hoisted above the try so `finally` can still see the turn's last known state -- it needs
+      // that to mark the turn settled rather than clear it (see the class doc). Stays `null`
+      // for the two exit paths that never got as far as calling `onLive` at all (the write
+      // failing, or an empty box), so `finally` has nothing to settle for those.
+      let turn: LiveTurn | null = null;
       // One try/finally around the whole turn, not two: `busy` must clear on EVERY exit path,
       // including the local-write branch's `if (!wrote) return` and its `catch`. A second,
       // separate try around only the network call left those two exits with no `finally` at
@@ -66,6 +81,9 @@ export function AssistantBox() {
         // is both faster and strictly safer.
         const asked = text;
         setText("");
+        let answer = "";
+        turn = { noteId: id, text: asked, answer, createdAt };
+        onLive(turn);
 
         try {
           const { data: { session } } = await supabase.auth.getSession();
@@ -78,7 +96,11 @@ export function AssistantBox() {
           })) {
             if (ev.type === "attached") setAttached(ev);
             else if (ev.type === "web") setWeb(ev);
-            else if (ev.type === "token") setAnswer((a) => a + ev.text);
+            else if (ev.type === "token") {
+              answer += ev.text;
+              turn = { noteId: id, text: asked, answer, createdAt };
+              onLive(turn);
+            }
             else if (ev.type === "mood") {
               // Mirrored locally under the server's id so undo has a row to delete before
               // replication catches up. See lib/checkins.ts.
@@ -101,6 +123,12 @@ export function AssistantBox() {
         }
       } finally {
         setBusy(false);
+        // NOT onLive(null). The turn may still be waiting on chat_messages to replicate --
+        // clearing here regardless would blank a fully-written answer the instant the stream
+        // ends, before its row has necessarily landed. `settled: true` tells chat.tsx it may now
+        // start looking for that evidence; chat.tsx (which owns `rows`) decides when retiring is
+        // actually safe. See transcript.ts's `LiveTurn.settled` doc and `liveHasReplicated`.
+        if (turn) onLive({ ...turn, settled: true });
       }
     });
   }
@@ -114,8 +142,7 @@ export function AssistantBox() {
         multiline
         accessibilityLabel="Bạn đang nghĩ gì?"
         // testID, not the label: it becomes the Android resource-id, which is unique and
-        // stable. This screen has a second TextInput (the note-list search box) whose
-        // contentDescription is close enough to collide with a text matcher.
+        // stable, unlike an accessibilityLabel a text matcher could collide with.
         testID="box-input"
         style={{ minHeight: 96, borderWidth: 1, borderColor: "#ccc", borderRadius: 8, padding: 12 }}
       />
@@ -207,8 +234,6 @@ export function AssistantBox() {
           ))}
         </View>
       ) : null}
-
-      {answer ? <Text testID="box-answer">{answer}</Text> : null}
 
       {matches.map((m) => (
         <Text key={m.id} testID="box-offline-match">{m.snippet}</Text>

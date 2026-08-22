@@ -41,3 +41,10 @@ streams:
       # undid reappears on the device. notes must NOT gain this filter: the device renders a
       # trash view and needs the tombstones to render it.
       - SELECT * FROM checkins    WHERE user_id = auth.user_id() AND deleted_at IS NULL
+      # READ-ONLY on the device, and the only synced table of that kind. The server writes both
+      # rows of every turn (turn.ts); nothing on the phone inserts here, and UPLOADABLE_TABLES
+      # in @cortex/shared is what makes sure nothing can start to.
+      #
+      # No `deleted_at` filter, unlike checkins: chat_messages has no tombstone column at all
+      # (00006 says so and explains why -- messages are append-only within a session).
+      - SELECT * FROM chat_messages WHERE user_id = auth.user_id()

@@ -4,8 +4,8 @@
 #
 # The phase-1b handoff records that `connected=true` was never once observed on a real device,
 # while uploads worked. If that is a live bug, the `wait-for-download` step here is what fails:
-# "Zarquon note" was written by the seed script straight to Postgres and has never existed on
-# this device, so it can only appear by arriving over the sync stream.
+# "haha ok chitchat seeded turn" was written by the seed script straight to Postgres and has
+# never existed on this device, so it can only appear by arriving over the sync stream.
 #
 # WHAT IT DOES NOT PROVE. This runs on an emulator with clean host networking -- no Doze, no
 # cell handover, no captive portal. Green here does not mean the real-device symptom is fixed;
@@ -31,32 +31,19 @@ appId: ${APP_ID}
 - runFlow: subflows/wait-for-download.yaml
 
 # The rest of the seeded corpus, to prove the stream delivered the whole bucket and not just the
-# first row. scrollUntilVisible because the list is the screen's only scrolling surface and the
-# capture box, check-in widget and media form sit above it in the header.
-#
-# ORDER MATTERS, and it is the seed order reversed. The list is `ORDER BY updated_at DESC` and
-# seed.mjs writes Zarquon first and Apostrophe last, so Apostrophe is row 1 and Edit target is
-# row 6. Each scroll starts from wherever the previous one stopped, so asking for Edit target
-# first would park the view six rows down and the DOWN scroll for Apostrophe -- now above us --
-# would run to the end of the list and never find it. Ascending row order keeps every scroll on
-# this screen monotonically downward, ending at the footer where "Sign out" lives.
-- scrollUntilVisible:
-    element: "Apostrophe note"
-    direction: DOWN
-    timeout: 30000
-- scrollUntilVisible:
-    element: "Edit target"
-    direction: DOWN
-    timeout: 30000
+# first row. Rewritten 2026-08-22 alongside the note list's removal (final whole-branch review
+# finding): this used to scrollUntilVisible two note titles ("Apostrophe note", "Edit target")
+# that chat.tsx cannot render at all -- it shows chat_messages, never notes. seed.mjs's seeded
+# turn has two rows (seedCorpus); the assistant half is the second one, so asserting it is
+# visible proves the whole pair arrived, not just the first. No scroll needed: two rows never
+# overflow the viewport the way a six-row note list did.
+- assertVisible: "Hehe, seeded assistant reply."
 
-# Sign-out wipes the local corpus BEFORE clearing the Supabase session (lib/auth.ts), so a
-# failed wipe must not read as a clean sign-out. Reaching the button needs a scroll: it is in
-# the list footer.
-- scrollUntilVisible:
-    element: "Sign out"
-    direction: DOWN
-    timeout: 30000
-- tapOn: "Sign out"
+# Sign-out lives in the header now (index.tsx's headerRight), not a list footer -- no scroll
+# needed to reach it. Wipes the local corpus BEFORE clearing the Supabase session (lib/auth.ts),
+# so a failed wipe must not read as a clean sign-out.
+- tapOn:
+    id: "sign-out"
 
 - extendedWaitUntil:
     visible: "Sign in with Google"

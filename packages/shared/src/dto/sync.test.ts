@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SERVER_ONLY_TABLES, SYNC_TABLES, syncUploadInput } from "./sync.js";
+import { SERVER_ONLY_TABLES, SYNCED_TABLES, UPLOADABLE_TABLES, syncUploadInput } from "./sync.js";
 
 const op = {
   op_id: "1", op: "PUT" as const, table: "notes",
@@ -20,7 +20,7 @@ describe("syncUploadInput", () => {
     expect(syncUploadInput.safeParse({ ops }).success).toBe(false);
   });
 
-  it("rejects a table outside SYNC_TABLES", () => {
+  it("rejects a table outside UPLOADABLE_TABLES", () => {
     const r = syncUploadInput.safeParse({ ops: [{ ...op, table: "usage_ledger" }] });
     expect(r.success).toBe(false);
   });
@@ -47,10 +47,49 @@ describe("syncUploadInput", () => {
     expect(r.data?.ops[0]?.base_content).toBe("");
   });
 
-  it("exposes exactly the six synced tables", () => {
-    expect([...SYNC_TABLES].sort()).toEqual(
+  it("exposes exactly the six uploadable tables", () => {
+    expect([...UPLOADABLE_TABLES].sort()).toEqual(
       ["checkins", "links", "media_items", "note_tags", "notes", "tags"],
     );
+  });
+});
+
+describe("the download list and the upload list are not the same list", () => {
+  // THE POINT OF THE WHOLE TASK. chat_messages replicates to the device and must never come
+  // back up: it holds the assistant's replies, and an accepted upload op is a forged answer.
+  // This is the assertion that turns red if someone later "simplifies" syncOp.table back to
+  // SYNCED_TABLES because both lists look nearly identical.
+  it("refuses an upload op naming chat_messages", () => {
+    const parsed = syncUploadInput.safeParse({
+      ops: [{ op_id: "1", op: "PUT", table: "chat_messages",
+              id: "11111111-1111-4111-8111-111111111111", data: { content: "forged" } }],
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("still accepts an upload op for a table the device really writes", () => {
+    const parsed = syncUploadInput.safeParse({
+      ops: [{ op_id: "1", op: "PUT", table: "notes" as const,
+              id: "11111111-1111-4111-8111-111111111111", data: { content: "mine" } }],
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  // chat_messages must actually BE in the download list -- without this, deleting it from
+  // SYNCED_TABLES would leave every assertion above green while mobile's transcript stayed empty.
+  it("replicates chat_messages down", () => {
+    expect([...SYNCED_TABLES]).toContain("chat_messages");
+  });
+
+  // Three lists that can drift is how a table becomes writable by accident. sync.ts's own
+  // comment records that two hand-maintained copies of one list was already a bug here once.
+  it("keeps every uploadable table in the synced list", () => {
+    for (const t of UPLOADABLE_TABLES) expect([...SYNCED_TABLES]).toContain(t);
+  });
+
+  it("shares nothing with the server-only list", () => {
+    const synced = new Set<string>(SYNCED_TABLES);
+    for (const t of SERVER_ONLY_TABLES) expect(synced.has(t)).toBe(false);
   });
 });
 
@@ -70,8 +109,8 @@ describe("SERVER_ONLY_TABLES", () => {
     );
   });
 
-  it("shares no table with SYNC_TABLES", () => {
-    const synced = new Set<string>(SYNC_TABLES);
+  it("shares no table with SYNCED_TABLES", () => {
+    const synced = new Set<string>(SYNCED_TABLES);
     for (const t of SERVER_ONLY_TABLES) {
       expect(synced.has(t), `${t} is in both lists`).toBe(false);
     }

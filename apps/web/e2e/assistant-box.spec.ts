@@ -1,3 +1,4 @@
+import { createClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
 
 /**
@@ -68,28 +69,58 @@ test("a thought is saved even though the assistant cannot answer", async ({ page
 });
 
 /**
- * Stage C4: the pane and the sidebar read DIFFERENT TABLES, and this is the assertion that
- * says so. Both halves matter and neither implies the other:
+ * Stage C4: the pane and the sidebar used to read DIFFERENT TABLES, and this asserted both
+ * halves of that split -- the seeded assistant reply appearing (proving the pane reads
+ * chat_messages, not notes) and the seeded chitchat NOTE staying out of the sidebar's list.
  *
- *   - the seeded assistant reply exists only in chat_messages, so it can only appear if the
- *     pane reads that table (before C4 the pane was derived from `notes` and this text was
- *     nowhere on the page);
- *   - the seeded chitchat note exists only in `notes`, and must NOT be in the sidebar list --
- *     if applyNoteFilters loses its clause, this is where it shows.
+ * S1 (2026-08-22) removed the second half's subject entirely: `ul.notes`, `Sidebar` and
+ * `AppShell` are gone from page.tsx (S1 §1 -- see that file's own comment). Kept trying to
+ * assert "not in a list that no longer exists" would have been vacuously true regardless of
+ * whether the underlying property still held, which is exactly this repo's own "test that
+ * cannot fail" failure mode (see memory: sdd-tests-that-cannot-fail) -- so that half is dropped
+ * rather than patched around. What remains is the half still worth pinning: the pane reads
+ * chat_messages, proven by text that exists ONLY in that table.
  *
  * The seeded conversation is timestamped at seed time and the pane shows a rolling 4-hour
  * session; re-run `node e2e/scripts/seed.mjs` if this goes red with an empty pane.
  */
-test("the transcript reads the conversation, and the list does not show chitchat", async ({ page }) => {
+test("the transcript reads the conversation from chat_messages", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByText("Hehe, seeded assistant reply.")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("haha ok chitchat seeded turn")).toBeVisible();
+});
 
-  // The sidebar's note list, scoped so the pane's copy of the same text cannot satisfy it.
-  await expect(
-    page.locator("ul.notes").getByText("Chitchat seed", { exact: false }),
-  ).toHaveCount(0);
-  // Not vacuous: the list is rendering other notes.
-  await expect(page.locator("ul.notes li").first()).toBeVisible();
+/**
+ * Task 5's pagination, exercised for real -- 35 messages, and the count is the test. PAGE_SIZE
+ * is 30 (page.tsx and lib/transcript.ts), so a seed of 12 would sit entirely inside the first
+ * page and the assertion below would pass with pagination deleted outright -- the "test that
+ * cannot fail" this repo has shipped before (see memory: sdd-tests-that-cannot-fail). 35 puts
+ * OLDESTMESSAGE strictly on the second page, reachable only by scrolling to the top and
+ * triggering `loadOlder()`.
+ */
+test("scrolling to the top loads older messages", async ({ page }) => {
+  const admin = createClient(
+    process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false } },
+  );
+  const userId = process.env.E2E_USER_ID!;
+  const { data: session } = await admin
+    .from("chat_sessions").insert({ user_id: userId }).select("id").single();
+
+  const base = Date.parse("2026-08-01T00:00:00.000Z");
+  await admin.from("chat_messages").insert(
+    Array.from({ length: 35 }, (_, i) => ({
+      user_id: userId, session_id: session!.id, role: "user",
+      content: i === 0 ? "OLDESTMESSAGE" : `seeded ${i}`,
+      created_at: new Date(base + i * 60_000).toISOString(),
+    })),
+  );
+
+  await page.goto("/");
+  await expect(page.getByText("seeded 34")).toBeVisible();
+  await expect(page.getByText("OLDESTMESSAGE")).toHaveCount(0);
+
+  await page.locator(".chat-scroll").evaluate((el) => { el.scrollTop = 0; });
+  await expect(page.getByText("OLDESTMESSAGE")).toBeVisible({ timeout: 15000 });
 });

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantBox, type TranscriptTurn } from "./assistant-box";
@@ -36,6 +36,43 @@ const stalling = (events: [string, unknown][]) =>
     { status: 200, headers: { "content-type": "text/event-stream" } },
   );
 
+describe("the composer", () => {
+  function stubFetch(calls: string[]) {
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url));
+      return String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([["done", { messageId: "m1", sessionId: "s1" }]]);
+    }) as typeof fetch;
+  }
+
+  it("sends on Enter", async () => {
+    const calls: string[] = [];
+    stubFetch(calls);
+    render(<AssistantBox token="t" userId="u1" />);
+    const box = screen.getByLabelText(/what are you thinking/i);
+    await userEvent.type(box, "gửi bằng enter");
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(calls.some((c) => c.endsWith("/notes"))).toBe(true));
+  });
+
+  // THE HALF THAT GETS DROPPED. A box where Enter sends must still let the user write a second
+  // line, and this corpus is full of multi-line captures. Implementing only the test above
+  // yields a composer that cannot type a paragraph -- and nothing else would notice.
+  it("inserts a newline on Shift+Enter and does not send", async () => {
+    const calls: string[] = [];
+    stubFetch(calls);
+    render(<AssistantBox token="t" userId="u1" />);
+    const box = screen.getByLabelText(/what are you thinking/i) as HTMLTextAreaElement;
+    await userEvent.type(box, "dòng một");
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
+    await userEvent.type(box, "dòng hai");
+
+    expect(box.value).toContain("\n");
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe("AssistantBox", () => {
   it("saves the note before it opens the stream", async () => {
     const calls: string[] = [];
@@ -46,7 +83,7 @@ describe("AssistantBox", () => {
         : sse([["done", { messageId: "m1", sessionId: "s1" }]]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "hôm nay tôi chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -67,7 +104,7 @@ describe("AssistantBox", () => {
     globalThis.fetch = (async (url: string) =>
       String(url).endsWith("/notes") ? notePromise : sse([["done", { messageId: "m1", sessionId: "s1" }]])) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ buổi sáng");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -93,7 +130,7 @@ describe("AssistantBox", () => {
             ["token", { text: "Đã lưu." }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -108,7 +145,7 @@ describe("AssistantBox", () => {
         ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
         : new Response("boom", { status: 500 })) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "ghi chú");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -121,7 +158,7 @@ describe("AssistantBox", () => {
         ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
         : sse([["declined", { reason: "budget" }]])) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "ghi chú");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -139,7 +176,7 @@ describe("AssistantBox", () => {
       return new Response("boom", { status: 500 });
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     const textarea = screen.getByLabelText(/what are you thinking/i);
     await userEvent.type(textarea, "ghi chú chưa lưu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
@@ -171,7 +208,7 @@ describe("AssistantBox", () => {
       return sse([["done", { messageId: "m1", sessionId: "s1" }]]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -196,7 +233,7 @@ describe("AssistantBox", () => {
       return sse([["done", { messageId: "m1", sessionId: "s1" }]]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     const textarea = screen.getByLabelText(/what are you thinking/i);
     await userEvent.type(textarea, "ghi chú chưa lưu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
@@ -229,7 +266,7 @@ describe("AssistantBox", () => {
       ]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -262,7 +299,7 @@ describe("AssistantBox", () => {
       ]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -293,7 +330,7 @@ describe("AssistantBox", () => {
       ]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -316,7 +353,7 @@ describe("AssistantBox", () => {
             ["done", { messageId: "m1", sessionId: "s1" }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" />);
+    render(<AssistantBox token="t" userId="u1" />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -325,13 +362,52 @@ describe("AssistantBox", () => {
   });
 });
 
+// A leaked `false` from any test above would make every later test in this file render the
+// offline notice instead of whatever that test actually exercises -- restored unconditionally,
+// not just by the tests that set it.
+afterEach(() => {
+  Object.defineProperty(navigator, "onLine", { configurable: true, get: () => true });
+});
+
+describe("going offline", () => {
+  const stored = (
+    { id: "a", role: "user", content: "câu cũ của tôi", createdAt: "2026-08-20T02:00:00.000Z",
+      citations: [], incomplete: false } as TranscriptTurn
+  );
+
+  function goOffline() {
+    Object.defineProperty(navigator, "onLine", { configurable: true, get: () => false });
+    window.dispatchEvent(new Event("offline"));
+  }
+
+  // THE THREAD MUST SURVIVE. Until 2026-08-22 this component returned a bare banner INSTEAD OF
+  // ITSELF when offline -- survivable while a sidebar still rendered the notes, and not now:
+  // the user would lose everything on screen the moment a train entered a tunnel.
+  it("keeps the thread on screen when the connection drops", async () => {
+    render(<AssistantBox token="t" userId="u1" initialTurns={[stored]} />);
+    goOffline();
+    await waitFor(() => expect(screen.getByText(/Mất mạng/)).toBeInTheDocument());
+    expect(screen.getByText("câu cũ của tôi")).toBeInTheDocument();
+  });
+
+  // Sending is genuinely impossible -- the note goes through POST /notes. A composer that
+  // silently fails is worse than one that explains, so both controls go down together.
+  it("disables sending while offline", async () => {
+    render(<AssistantBox token="t" userId="u1" initialTurns={[stored]} />);
+    goOffline();
+    await waitFor(() => expect(screen.getByRole("button", { name: /send/i })).toBeDisabled());
+    expect(screen.getByLabelText(/what are you thinking/i)).toBeDisabled();
+  });
+});
+
 const turn = (over: Partial<TranscriptTurn> = {}): TranscriptTurn => ({
-  id: "t1", role: "assistant", content: "Đã lưu.", citations: [], incomplete: false, ...over,
+  id: "t1", role: "assistant", content: "Đã lưu.", citations: [], incomplete: false,
+  createdAt: "2026-08-22T00:00:00.000Z", ...over,
 });
 
 describe("the transcript", () => {
   it("renders both sides of a past turn", () => {
-    render(<AssistantBox token="t" initialTurns={[
+    render(<AssistantBox token="t" userId="u1" initialTurns={[
       turn({ id: "u1", role: "user", content: "hôm nay tôi chạy bộ" }),
       turn({ id: "a1", role: "assistant", content: "Đã lưu vào health." }),
     ]} />);
@@ -345,15 +421,42 @@ describe("the transcript", () => {
   // the `content` column alone, an interrupted answer and a short answer are the same string.
   // Only the flag can tell them apart, and only the pane can say so.
   it("marks an interrupted answer as interrupted", () => {
-    render(<AssistantBox token="t" initialTurns={[
+    render(<AssistantBox token="t" userId="u1" initialTurns={[
       turn({ content: "Theo notes của bạn thì", incomplete: true }),
     ]} />);
     expect(screen.getByText(/interrupted|bị gián đoạn/i)).toBeInTheDocument();
   });
 
   it("does not mark a complete answer", () => {
-    render(<AssistantBox token="t" initialTurns={[turn()]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[turn()]} />);
     expect(screen.queryByText(/interrupted|bị gián đoạn/i)).toBeNull();
+  });
+
+  // Final whole-branch review finding: this logic (assistant-box.tsx:434-440) had no test at
+  // all. Timestamps are picked far from any plausible local-midnight ambiguity -- noon UTC, and
+  // three days apart for the "different day" case -- so the assertion holds regardless of the
+  // test runner's TZ.
+  describe("day separators", () => {
+    it("renders one separator per calendar day, not per message", () => {
+      render(<AssistantBox token="t" userId="u1" initialTurns={[
+        turn({ id: "a", createdAt: "2026-08-20T12:00:00.000Z", content: "hôm qua" }),
+        turn({ id: "b", createdAt: "2026-08-20T13:00:00.000Z", content: "vẫn hôm qua" }),
+        turn({ id: "c", createdAt: "2026-08-22T12:00:00.000Z", content: "hôm nay" }),
+      ]} />);
+      expect(screen.getAllByRole("separator")).toHaveLength(2);
+    });
+
+    it("puts a separator before the very first message too", () => {
+      render(<AssistantBox token="t" userId="u1" initialTurns={[
+        turn({ id: "a", createdAt: "2026-08-22T12:00:00.000Z" }),
+      ]} />);
+      const [separator] = screen.getAllByRole("separator");
+      const bubble = screen.getByText("Đã lưu.");
+      expect(separator).toBeDefined();
+      expect(
+        separator!.compareDocumentPosition(bubble) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
   });
 
   // The naive version double-renders the last turn: once from the box's streaming state and
@@ -368,7 +471,7 @@ describe("the transcript", () => {
             ["done", { messageId: "m1", sessionId: "s1" }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -389,7 +492,7 @@ describe("the transcript", () => {
             ["done", { messageId: "m1", sessionId: "s1" }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -428,7 +531,7 @@ describe("the transcript", () => {
       ]);
     }) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     const textarea = screen.getByLabelText(/what are you thinking/i);
     const send = screen.getByRole("button", { name: /send/i });
 
@@ -471,7 +574,7 @@ describe("the transcript", () => {
             ["error", { message: "boom" }],
           ])) as typeof fetch;
 
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "chạy bộ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
@@ -502,7 +605,7 @@ describe("the loading phases", () => {
 
   it("says it is saving before anything comes back", async () => {
     stubbed(() => stalling([]));
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await send();
     expect(await screen.findByRole("status")).toHaveTextContent(/lưu|saving/i);
   });
@@ -515,7 +618,7 @@ describe("the loading phases", () => {
       ["attached", { domain: "media", domainMeta: {}, tags: ["phim"] }],
       ["citations", { citations: [] }],
     ]));
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await send();
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent(/tìm câu trả lời|answer/i));
@@ -528,15 +631,84 @@ describe("the loading phases", () => {
       ["attached", { domain: null, domainMeta: {}, tags: [] }],
       ["token", { text: "Theo notes của bạn" }],
     ]));
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     await send();
     await screen.findByText(/Theo notes của bạn/);
     expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("shows no indicator when nothing is in flight", () => {
-    render(<AssistantBox token="t" initialTurns={[]} />);
+    render(<AssistantBox token="t" userId="u1" initialTurns={[]} />);
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+const turnT = (id: string, createdAt: string): TranscriptTurn => ({
+  id, role: "user", content: `msg ${id}`, createdAt, citations: [], incomplete: false,
+});
+
+/**
+ * jsdom reports 0 for every layout property, so a scroll test that does not define them is
+ * asserting 0 === 0. These are defined on the prototype rather than the node because the
+ * component looks them up through a ref it owns.
+ */
+function stubScrollMetrics(scrollHeight: number) {
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true, get: () => scrollHeight,
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true, get: () => 400,
+  });
+}
+
+describe("loading older messages", () => {
+  // A PREPEND MUST NOT JUMP THE READER TO THE BOTTOM. This is the assertion that fails if
+  // someone puts `turns` back into the autoscroll effect's dependency list -- the single most
+  // likely regression here, and one no snapshot would show.
+  //
+  // `fetchOlder` is injected rather than reached through createClient() + a stubbed global
+  // fetch: createBrowserClient (apps/web/src/lib/supabase/client.ts) throws synchronously --
+  // "Your project's URL and API key are required" -- because NEXT_PUBLIC_SUPABASE_URL/ANON_KEY
+  // are unset in this test environment, before it ever issues a request a fetch stub could
+  // intercept. The assertions below are exactly the ones the brief specifies; only how the
+  // fetch is reached differs.
+  it("does not scroll to the bottom when older messages arrive", async () => {
+    stubScrollMetrics(2000);
+    const fetchOlder = async () => ({
+      turns: [turnT("old", "2026-08-19T02:00:00.000Z")].map((t) => ({ ...t, content: "cũ hơn" })),
+      hasMore: false,
+    });
+
+    render(
+      <AssistantBox token="t" userId="u1" hasMore
+        initialTurns={[turnT("a", "2026-08-20T02:00:00.000Z")]} fetchOlder={fetchOlder} />,
+    );
+    const scroller = document.querySelector(".chat-scroll") as HTMLElement;
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    await waitFor(() => expect(screen.getByText("cũ hơn")).toBeInTheDocument());
+    // Anchored, not pinned: 2000 would be the bottom.
+    expect(scroller.scrollTop).not.toBe(2000);
+  });
+
+  // A SHORT page is the end of the thread. Without this, the affordance stays forever and the
+  // user keeps pulling against a query that will never return anything again.
+  it("stops offering more once a short page comes back", async () => {
+    stubScrollMetrics(2000);
+    const fetchOlder = async () => ({ turns: [], hasMore: false });
+
+    render(
+      <AssistantBox token="t" userId="u1" hasMore
+        initialTurns={[turnT("a", "2026-08-20T02:00:00.000Z")]} fetchOlder={fetchOlder} />,
+    );
+    expect(screen.getByText(/Cuộn lên để xem thêm/)).toBeInTheDocument();
+
+    const scroller = document.querySelector(".chat-scroll") as HTMLElement;
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    await waitFor(() => expect(screen.queryByText(/Cuộn lên để xem thêm/)).toBeNull());
   });
 });
 

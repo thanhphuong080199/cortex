@@ -27,9 +27,16 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* One column, one chat: the whole viewport is the header + the thread + the composer,
+     stacked, with the thread the only part that scrolls. */
+  display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden;
 }
 
-.wrap { max-width: 760px; margin: 0 auto; padding: 24px 20px 64px; }
+/* flex:1/min-height:0/overflow-y:auto (final whole-branch review finding): body is a fixed-height
+   flex column with overflow:hidden for the chat layout's sake (only .chat-scroll is meant to
+   scroll). `.wrap`'s one remaining consumer, error.tsx, is a direct body child too, so without
+   its own scroll behavior a long error message had nowhere to go -- body clipped it outright. */
+.wrap { max-width: 760px; margin: 0 auto; padding: 24px 20px 64px; flex: 1; min-height: 0; overflow-y: auto; }
 
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
 .topbar h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
@@ -60,140 +67,51 @@ textarea, input[type="text"] {
 }
 textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
-/* Check-in: the mood faces are the largest tap targets on the page, because one tap on
-   one of them is the entire interaction in the common case. */
-.checkin { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
-.checkin .moods { display: flex; gap: 4px; align-items: center; }
-/* min 44px: these ARE the one-tap mobile interaction, so they get the platform
-   touch-target guideline, not just the 24px WCAG floor. */
-.checkin .moods button { font-size: 22px; line-height: 1; padding: 9px 11px; min-width: 44px; min-height: 44px; }
-.checkin .moods button.more { font-size: 12.5px; color: var(--muted); padding: 6px 9px; }
-.checkin-more { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 13px; }
-.checkin-more > div { display: flex; gap: 4px; }
-.checkin-more button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-.checkin-more input[type="text"] { width: 130px; padding: 5px 10px; }
-.checkin .hint, .checkin .error { margin: 0; }
-.checkin .hint button { border: none; background: none; padding: 0 2px; color: var(--accent); }
-
-.capture { margin-bottom: 8px; }
-.capture-domains { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 7px; }
-.capture-domains button { font-size: 12.5px; padding: 3px 10px; border-radius: 999px; color: var(--muted); }
-.capture-domains button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
-
-.media-panel { margin-bottom: 16px; }
-.media-form {
-  display: flex; flex-direction: column; gap: 9px; margin-top: 10px;
-  border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px 13px;
-}
-.media-row { display: flex; gap: 8px; align-items: center; }
-.media-row input[type="text"] { flex: 1; }
-.media-form select {
-  font: inherit; color: var(--text); background: var(--bg);
-  border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px;
-}
-/* 24x24 minimum with spacing (WCAG 2.5.8): a mis-tap here doesn't just set the wrong
-   star -- re-tapping the current star CLEARS the rating, so cramped targets silently
-   produce "no rating". */
-.media-form button.star {
-  border: none; background: none; font-size: 19px; color: var(--accent);
-  min-width: 28px; min-height: 28px; padding: 3px;
-}
-.media-form [role="radiogroup"] { display: flex; gap: 4px; }
-.media-form .media-row:last-of-type { justify-content: space-between; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 6px 2px 18px; }
 .error { color: var(--danger); font-size: 13.5px; }
 
-nav.views { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
-nav.views a {
-  text-decoration: none; color: var(--muted); font-size: 13.5px;
-  padding: 5px 11px; border-radius: 999px; border: 1px solid transparent;
+/* ---- One column, one chat ---- */
+
+.chat-header {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 10px;
+  max-width: 720px; width: 100%; margin: 0 auto; padding: 10px 16px;
+  background: var(--bg); border-bottom: 1px solid var(--line);
 }
-nav.views a.on { color: var(--text); background: var(--panel); border-color: var(--line); }
-
-nav.domains { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 14px; }
-nav.domains a {
-  text-decoration: none; color: var(--muted); font-size: 12.5px;
-  padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line);
-}
-nav.domains a.on { color: var(--accent); border-color: var(--accent); }
-
-form.search { display: flex; gap: 8px; margin-bottom: 18px; }
-
-ul.notes { list-style: none; margin: 0; padding: 0; }
-ul.notes li {
-  border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
-  padding: 12px 14px; margin-bottom: 9px;
-}
-ul.notes a.title { color: var(--text); text-decoration: none; font-weight: 550; display: block; }
-ul.notes a.title:hover { text-decoration: underline; }
-ul.notes .meta { color: var(--muted); font-size: 12.5px; margin-top: 5px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-ul.notes .row-actions { display: flex; gap: 6px; margin-top: 9px; }
-
-.empty { color: var(--muted); padding: 26px 2px; }
-
-.chips { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin: 14px 0; }
-.chip {
-  display: inline-flex; align-items: center; gap: 5px;
-  border: 1px solid var(--line); border-radius: 999px; padding: 3px 5px 3px 10px;
-  font-size: 13px; background: var(--panel);
-}
-.chip a { color: var(--muted); text-decoration: none; }
-.chip a:hover { color: var(--text); }
-.chip button { border: none; background: none; padding: 0 4px; color: var(--muted); line-height: 1; }
-.chip button:hover { color: var(--danger); }
-.chips input { width: 130px; padding: 5px 10px; border-radius: 999px; }
-
-.editor-bar { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; }
-.status { color: var(--muted); font-size: 12.5px; }
-.status.err { color: var(--danger); }
-
-.banner {
-  border: 1px solid var(--line); background: var(--panel); border-radius: 9px;
-  padding: 11px 13px; margin-bottom: 14px; color: var(--muted); font-size: 13.5px;
-}
-
-a.back { color: var(--muted); font-size: 13.5px; text-decoration: none; }
-a.back:hover { color: var(--text); }
-
-/* ---- Home: one chat box, everything else tucked into a sidebar ---- */
-
-.app-shell { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
-
-.sidebar-toggle {
-  position: fixed; top: 14px; left: 14px; z-index: 30;
-  font-size: 17px; line-height: 1; padding: 7px 11px;
-}
-
-.sidebar-scrim {
-  position: fixed; inset: 0; z-index: 19; background: rgb(0 0 0 / 0.35);
-}
-
-.sidebar {
-  position: fixed; inset: 0 auto 0 0; z-index: 20; width: min(300px, 86vw);
-  overflow-y: auto; padding: 24px 18px 32px; background: var(--bg);
-  border-right: 1px solid var(--line);
-  transform: translateX(-100%);
-  transition: transform 0.18s ease;
-}
-.app-shell.sidebar-open .sidebar { transform: translateX(0); }
-
-.sidebar .topbar h1 { font-size: 18px; }
-.sidebar-signout { margin-top: 18px; }
-.sidebar-signout button { width: 100%; }
-
-.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.chat-title { font-weight: 600; letter-spacing: -0.01em; }
+.chat-header .conn { font-size: 12px; color: var(--muted); }
+.chat-header .conn.offline { color: var(--danger); }
+/* margin-left: auto lives here, not on .conn (final whole-branch review finding): the online
+   .conn span is `hidden` -> display:none -> out of flow entirely, so nothing pushed the menu
+   toggle right in the normal (online) state -- only .conn's own offline appearance happened to
+   push it. .menu-toggle is the one element always present, so it's the one that must carry the
+   auto margin. */
+.chat-header .menu-toggle { margin-left: auto; padding: 4px 9px; line-height: 1; }
+.chat-menu { position: absolute; top: 44px; right: 12px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 4px; }
 
 .chat-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-
 .chat-scroll {
   flex: 1; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column; gap: 10px;
-  padding: 56px 16px 16px; max-width: 760px; width: 100%; margin: 0 auto;
+  padding: 16px; max-width: 720px; width: 100%; margin: 0 auto;
+}
+.chat-older { align-self: center; color: var(--muted); font-size: 12px; margin: 0 0 4px; }
+.chat-offline {
+  max-width: 720px; width: 100%; margin: 0 auto; padding: 0 16px 6px;
+  color: var(--danger); font-size: 13px;
 }
 
 .chat-empty {
   flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--muted); font-size: 15px;
+}
+
+/* A quiet rule with a date on it -- the thread's only structural break now that the session
+   boundary is gone from the UI. */
+.day-separator {
+  align-self: center; margin: 8px 0 2px;
+  color: var(--muted); font-size: 12px; letter-spacing: 0.02em;
 }
 
 .bubble { max-width: 78%; padding: 10px 14px; border-radius: 16px; }
@@ -227,9 +145,13 @@ a.back:hover { color: var(--text); }
 .bubble.user {
   align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px;
 }
+/* NOT a bubble, unlike the user's message. A reply is allowed a table or a numbered list
+   (FORMAT_RULE), and both need the column's full width -- a 78% bubble squeezes exactly the
+   output the format rule deliberately permits. */
 .bubble.assistant {
-  align-self: flex-start; background: var(--panel); border: 1px solid var(--line);
-  border-bottom-left-radius: 4px; display: flex; flex-direction: column; gap: 6px;
+  align-self: stretch; max-width: 100%;
+  background: none; border: none; border-radius: 0; padding: 10px 2px;
+  display: flex; flex-direction: column; gap: 6px;
 }
 .bubble.assistant .attached { margin: 0; color: var(--muted); font-size: 12.5px; }
 .bubble.assistant .citations { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--muted); }
@@ -272,17 +194,11 @@ a.back:hover { color: var(--text); }
 .offer p { margin: 0; flex: 1; min-width: 160px; }
 .offer button { flex-shrink: 0; padding: 4px 10px; font-size: 12.5px; }
 
-.chat-error { max-width: 760px; width: 100%; margin: 0 auto 8px; padding: 0 16px; }
+.chat-error { max-width: 720px; width: 100%; margin: 0 auto 8px; padding: 0 16px; }
 
 .chat-composer {
   display: flex; gap: 10px; align-items: flex-end;
-  max-width: 760px; width: 100%; margin: 0 auto; padding: 12px 16px 20px;
+  max-width: 720px; width: 100%; margin: 0 auto; padding: 12px 16px 20px;
 }
 .chat-composer textarea { max-height: 200px; }
 .chat-composer button { flex-shrink: 0; padding: 10px 16px; }
-
-@media (min-width: 860px) {
-  .sidebar-toggle, .sidebar-scrim { display: none; }
-  .sidebar { position: static; width: 300px; flex-shrink: 0; transform: none; transition: none; }
-  .chat-scroll { padding-top: 24px; }
-}

@@ -3,10 +3,13 @@ import { expect, test } from "@playwright/test";
 /**
  * Mục 3 — "capture 1 note → xuất hiện ngay", the web half.
  *
- * quick-capture.tsx does NOT insert optimistically; its comment says so outright -- "the
- * Realtime echo adds the row and dedupes by id". So "appears" has two separable halves, and
- * they are two tests here on purpose: the note reaching the corpus, and the open page learning
- * about it. The first is unconditional; the second is currently unproven (see below).
+ * Until 2026-08-22 "appears" had two separable halves, because quick-capture.tsx did NOT insert
+ * optimistically ("the Realtime echo adds the row and dedupes by id") -- so there were two tests
+ * here, one for the write and one for the open page learning about it live. AssistantBox's own
+ * submit() now pushes the user's bubble into `turns` before the network call even starts (S1
+ * §3), so that second test asserted a mechanism (an unauthenticated Realtime subscription no
+ * longer in the render tree) that no longer exists, and there is nothing left in this file to
+ * split it from.
  */
 test("a captured note reaches the corpus", async ({ page }) => {
   const body = `web capture ${Date.now()}`;
@@ -18,40 +21,15 @@ test("a captured note reaches the corpus", async ({ page }) => {
 
   // The box is cleared ONLY on success, so an empty textarea is the acknowledgement.
   await expect(page.getByLabel(/what are you thinking/i)).toHaveValue("", { timeout: 15_000 });
+  // The bubble is optimistic -- rendered the instant submit() runs, well before the note is
+  // even saved -- so this is the immediate half of "appears".
+  await expect(page.locator(".bubble.user", { hasText: body })).toBeVisible();
 
-  // Reload rather than waiting for the live echo: this asserts the WRITE, and the SSR read in
-  // page.tsx is the independent confirmation that the row is really there.
+  // Reload rather than trusting the optimistic bubble alone: this asserts the WRITE, and the
+  // SSR read in page.tsx (now over chat_messages, not notes) is the independent confirmation
+  // that the row is really there.
   await page.reload();
-  await expect(page.getByRole("link", { name: body })).toBeVisible({ timeout: 15_000 });
-});
-
-/**
- * The regression test for the Realtime subscription being unauthenticated.
- *
- * It failed for a real reason, reproduced by hand in two browser tabs signed in through Google:
- * the channel joined, but the postgres_changes subscription was rejected with
- *
- *   ERROR P0001 (raise_exception) invalid column for filter user_id
- *
- * which is misleading -- the column exists. `realtime.subscription_check_filters()` builds its
- * list of filterable columns from `has_column_privilege(new.claims ->> 'role', ...)`, so it is
- * asking what the JWT's ROLE can select. The socket had no user token, so the role was `anon`,
- * and `anon` has SELECT on zero columns of `public.notes` (correctly -- 00009 revoked the
- * defaults). Zero columns means every filter is "invalid". No events were ever sent.
- *
- * If this starts failing again, capture the websocket frames before theorising: the join reply
- * says `status: ok` and the rejection arrives afterwards as a separate `system` message, so
- * nothing in the client's own logs looks wrong.
- */
-test("the open page learns about the capture without a reload", async ({ page }) => {
-  const body = `web live capture ${Date.now()}`;
-
-  await page.goto("/");
-  await page.getByLabel(/what are you thinking/i).fill(body);
-  await page.getByLabel(/what are you thinking/i).press("Control+Enter");
-
-  await expect(page.getByLabel(/what are you thinking/i)).toHaveValue("", { timeout: 15_000 });
-  await expect(page.getByRole("link", { name: body })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".bubble.user", { hasText: body })).toBeVisible({ timeout: 15_000 });
 });
 
 test("a failed capture keeps the text and offers a retry", async ({ page }) => {
@@ -83,6 +61,12 @@ test("a failed capture keeps the text and offers a retry", async ({ page }) => {
   await expect(page.getByLabel(/what are you thinking/i)).toHaveValue(body);
 });
 
+/**
+ * The Realtime-era banner ("Export needs a connection"'s composer-level sibling) is gone with
+ * the note browser. Task 7 replaced it with a `navigator.onLine`-driven notice inside
+ * AssistantBox itself (apps/web/src/app/assistant-box.tsx), which also disables the composer
+ * outright rather than merely warning about it.
+ */
 test("capture is disabled with no connection", async ({ page, context }) => {
   await page.goto("/");
   await expect(page.getByLabel(/what are you thinking/i)).toBeVisible();
@@ -90,8 +74,9 @@ test("capture is disabled with no connection", async ({ page, context }) => {
   await context.setOffline(true);
   // The component listens for the browser's offline event; it does not poll.
   await expect(
-    page.getByText("Offline — capture is disabled until the connection returns."),
+    page.getByText("Mất mạng — chưa gửi được. Hội thoại cũ vẫn xem được."),
   ).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByLabel(/what are you thinking/i)).toBeDisabled();
 
   await context.setOffline(false);
 });
