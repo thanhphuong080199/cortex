@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { SERVER_ONLY_TABLES, SYNC_TABLES } from "@cortex/shared";
+import { SERVER_ONLY_TABLES, SYNCED_TABLES } from "@cortex/shared";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 
@@ -90,8 +90,10 @@ beforeAll(async () => {
   // belongs to another -- invisible to any check that only reads the rules file.
   for (const u of [alice, bob]) {
     // Children first: FKs cascade from notes, so deleting notes last would orphan nothing,
-    // but tags/media/checkins are independent and must be cleared explicitly.
-    for (const t of ["links", "note_tags", "notes", "tags", "media_items", "checkins"]) {
+    // but tags/media/checkins are independent and must be cleared explicitly. chat_messages
+    // and chat_sessions are similarly parent/child and go first for the same reason.
+    for (const t of ["chat_messages", "chat_sessions", "links", "note_tags", "notes",
+                     "tags", "media_items", "checkins"]) {
       await admin.from(t).delete().eq("user_id", u.id);
     }
   }
@@ -149,6 +151,19 @@ beforeAll(async () => {
       .single();
     if (checkin.error) throw checkin.error;
 
+    // chat_messages is the first READ-ONLY synced table: the server writes it, the device only
+    // renders it. The parent session is a fixture requirement, not a feature -- session_id is
+    // `not null references chat_sessions(id)`, so there is no such thing as a loose message.
+    const session = await admin
+      .from("chat_sessions").insert({ user_id: u.id }).select("id").single();
+    if (session.error) throw session.error;
+    const message = await admin
+      .from("chat_messages")
+      .insert({ user_id: u.id, session_id: session.data.id, role: "user",
+                content: `message for ${name}` })
+      .select("id").single();
+    if (message.error) throw message.error;
+
     for (const [table, id] of [
       ["notes", note.data.id],
       ["tags", tag.data.id],
@@ -156,6 +171,7 @@ beforeAll(async () => {
       ["links", link.data.id],
       ["media_items", media.data.id],
       ["checkins", checkin.data.id],
+      ["chat_messages", message.data.id],
     ] as const) {
       seeded[table] ??= { alice: "", bob: "" };
       seeded[table][name] = id;
@@ -164,12 +180,12 @@ beforeAll(async () => {
 });
 
 describe("sync rules — static shape", () => {
-  it("covers exactly the tables in SYNC_TABLES", () => {
+  it("covers exactly the tables in SYNCED_TABLES", () => {
     const tables = scopings
       .map((s) => s.table)
       .filter((t): t is string => Boolean(t))
       .sort();
-    expect(tables).toEqual([...SYNC_TABLES].sort());
+    expect(tables).toEqual([...SYNCED_TABLES].sort());
   });
 
   it("scopes every data query to the authenticated user", () => {
@@ -256,7 +272,7 @@ streams:
 
   it("still parses the real file's queries as exactly the six scoped rules", () => {
     // Not a fixture: the actual file must have no leak of its own, in any form.
-    expect(scopings).toHaveLength(SYNC_TABLES.length);
+    expect(scopings).toHaveLength(SYNCED_TABLES.length);
     expect(scopings.every((s) => s.column === "user_id")).toBe(true);
   });
 });
@@ -276,7 +292,7 @@ describe("the powersync publication — the layer beneath the sync rules", () =>
     expect(error).toBeNull();
 
     const tables = (data as { tablename: string }[]).map((r) => r.tablename).sort();
-    expect(tables).toEqual([...SYNC_TABLES].sort());
+    expect(tables).toEqual([...SYNCED_TABLES].sort());
 
     // Named separately from the equality above: this is the assertion whose failure explains
     // itself if someone runs PowerSync's own `FOR ALL TABLES` instruction.
@@ -294,10 +310,10 @@ describe("sync rules — the declared predicate against real data", () => {
       expect(s.table, `no table parsed from: ${s.query}`).toBeTruthy();
       expect(s.column, `no auth.user_id() scoping parsed from: ${s.query}`).toBeTruthy();
     }
-    expect(scopings).toHaveLength(SYNC_TABLES.length);
+    expect(scopings).toHaveLength(SYNCED_TABLES.length);
   });
 
-  it.each(SYNC_TABLES)("seeds real rows for BOTH users in %s", async (table) => {
+  it.each(SYNCED_TABLES)("seeds real rows for BOTH users in %s", async (table) => {
     const ids = seedIds(table);
     const { data, error } = await admin.from(table).select("id").in("id", [ids.alice, ids.bob]);
     expect(error).toBeNull();

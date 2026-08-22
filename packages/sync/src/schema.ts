@@ -15,7 +15,7 @@ import { column, Schema, Table } from "@powersync/common";
  * PowerSync's local schema is a VIEW over its internal storage, so a column missing here
  * is simply invisible on the device -- it is not an error. Adding a column later is
  * cheap; the tables listed are the contract, and they must stay identical to
- * SYNC_TABLES in @cortex/shared, which the API's upload allow-list also reads.
+ * SYNCED_TABLES in @cortex/shared, which the API's upload allow-list also reads.
  */
 const notes = new Table({
   title: column.text,
@@ -73,6 +73,22 @@ const checkins = new Table({
 });
 
 /**
+ * Read-only on the device. `citations` and `retrieval_meta` are jsonb and arrive as JSON
+ * STRINGS, the same way `notes.domain_meta` does -- whatever renders them parses them.
+ *
+ * `user_id` is omitted for the same reason every other table here omits it: the bucket is
+ * already one user's, so the column would be a constant on every row.
+ */
+const chat_messages = new Table({
+  session_id: column.text,
+  role: column.text,
+  content: column.text,
+  citations: column.text,
+  retrieval_meta: column.text,
+  created_at: column.text,
+});
+
+/**
  * Local-only: the note BODY each in-progress local edit was based on. It is the input to the
  * server's conflict-copy check (spec §6.2) and is meaningless anywhere but this device, so it
  * must never sync -- hence localOnly, which also keeps it out of the upload queue entirely.
@@ -88,5 +104,5 @@ const note_edit_base = new Table(
 );
 
 export const AppSchema = new Schema({
-  notes, tags, note_tags, links, media_items, checkins, note_edit_base,
+  notes, tags, note_tags, links, media_items, checkins, chat_messages, note_edit_base,
 });

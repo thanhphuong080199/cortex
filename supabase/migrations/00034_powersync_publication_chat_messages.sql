@@ -1,0 +1,13 @@
+-- chat_messages joins the SCOPED powersync publication so the mobile chat can be read offline.
+--
+-- The publication is the layer BENEATH the sync rules: it is scoped by name rather than
+-- FOR ALL TABLES precisely so a mistake in the rules cannot leak a server-only table
+-- (docs/deploy.md §1). A table absent here replicates nothing no matter how correct its rule
+-- looks, which is the failure this migration exists to prevent -- and
+-- packages/db/src/test/sync-rules-isolation.test.ts asserts the publication's contents
+-- directly, with no skip guard, so a missing ALTER is a red test rather than a silent
+-- empty screen.
+--
+-- MUST ALSO BE APPLIED TO THE HOSTED PROJECT. `supabase db push` without --local targets
+-- production; running it here is deliberate and is a deploy step, not a code change.
+alter publication powersync add table public.chat_messages;

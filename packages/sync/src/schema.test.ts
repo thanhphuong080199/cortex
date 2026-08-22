@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { SERVER_ONLY_TABLES, SYNC_TABLES } from "@cortex/shared";
+import { SERVER_ONLY_TABLES, SYNCED_TABLES } from "@cortex/shared";
 import { AppSchema } from "./schema.js";
 
 const tableNames = () => AppSchema.tables.map((t) => t.name).sort();
 
 describe("AppSchema", () => {
   it("declares exactly the synced tables plus the local-only edit-base table", () => {
-    expect(tableNames()).toEqual([...SYNC_TABLES, "note_edit_base"].sort());
+    expect(tableNames()).toEqual([...SYNCED_TABLES, "note_edit_base"].sort());
   });
 
   it("never declares a server-only table", () => {
