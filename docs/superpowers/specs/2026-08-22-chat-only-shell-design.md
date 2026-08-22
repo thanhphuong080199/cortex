@@ -315,6 +315,55 @@ is worse than one that files it silently. Deliberately last: it edits the prompt
 turn passes through, and it should be judged against the new shell rather than at the same time as
 it.
 
+### 11. Debts carried in from stage C5
+
+Recorded here because they were recorded **only** in the tail of
+`docs/superpowers/plans/2026-08-18-chat-shape-and-stage-c5.md`, and a debt that lives in a
+finished plan is a debt that gets lost. None is touched by S1; each is listed with where it
+belongs.
+
+Two items from that list are **closed** and are not repeated below. Mobile markdown turned out
+never to have been attempted — PR #24 touched no mobile file — so S1 §5 re-runs the spike rather
+than inheriting an unknown. And "scrollback across earlier sessions" plus "chat history on
+mobile" are what §3 and §4 of this document build; they stop being out of scope the day S1
+merges.
+
+**11.1 A saved answer is cited as if the user wrote it.** `search_notes` reads `source_type`
+internally — to exclude chitchat, and to apply the 0.8 down-weight to `'assistant'` and
+`'web_search'` — but does **not return it**. `retrieve.ts`'s `SearchRow` and `Citation` therefore
+have no such field, and `renderCitations` cannot tell the model that a note came from an earlier
+answer rather than from the user's own thinking. The down-weight is real and tested; the framing
+is not. Closing it means a `search_notes` migration, a widened `Citation` on both sides of the
+wire, and a `renderCitations` change. **It belongs to the retrieval path, not to a UI stage** —
+which is why S1 does not touch it, and why it should be weighed on its own rather than folded
+into S2, S3 or S4.
+
+**11.2 The declined-offer exclusion is unproven, because nothing consumes it.**
+`packages/core/src/memory/` does not exist and no nightly `memory.update` job was ever built, so
+C5 Task 13 could only assert that the row is **written** with the `'assistant_offer'` category and
+the `evidence` marker a future job will filter on. There is no consumer to exclude it from, and a
+test that mocked one would assert nothing. **This is S4's to close** (§10): the stage that builds
+a memory consumer is the stage that can finally prove a declined offer stays out of it.
+
+**11.3 `OFFER_DEDUP_THRESHOLD` is an estimate.** `offer.ts` sets it to `0.88` against no data.
+C5 §12.3 and §15 both said it must be measured against real declines, and it still has not been.
+**Tune down, not up:** too low means the assistant occasionally stays quiet about something it
+could have offered; too high means it re-offers a fact the user has already refused, which is the
+behaviour the whole dedup exists to prevent.
+
+**11.4 Verification quality is unmeasured.** No test can assert "the model correctly identified a
+false claim". C5's tests cover routing, prompting and cost; whether the flagging is *useful* is a
+judgement over real use, and C5 shipped a mechanism whose value is still unproven. It needs
+sustained use to evaluate, not a task — but it should be evaluated deliberately rather than
+forgotten, and S2 is the natural moment, since S2 changes the same prompt path.
+
+**11.5 `FORMAT_RULE` obedience has no automated check, and this is a stated limit rather than a
+gap.** The tests assert the prompt's content and its scoping — that both halves of the rule are
+present, and that `buildAcknowledgePrompt` and `buildChitchatPrompt` do not carry it. Whether
+replies actually get shorter is checked by a person, and **both halves must be checked**: a casual
+question coming back as prose, *and* a request to enumerate still coming back as a list. Checking
+only the first is how the exception clause gets deleted later.
+
 ## Out of scope
 
 - No change to any API endpoint, service or controller.
