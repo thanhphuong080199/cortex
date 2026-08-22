@@ -1,19 +1,32 @@
 import { z } from "zod";
 
 /**
- * Tables PowerSync replicates to Android clients, and therefore the only tables
- * POST /sync/upload will write. Narrower than parent spec §6.7, which listed tables that
- * still have no service or UI: each table joins this list in the phase that builds its
- * feature, with its sync rule and isolation test in the same PR.
+ * Tables `POST /sync/upload` will write — everything a device is allowed to originate.
  *
- * Server-only tables are deliberately absent from here (see `SERVER_ONLY_TABLES` below);
- * they must never appear here, as integrations in particular holds credentials that never
- * leave the server.
+ * A subset of SYNCED_TABLES, and the two were ONE list until 2026-08-22. Splitting them is
+ * what lets chat_messages reach the device without becoming forgeable: the table holds the
+ * assistant's own replies, `00006` grants `authenticated` full DML on it, and RLS scopes that
+ * to the owner's rows — so an owner CAN insert a message their assistant never sent. Nothing
+ * downstream of `syncOp` re-checks the table name; this enum is the check.
  */
-export const SYNC_TABLES = [
+export const UPLOADABLE_TABLES = [
   "notes", "tags", "note_tags", "links", "media_items", "checkins",
 ] as const;
-export type SyncTable = (typeof SYNC_TABLES)[number];
+export type UploadableTable = (typeof UPLOADABLE_TABLES)[number];
+
+/**
+ * Tables PowerSync replicates DOWN to the device. Everything uploadable, plus the ones the
+ * server writes and the device only reads.
+ *
+ * `chat_messages` is the first of the read-only kind. It is here because chat is now the whole
+ * app: opening it without a network and finding an empty screen is not a degraded experience
+ * but a broken one (S1 spec §4).
+ *
+ * Server-only tables are deliberately absent (see `SERVER_ONLY_TABLES`); `integrations` in
+ * particular holds credentials that must never reach a device.
+ */
+export const SYNCED_TABLES = [...UPLOADABLE_TABLES, "chat_messages"] as const;
+export type SyncTable = (typeof SYNCED_TABLES)[number];
 
 /**
  * Tables deliberately absent from the PowerSync sync rules and from the `powersync`
@@ -42,7 +55,9 @@ export const syncOp = z.object({
   // PowerSync's own op id, echoed back so the client can correlate a per-op failure.
   op_id: z.string().min(1).max(64),
   op: syncOpKind,
-  table: z.enum(SYNC_TABLES),
+  // UPLOADABLE, not SYNCED. See the comment on UPLOADABLE_TABLES: this line is the only thing
+  // between a client and an inserted assistant reply.
+  table: z.enum(UPLOADABLE_TABLES),
   // Zod v4 top-level form, matching tags.ts. (media.ts uses z.iso.date(), a different
   // top-level constructor for a different type -- not this one.) The chained
   // z.string().uuid() still works but is deprecated and would leave two styles in one package.
