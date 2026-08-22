@@ -75,10 +75,10 @@ function matchesLive(row: ChatRow, live: LiveTurn): boolean {
  * The rendered list, oldest first, with a day separator before the first message and at every
  * change of local calendar day.
  *
- * The live turn is appended LAST and dropped the moment a replicated row matches it (see
- * `matchesLive`): the server's rows land a second or two after the stream ends, and for that
- * window both exist. Without the drop the user watches their own message appear twice, which
- * reads as a bug in sending rather than in rendering.
+ * The live turn is appended LAST, and its two halves are dropped on TWO INDEPENDENT conditions,
+ * not one -- see the two `if`s below for why. The server's rows land a second or two after the
+ * stream ends, and for that window some of both exist. Without the drop the user watches their
+ * own message appear twice, which reads as a bug in sending rather than in rendering.
  */
 export function buildTranscript(
   rows: ChatRow[], live: LiveTurn | null, now: Date, timeZone: string,
@@ -100,15 +100,33 @@ export function buildTranscript(
     });
   }
 
-  if (live && !rows.some((r) => matchesLive(r, live))) {
-    const key = dayKey(live.createdAt, timeZone);
-    if (key !== "" && key !== lastKey) {
-      items.push({ kind: "separator", id: `sep-${key}`, label: daySeparatorLabel(live.createdAt, now, timeZone) });
+  if (live) {
+    // The user half drops once ITS OWN row has replicated (matchesLive). That row is written
+    // very early in the turn -- right after session/history resolution, per turn.ts -- well
+    // before the assistant's row exists at all, so this routinely goes true while the answer is
+    // still streaming.
+    const userReplicated = rows.some((r) => matchesLive(r, live));
+    // The answer half has no such row to collide with: the assistant's chat_messages row is a
+    // single insert of the FINAL text, written only once generation has finished -- and by the
+    // time it could possibly replicate, the SSE loop has already ended and AssistantBox's
+    // `finally` will already have called `onLive(null)`, clearing `live` (and this whole block)
+    // before that row is ever seen here. Gating the answer on `userReplicated` -- as a single
+    // shared condition used to -- suppressed the still-accumulating answer the instant the
+    // user's row replicated mid-generation: a blank gap for the rest of most turns, which is
+    // the opposite of "the answer streams in below".
+    const showAnswer = live.answer !== "";
+    if (!userReplicated || showAnswer) {
+      const key = dayKey(live.createdAt, timeZone);
+      if (key !== "" && key !== lastKey) {
+        items.push({ kind: "separator", id: `sep-${key}`, label: daySeparatorLabel(live.createdAt, now, timeZone) });
+      }
     }
-    items.push({ kind: "message", id: `live-${live.noteId}`, role: "user", content: live.text, incomplete: false });
+    if (!userReplicated) {
+      items.push({ kind: "message", id: `live-${live.noteId}`, role: "user", content: live.text, incomplete: false });
+    }
     // Only once a token has arrived. An empty assistant row is a blank gap held open for the
     // whole silence, and the composer's own spinner already says a turn is in flight.
-    if (live.answer !== "") {
+    if (showAnswer) {
       items.push({ kind: "message", id: `live-answer-${live.noteId}`, role: "assistant", content: live.answer, incomplete: false });
     }
   }

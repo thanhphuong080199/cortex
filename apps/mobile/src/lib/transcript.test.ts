@@ -43,10 +43,18 @@ describe("buildTranscript", () => {
   });
 
   // THE DEDUP. `chat_messages.id` is a server-generated `gen_random_uuid()` -- turn.ts never
-  // sets it to the note's id -- so the replicated row's id here is a realistic-looking server
-  // UUID that shares NOTHING with `noteId: "n1"`. The match has to come from content, role and
+  // sets it to the note's id -- so the replicated rows' ids here are realistic-looking server
+  // UUIDs that share NOTHING with `noteId: "n1"`. The match has to come from content, role and
   // timing instead. The replicated rows arrive a second or two after the stream ends; for that
   // window both exist, and without this the user watches their own message appear twice.
+  //
+  // `live.answer` is empty here on purpose: this fixture represents the turn having fully
+  // settled -- both rows replicated -- which in the real app means `AssistantBox`'s `finally`
+  // has already cleared `live` to `null` before either row could land (see the next test for
+  // the case that actually matters while the answer is still in flight). An empty answer keeps
+  // this test honest about what it is asserting: the user half stays deduped once its row
+  // exists, full stop, with nothing left over from the live overlay to duplicate the assistant
+  // row either.
   it("drops the live turn once its rows have replicated", () => {
     const items = buildTranscript([
       row({
@@ -58,7 +66,7 @@ describe("buildTranscript", () => {
         created_at: "2026-08-22T02:30:05.000Z", role: "assistant", content: "Cá hồi.",
       }),
     ], {
-      noteId: "n1", text: "mỏi mắt ăn gì", answer: "Cá hồi.",
+      noteId: "n1", text: "mỏi mắt ăn gì", answer: "",
       createdAt: "2026-08-22T02:30:00.000Z",
     }, now, tz);
     expect(items.filter((i) => i.kind === "message")).toHaveLength(2);
@@ -95,6 +103,32 @@ describe("buildTranscript", () => {
       createdAt: "2026-08-22T02:30:00.000Z",
     }, now, tz);
     expect(items.filter((i) => i.kind === "message")).toHaveLength(2);
+  });
+
+  // THE MID-GENERATION REPLICATION CASE. turn.ts writes the user's row right after
+  // session/history resolution -- well before the assistant's row, which is a single insert of
+  // the FINAL text after generation completes. So the user's row routinely replicates WHILE the
+  // answer is still streaming, and the two halves must be gated independently: suppressing the
+  // still-accumulating answer the instant the user's row replicates would blank the streaming
+  // preview for the rest of most turns, which is the opposite of "the answer streams in below".
+  it("keeps streaming the live answer after the user's own row has replicated", () => {
+    const items = buildTranscript([
+      row({
+        id: "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        created_at: "2026-08-22T02:30:01.000Z", content: "mỏi mắt ăn gì",
+      }),
+    ], {
+      noteId: "n1", text: "mỏi mắt ăn gì", answer: "Cá",
+      createdAt: "2026-08-22T02:30:00.000Z",
+    }, now, tz);
+    const messages = items.filter((i) => i.kind === "message");
+    // The user's message appears exactly once -- from the replicated row, not duplicated by a
+    // still-showing live bubble -- and the live answer bubble is still present even though the
+    // assistant's own row has not replicated (and never will, in this fixture).
+    expect(messages).toHaveLength(2);
+    expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ role: "user", content: "mỏi mắt ăn gì" });
+    expect(messages[1]).toMatchObject({ role: "assistant", content: "Cá", id: "live-answer-n1" });
   });
 
   it("marks an interrupted answer from retrieval_meta", () => {
