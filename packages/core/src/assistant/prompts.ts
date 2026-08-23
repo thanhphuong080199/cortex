@@ -152,12 +152,21 @@ const renderHistory = (history: ThreadTurn[], timeZone?: string) =>
 // retrieval never ran to completion (the search RPC or the embed call threw). Collapsing the two
 // into "no citations" makes the model assert "the user has no notes matching this" on a turn
 // where the server never actually got to look -- a false claim, not a hedge.
+//
+// The gap-filling disclaimer lives HERE, in the populated branch, and not in buildAnswerPrompt's
+// standing rule list. As a standing instruction it fired on every turn, including the majority
+// where retrieval returned nothing -- and with no citations there is nothing for outside material
+// to be confused with, so the user heard "Trong note của bạn không có, nhưng theo mình biết..."
+// on turn after turn for no information (reported 2026-08-22). The empty branch now says the
+// opposite: answer, and do not narrate the absence.
 const renderCitations = (citations: Citation[] | "failed", timeZone: string) =>
   citations === "failed"
     ? "\n\nThe user's notes could not be searched right now (a technical failure, not an empty " +
       "corpus). Say so plainly. Do not claim they have no notes on this."
     : citations.length === 0
-      ? "\n\nThe user has no notes matching this."
+      ? "\n\nThey have no notes on this. Just answer -- from the web or from your own general " +
+        "knowledge -- and do not announce that their notes had nothing. There is nothing of " +
+        "theirs to attribute here, so there is nothing to distinguish your answer from."
       : `\n\nThe user's own notes:\n${citations
           .map((c) => {
             // Spread-if in string form: a citation with no date renders with no parenthesis at
@@ -174,7 +183,9 @@ const renderCitations = (citations: Citation[] | "failed", timeZone: string) =>
             // thing just banned.
             return `- ${on ? `(${on}) ` : ""}${c.title ? `${c.title}: ` : ""}${c.snippet}${mine}`;
           })
-          .join("\n")}`;
+          .join("\n")}\n\nIf these do not fully answer the question, you may fill the gap -- from ` +
+        "the web, or from your own general knowledge -- but say plainly which part is not from " +
+        "their notes.";
 
 /**
  * Stage C3 is life-domains spec §6: Gemini `google_search` grounding, with dual "from your
@@ -197,9 +208,6 @@ export function buildAnswerPrompt(a: {
     FORMAT_RULE,
     temporalRule(a.now, a.timeZone),
     RECALL_RULE,
-    "If their notes do not fully answer the question, you may fill the gap -- from the web, or " +
-      "from your own general knowledge -- but say plainly that it is not from their notes " +
-      "(e.g. \"Trong note của bạn không có, nhưng theo mình biết...\").",
     // Life-domains spec §6.1. Grounding replaced the narrower rule this line used to carry: the
     // gap-filler is no longer only the model's own memory, so the disclosure rule has to name
     // the web explicitly rather than "outside knowledge" in general.

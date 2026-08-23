@@ -55,19 +55,29 @@ describe("buildAnswerPrompt", () => {
     expect(p).toContain("- Giấc ngủ: ngủ 5 tiếng");
   });
 
-  it("tells the model there are no matching notes, and that it may answer from general knowledge instead", () => {
+  // Reported 2026-08-22: "đa phần tình huống tôi chat với AI là không có note sẵn, cứ nghe câu
+  // này suốt cũng phiền". The disclaimer was a STANDING instruction, so it fired on every turn --
+  // including the majority where retrieval returned nothing and there was therefore nothing for
+  // outside material to be confused WITH. It now lives in the branch where it does work.
+  it("does not ask the model to disclaim anything when there are no notes at all", () => {
     const empty = buildAnswerPrompt({
       question: "q", citations: [], history: [], timeZone: TZ, now: NOW,
     });
-    expect(empty).toMatch(/no notes matching/i);
     expect(empty).toMatch(/general knowledge/i);
-    expect(empty).toMatch(/say plainly/i);
-    // The other half of the branch. Without it, inverting the ternary in the renderer only
-    // shows up as a missing citation, and a prompt that tells the model there is nothing to
-    // read WHILE handing it notes is the harder failure to spot in an eval.
+    expect(empty).not.toMatch(/not from their notes/i);
+    expect(empty).not.toMatch(/say plainly/i);
+    // The empty branch's own text used to read "The user has no notes matching this.", which is
+    // an invitation to report the absence. It must now tell the model not to.
+    expect(empty).toMatch(/do not announce|no need to mention|đừng nói/i);
+  });
+
+  // THE BRANCH WHERE IT EARNS ITS PLACE. The reply mixes the user's material with outside
+  // material, and in a second brain a false "bạn từng viết..." costs more than a redundant hedge.
+  it("keeps the disclaimer when notes were found", () => {
     const withNotes = buildAnswerPrompt({
       question: "q", citations: [cite({ snippet: "first" })], history: [], timeZone: TZ, now: NOW,
     });
+    expect(withNotes).toMatch(/not from their notes/i);
     expect(withNotes).not.toMatch(/no notes matching/i);
   });
 
@@ -81,6 +91,10 @@ describe("buildAnswerPrompt", () => {
     });
     expect(failed).toMatch(/could not be searched/i);
     expect(failed).not.toMatch(/no notes matching/i);
+    // NOT NEGOTIABLE. This branch exists so the model never says "bạn không có note nào về
+    // chuyện này" on a turn where the search never ran -- dropping the disclaimer here would
+    // convert a technical failure into a false assertion about the user's corpus.
+    expect(failed).toMatch(/not claim they have no notes/i);
 
     const empty = buildAnswerPrompt({
       question: "q", citations: [], history: [], timeZone: TZ, now: NOW,
