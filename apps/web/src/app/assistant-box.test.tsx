@@ -74,6 +74,57 @@ describe("the composer", () => {
 });
 
 describe("AssistantBox", () => {
+  // `token` is read server-side in page.tsx and handed to this component as a prop, so it is
+  // frozen at the moment the page was rendered. A Supabase access token expires in an hour and
+  // an open chat tab never navigates, so middleware.ts never refreshes anything -- the box went
+  // on presenting a dead JWT until the user reloaded the page ("không có refresh token",
+  // 2026-08-23). Mobile never had this: every call site there re-reads getSession() first.
+  //
+  // Asserting the HEADER, not that getToken was called: a box that reads the fresh token and
+  // then sends the stale prop anyway would pass the weaker check. And asserting `every`, not
+  // `some`, because the turn makes two requests and only the second one was ever in doubt.
+  it("sends the current access token, not the one it was rendered with", async () => {
+    const auth: (string | undefined)[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      auth.push(headers.authorization ?? headers.Authorization);
+      return String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([["done", { messageId: "m1", sessionId: "s1" }]]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="stale" userId="u1" getToken={async () => "fresh"} />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "vẫn còn phiên chứ");
+    await userEvent.keyboard("{Enter}");
+
+    await waitFor(() => expect(auth.length).toBeGreaterThanOrEqual(2));
+    expect(auth).not.toContain("Bearer stale");
+    expect(auth.every((h) => h === "Bearer fresh")).toBe(true);
+  });
+
+  // The other half, and the one a naive implementation drops: getSession() can legitimately
+  // return no session (a cold client that has not read the cookie yet, a transient failure), and
+  // the SSR token is a REAL token that is correct for the first hour. Falling back to it is what
+  // keeps the very first turn after a page load working; sending `Bearer undefined` instead
+  // would trade an hour-later 401 for an immediate one.
+  it("falls back to the token it was rendered with when there is no live session", async () => {
+    const auth: (string | undefined)[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      auth.push(headers.authorization ?? headers.Authorization);
+      return String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([["done", { messageId: "m1", sessionId: "s1" }]]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="ssr" userId="u1" getToken={async () => ""} />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "phiên mới toanh");
+    await userEvent.keyboard("{Enter}");
+
+    await waitFor(() => expect(auth.length).toBeGreaterThanOrEqual(2));
+    expect(auth.every((h) => h === "Bearer ssr")).toBe(true);
+  });
+
   it("saves the note before it opens the stream", async () => {
     const calls: string[] = [];
     globalThis.fetch = (async (url: string) => {
@@ -149,7 +200,56 @@ describe("AssistantBox", () => {
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "ghi chú");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
-    expect(await screen.findByText(/saved/i)).toBeInTheDocument();
+    expect(await screen.findByText(/đã lưu/i)).toBeInTheDocument();
+  });
+
+  // A turn that dies before producing anything used to be a dead end: a hint saying the note was
+  // safe, and no way forward but retyping the message -- which saves it a SECOND time. The
+  // failures that land here (a 429, a dropped stream, a provider blip; see turn.ts's stream
+  // catch) are transient by nature, so the turn is worth another go.
+  //
+  // The `/notes` assertion is the point of the test, not decoration. The note is already saved
+  // by the time a stream can fail, so a retry routed back through submit() would create it
+  // again and leave the user with two copies of one message. Exactly one POST /notes, ever.
+  it("retries the answer without saving the note twice when the turn produced nothing", async () => {
+    const calls: string[] = [];
+    let assistantCalls = 0;
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url));
+      if (String(url).endsWith("/notes")) {
+        return new Response(JSON.stringify({ id: "n1" }), { status: 201 });
+      }
+      assistantCalls += 1;
+      return assistantCalls === 1
+        ? new Response("boom", { status: 500 })
+        : sse([["token", { text: "Lần này được rồi." }], ["done", { messageId: "m1", sessionId: "s1" }]]);
+    }) as typeof fetch;
+
+    render(<AssistantBox token="t" userId="u1" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "câu hỏi xui xẻo");
+    await userEvent.keyboard("{Enter}");
+
+    await userEvent.click(await screen.findByRole("button", { name: /thử lại/i }));
+
+    expect(await screen.findByText("Lần này được rồi.")).toBeInTheDocument();
+    expect(calls.filter((c) => c.endsWith("/notes"))).toHaveLength(1);
+    expect(calls.filter((c) => c.endsWith("/assistant"))).toHaveLength(2);
+  });
+
+  // The one case where a retry must NOT be offered: the budget declined, and it will decline
+  // again a second later. A control guaranteed not to work is worse than no control.
+  it("offers no retry when the spending limit is what stopped the answer", async () => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : sse([["declined", { reason: "budget" }]])) as typeof fetch;
+
+    render(<AssistantBox token="t" userId="u1" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "ghi chú");
+    await userEvent.keyboard("{Enter}");
+
+    await screen.findByText(/giới hạn chi tiêu/i);
+    expect(screen.queryByRole("button", { name: /thử lại/i })).toBeNull();
   });
 
   it("says plainly that there is no answer when the budget declines", async () => {
@@ -162,7 +262,7 @@ describe("AssistantBox", () => {
     await userEvent.type(screen.getByLabelText(/what are you thinking/i), "ghi chú");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
 
-    expect(await screen.findByText(/no answer/i)).toBeInTheDocument();
+    expect(await screen.findByText(/giới hạn chi tiêu/i)).toBeInTheDocument();
   });
 
   // The other half of "a dead assistant must never cost a capture": this is the case where
@@ -425,6 +525,59 @@ describe("the transcript", () => {
       turn({ content: "Theo notes của bạn thì", incomplete: true }),
     ]} />);
     expect(screen.getByText(/interrupted|bị gián đoạn/i)).toBeInTheDocument();
+  });
+
+  // PLACEMENT. The control has been on every assistant turn since S1.5 -- what was wrong was
+  // where the CONFIRMATION landed: as the last child of .chat-scroll, below the whole
+  // transcript. Saving a reply from this morning popped a box under the newest message with
+  // nothing tying the two together, which is what "lỡ tôi muốn lưu của mấy cái chat trước thì
+  // sao?" (2026-08-23) was actually describing.
+  //
+  // The second assertion is the one that fails a lazy fix. Rendering the proposal inside EVERY
+  // turn satisfies the first on its own.
+  it("shows the save confirmation inside the turn it belongs to", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ statement: "Cá hồi giàu omega-3." }), { status: 200 })) as typeof fetch;
+
+    render(<AssistantBox token="t" userId="u1" initialTurns={[
+      turn({ id: "a1", content: "Câu trả lời cũ về omega-3." }),
+      turn({ id: "u2", role: "user", content: "còn gì nữa không" }),
+      turn({ id: "a2", content: "Câu trả lời mới nhất." }),
+    ]} />);
+
+    const older = screen.getByText("Câu trả lời cũ về omega-3.").closest(".bubble")!;
+    const newer = screen.getByText("Câu trả lời mới nhất.").closest(".bubble")!;
+    await userEvent.click(within(older as HTMLElement).getByRole("button", { name: /lưu câu trả lời/i }));
+
+    await waitFor(() =>
+      expect(within(older as HTMLElement).getByText("Cá hồi giàu omega-3.")).toBeInTheDocument());
+    expect(within(newer as HTMLElement).queryByText("Cá hồi giàu omega-3.")).toBeNull();
+  });
+
+  // FEEDBACK. Nothing recorded that a save had happened, so the control went on offering the
+  // same save forever -- "lưu xong nó vẫn hiện tiếp cái 'Lưu câu trả lời'". Again the second
+  // assertion carries the weight: marking every turn saved would satisfy the first.
+  it("marks a turn saved once its statement is kept, and only that turn", async () => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/assistant/distill")
+        ? new Response(JSON.stringify({ statement: "Cá hồi giàu omega-3." }), { status: 200 })
+        : new Response(null, { status: 201 })) as typeof fetch;
+
+    render(<AssistantBox token="t" userId="u1" initialTurns={[
+      turn({ id: "a1", content: "Câu trả lời cũ về omega-3." }),
+      turn({ id: "a2", content: "Câu trả lời mới nhất." }),
+    ]} />);
+
+    const older = screen.getByText("Câu trả lời cũ về omega-3.").closest(".bubble") as HTMLElement;
+    const newer = screen.getByText("Câu trả lời mới nhất.").closest(".bubble") as HTMLElement;
+    await userEvent.click(within(older).getByRole("button", { name: /lưu câu trả lời/i }));
+    await waitFor(() => within(older).getByRole("button", { name: /lưu câu này/i }));
+    await userEvent.click(within(older).getByRole("button", { name: /lưu câu này/i }));
+
+    await waitFor(() => expect(within(older).getByText(/đã lưu/i)).toBeInTheDocument());
+    expect(within(older).queryByRole("button", { name: /lưu câu trả lời/i })).toBeNull();
+    // The other reply is untouched and still offers its own save.
+    expect(within(newer).getByRole("button", { name: /lưu câu trả lời/i })).toBeInTheDocument();
   });
 
   it("does not mark a complete answer", () => {

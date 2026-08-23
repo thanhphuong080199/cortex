@@ -1172,6 +1172,35 @@ select count(*) from (
 No new environment variable. The job shares `ENRICH_MONTHLY_BUDGET_USD` with the enrichment sweep
 and is distinguishable in `usage_ledger` by `kind = 'mood'`.
 
+**Applied to hosted 2026-08-23, together with `00039` (stage B1).** These three sat unapplied
+from the S3 merge (740ff90) until then — `supabase migration list` showed remote at `00035` while
+`main` carried `00038`, which means `MoodModule` had been deployed and failing hourly against
+tables that did not exist. **The backfill count above was NOT captured before the push**, so the
+first hour's spend is unmeasured; read it after the fact from
+`select count(*), sum(cost_usd) from usage_ledger where kind = 'mood'` instead.
+
+### `00039` — `search_notes` excludes `source_type = 'chat'` (stage B1)
+
+Applied to hosted 2026-08-23; `supabase migration list` confirmed local == remote across all 39.
+
+Unlike `00032` and `00035`, this is a `create or replace` — the return type is unchanged, so
+**the ACL is preserved by construction** and there is no revoke/grant pair to check afterwards.
+The pair in those two migrations existed only because `drop function` discards the ACL. If you
+want the belt-and-braces confirmation anyway, this is the query:
+
+```sql
+select grantee, privilege_type
+from information_schema.routine_privileges
+where routine_schema = 'public' and routine_name = 'search_notes';
+-- expect service_role only; anon/authenticated must NOT appear
+```
+
+**Behavioural change to expect on the live corpus:** notes stamped `source_type = 'chat'` stop
+being returned by retrieval and by `POST /search`. That is the fix — they are questions the user
+typed at the assistant, not things they recorded — but it means recall visibly narrows on a
+corpus that has been accumulating them since `00020`. Nothing is deleted; the rows are untouched
+and still render in the transcript.
+
 ### Ship log — 2026-08-12
 
 Everything that went wrong getting here — including the two defects this deploy itself

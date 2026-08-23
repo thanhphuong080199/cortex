@@ -65,7 +65,9 @@ test("a thought is saved even though the assistant cannot answer", async ({ page
   // The note is the deliverable. The API boots with a dummy Gemini key, so the turn fails --
   // and that is precisely the case worth pinning: capture must not depend on the AI path.
   await expect(page.getByText(text)).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText(/no answer right now/i)).toBeVisible({ timeout: 15_000 });
+  // Vietnamese since 2026-08-23: this hint was the last English string left in the box, and it
+  // now matches the wording mobile has always used.
+  await expect(page.getByText(/chưa trả lời được/i)).toBeVisible({ timeout: 15_000 });
 });
 
 /**

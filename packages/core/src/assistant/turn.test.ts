@@ -357,6 +357,54 @@ describe("runTurn", () => {
     expect((assistantRow?.retrieval_meta as { incomplete?: boolean })?.incomplete).toBe(true);
   });
 
+  // `incomplete` says a turn died; it never said WHY, and nothing else did either. The catch
+  // around the model stream is the only place `incomplete` is set, and it yielded the reason as
+  // an SSE event that both clients deliberately ignore, logged nothing (alone among this file's
+  // failure branches), and persisted `{ requestId, incomplete }` with the message left out. So
+  // the one user-visible failure in the system was the one nothing recorded -- which is why the
+  // "Hello hello" report of 2026-08-23 could be reproduced only as far as "the stream threw".
+  //
+  // Asserted on the persisted row rather than the yielded event: the event existed already.
+  it("records WHY a stream died on the row it writes", async () => {
+    const { client, inserted } = dbs();
+    const failing = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "question", complexity: "simple", domain: null, domain_meta: {}, tags: [] },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async () => ({
+        chunks: (async function* () {
+          yield { text: "half" };
+          throw new Error("gemini 429");
+        })(),
+        usage: () => null,
+      }),
+    });
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: failing },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+    const assistantRow = (inserted.chat_messages ?? []).find((m) => m.role === "assistant");
+    const meta = assistantRow?.retrieval_meta as { incomplete?: boolean; error?: string };
+    expect(meta.incomplete).toBe(true);
+    expect(meta.error).toContain("gemini 429");
+  });
+
+  // The other half, and the one an implementation that always stamps `error` would break: a
+  // turn that finished must not carry a failure reason. A row with `error` on it is read by a
+  // human as evidence something went wrong.
+  it("leaves no error on a turn that completed", async () => {
+    const { client, inserted } = dbs();
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: ai() },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+    const assistantRow = (inserted.chat_messages ?? []).find((m) => m.role === "assistant");
+    const meta = assistantRow?.retrieval_meta as { incomplete?: boolean; error?: string };
+    expect(meta.incomplete).toBe(false);
+    expect(meta.error).toBeUndefined();
+  });
+
   // Finding 2 (Stage C1 review round 1): the user's turn is written before history is read, and
   // with no exclusion the just-inserted row IS the history -- renderHistory then shows the model
   // its own current note/question a second time, mislabeled as something that already happened.
@@ -830,9 +878,15 @@ describe("runTurn", () => {
 
   // THE TURN THIS WHOLE TASK EXISTS FOR: a note to file AND a question, in one sentence. From
   // the routing point on it must be indistinguishable from a pure question -- same prompt, same
-  // model, same grounding, same stamp. Four assertions and not one, because the old `isQuestion`
-  // drove exactly these four things and a partial fix would leave the answer ungrounded or
-  // running on flash-lite with nothing to show that it had.
+  // model, same grounding. Assertions on all three and not one, because the old `isQuestion`
+  // drove exactly these and a partial fix would leave the answer ungrounded or running on
+  // flash-lite with nothing to show that it had.
+  //
+  // THE STAMP IS THE EXCEPTION, and it used to be asserted here as `source_type: "chat"`
+  // (changed 2026-08-23). "Indistinguishable from a pure question" was right about the REPLY and
+  // wrong about the filing: this turn is a note the user recorded -- "dạo này hơi mỏi mắt" is a
+  // fact about them -- and 00039 makes 'chat' unrecallable. Stamping it would mean a sentence
+  // that also ends in a question mark quietly never gets recalled again.
   it("answers a statement that also asks something", async () => {
     const { client, updated } = dbs();
     const seen: { prompt?: string; model?: string; grounding?: boolean }[] = [];
@@ -856,7 +910,8 @@ describe("runTurn", () => {
 
     expect(seen[0]?.model, "must reach the answer model").toBe(ANSWER_MODEL);
     expect(seen[0]?.grounding, "must be allowed to search the web").toBe(true);
-    expect(updated.notes ?? []).toContainEqual(expect.objectContaining({ source_type: "chat" }));
+    // Keeps the 'quick' it was created with -- no source_type write at all. See the note above.
+    expect((updated.notes ?? []).some((r) => "source_type" in r)).toBe(false);
     // The acknowledge prompt's refusal is the sentence that swallowed the question. Its absence
     // is the only direct evidence the ANSWER prompt ran rather than a reworded acknowledge one.
     expect(seen[0]?.prompt).not.toMatch(/did not ask a question/i);
@@ -1159,7 +1214,9 @@ describe("the routing chain", () => {
     const { seen, updated } = await recordTurn({ alsoWantsAnswer: true, checkable_claim: true });
     expect(seen[0]?.prompt).not.toMatch(/You filed it under/i);
     expect(seen[0]?.grounding).toBe(true);
-    expect(updated.notes ?? []).toContainEqual(expect.objectContaining({ source_type: "chat" }));
+    // Still a statement as far as FILING goes, and so still recallable -- 2026-08-23, same
+    // reason as "answers a statement that also asks something" above.
+    expect((updated.notes ?? []).some((r) => "source_type" in r)).toBe(false);
   });
 
   // A flagged statement grounds, so the check has a second source rather than only the model's

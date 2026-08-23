@@ -288,9 +288,19 @@ export async function* runTurn(
   // A note that already exists, restamped after classification -- the shape 'chat' has used
   // since C1. An ordinary statement is the default branch and writes nothing: every plain
   // capture keeps the 'quick' the row was created with.
-  if (wantsAnswer || isChitchat) {
+  //
+  // `intent === "question"`, NOT `wantsAnswer`, and the difference is a recorded thought. Both
+  // are true for a pure question, but `wantsAnswer` is ALSO true for a statement the classifier
+  // flagged as asking something -- the eye-strain turn, "Các loại thực phẩm nào tốt cho mắt, dạo
+  // này hơi mỏi mắt". That note carries a fact the user recorded, and 00039 makes 'chat'
+  // unrecallable, so stamping it here would delete the eye strain from their second brain as a
+  // side effect of the sentence also ending in a question mark. The dual-intent design already
+  // says `intent` stays "statement" for that turn on purpose and that only the reply branch was
+  // ever wrong; this line is the other place that had not been told.
+  const isPureQuestion = extracted?.intent === "question";
+  if (isPureQuestion || isChitchat) {
     await userDb.from("notes")
-      .update({ source_type: wantsAnswer ? "chat" : "chitchat" })
+      .update({ source_type: isPureQuestion ? "chat" : "chitchat" })
       .eq("id", args.noteId);
   }
   // Resolved once per turn, not per prompt: two calls could not disagree today, but the point
@@ -319,6 +329,14 @@ export async function* runTurn(
 
   let answer = "";
   let incomplete = false;
+  // The reason, kept. Until 2026-08-23 the catch below yielded this as an SSE event and let it
+  // go: both clients ignore `error` by design, this file's own catch logged nothing (alone among
+  // its failure branches -- extraction, retrieval, the check-in write and both ledger writes all
+  // console.error with the requestId), and the row it writes carried only `{ requestId,
+  // incomplete }`. So the single user-visible failure in the system was the only one that left
+  // no evidence anywhere, which is why the "Hello hello" report could be narrowed to "the model
+  // stream threw" and no further.
+  let streamError: string | null = null;
   let streamUsage: { inputTokens: number; outputTokens: number; model: string } | null = null;
   let grounding: GroundingResult | null = null;
   // A verification checks against a second source rather than the model's own memory alone
@@ -355,7 +373,13 @@ export async function* runTurn(
   } catch (err) {
     incomplete = true;
     mark("model stream threw");
-    yield { type: "error", message: errorMessage(err).slice(0, 200) };
+    // Capped at 200 for the same reason the event is: a provider can return a long body, and
+    // this string is both logged and written to a jsonb column. The message itself is safe to
+    // record -- it is the AI client's own error text ("gemini 429", an AbortError), never the
+    // prompt or the answer, which §15.6 rule 1 forbids reaching a log.
+    streamError = errorMessage(err).slice(0, 200);
+    console.error(`[assistant] model stream failed (request ${requestId}): ${streamError}`);
+    yield { type: "error", message: streamError };
   }
 
   // `searched` and "has sources" are different facts and are used for different things. Google
@@ -457,7 +481,10 @@ export async function* runTurn(
     user_id: args.userId, session_id: sessionId, role: "assistant", content: answer,
     // `citations` already carries `type: "note"` from retrieve.ts, so no mapping happens here.
     citations: [...citations, ...webCitations],
-    retrieval_meta: { requestId, incomplete },
+    // Spread-if, so a turn that completed carries no `error` key at all rather than an explicit
+    // null. A row with an `error` field on it is read by a human as evidence something went
+    // wrong, and "went wrong: nothing" is a worse thing to write down than silence.
+    retrieval_meta: { requestId, incomplete, ...(streamError !== null ? { error: streamError } : {}) },
   }).select("id").single();
   mark("assistant message written");
 

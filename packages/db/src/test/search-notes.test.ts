@@ -262,18 +262,24 @@ describe("search_notes", () => {
     expect(order.indexOf(own)).toBeLessThan(order.indexOf(webSearch));
   });
 
-  // Same rank-tie hazard as above, same fix: `assistant` gets the exact target (rank 1,
-  // would win outright without the multiplier), `chat` gets the nudged vector (rank 2).
-  // 'chat' being excluded from the down-weight is the only thing that can put `chat` ahead.
-  it("does not down-weight a chat note, which is the user's own question", async () => {
+  // SUPERSEDED BY 00039, and kept rather than deleted because the fixture is the sharpest one
+  // in this file. It used to read "does not down-weight a chat note, which is the user's own
+  // question" and assert that `chat` came back ABOVE `assistant`, proving 'chat' was outside the
+  // 0.8 multiplier's `in (...)` list. That decision is void: 00039 removes 'chat' from retrieval
+  // altogether, and there is no down-weight question about a row that is never returned.
+  //
+  // Turned around, the same three lines are the strongest exclusion test available. `chat` is
+  // seeded with a nudged vector against an `assistant` note on the exact target, so before 00039
+  // it deterministically outranked it -- the maximum pull the vector arm can exert on a row.
+  // Excluded anyway is the assertion; and `assistant` still coming back is what proves the
+  // predicate did not simply empty the result.
+  it("excludes a chat note even where it would otherwise have outranked everything", async () => {
     const target = vec(41);
     const chat = await seed(alice, "what did I conclude about MCP", { embedding: nudge(target), sourceType: "chat" });
     const assistant = await seed(alice, "what did I conclude about MCP", { embedding: target, sourceType: "assistant" });
-    const rows = await search(alice, "zzz-no-fts-token-overlap-zzz", target);
-    const order = rows.map((r) => r.note_id);
-    expect(order).toContain(chat);
+    const order = (await search(alice, "zzz-no-fts-token-overlap-zzz", target)).map((r) => r.note_id);
+    expect(order).not.toContain(chat);
     expect(order).toContain(assistant);
-    expect(order.indexOf(chat)).toBeLessThan(order.indexOf(assistant));
   });
 
   it("excludes trashed notes", async () => {
@@ -404,5 +410,39 @@ describe("search_notes", () => {
     });
     const rows = await search(bob, "nothing-matches-this-keyword-zzz", target);
     expect(rows.map((r) => r.note_id)).not.toContain(chit);
+  });
+
+  // 00039, and the two tests below mirror the two above deliberately: 'chat' joins 'chitchat'
+  // for the same reason and must be excluded from BOTH arms, which is a thing the full outer
+  // join makes easy to get half right.
+  //
+  // What this is for: asked "Game này có hướng dẫn gì không", the assistant answered partly out
+  // of "liet ke vai cach di" and "Tìm đi" -- commands the user had typed AT it in an unrelated
+  // conversation, stamped source_type 'chat' by turn.ts and left fully recallable. Measured
+  // against the real embedding model, those two sit CLOSER to the question than the note it was
+  // actually about, so no distance floor can separate them; only what they are can.
+  it("never returns a note the user typed as a question, matched by keyword", async () => {
+    const control = await seed(bob, "the snozzcumber protocol, a real note");
+    const asked = await seed(bob, "the snozzcumber protocol, liệt kê vài cách đi", { sourceType: "chat" });
+    const rows = await search(bob, "snozzcumber protocol", vec(7));
+    expect(rows.map((r) => r.note_id)).toContain(control);
+    expect(rows.map((r) => r.note_id)).not.toContain(asked);
+  });
+
+  it("never returns a note the user typed as a question, matched by embedding", async () => {
+    const target = vec(31);
+    const asked = await seed(bob, "tìm đi", { sourceType: "chat", embedding: target });
+    const rows = await search(bob, "nothing-matches-this-keyword-zzz", target);
+    expect(rows.map((r) => r.note_id)).not.toContain(asked);
+  });
+
+  // The other side of the same migration, and the one that stops it over-reaching. A plain
+  // capture must still be recallable -- an exclusion that swallowed 'quick' too would pass both
+  // tests above and quietly empty the corpus.
+  it("still returns an ordinary note of the same shape", async () => {
+    const target = vec(41);
+    const kept = await seed(bob, "tìm đi", { embedding: target });
+    const rows = await search(bob, "nothing-matches-this-keyword-zzz", target);
+    expect(rows.map((r) => r.note_id)).toContain(kept);
   });
 });

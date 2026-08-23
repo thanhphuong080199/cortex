@@ -33,6 +33,11 @@ export SUPABASE_URL=http://127.0.0.1:54321
 export SUPABASE_ANON_KEY="$ANON_KEY" SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY"
 export NEXT_PUBLIC_SUPABASE_URL="$SUPABASE_URL" NEXT_PUBLIC_SUPABASE_ANON_KEY="$ANON_KEY"
 export NEXT_PUBLIC_API_URL=http://127.0.0.1:3001 E2E_API_URL=http://127.0.0.1:3001
+# parseApiEnv requires all four; the GEMINI ones must stay dummies (no test may reach the
+# real API), and DATABASE_URL comes from the CLI's DB_URL key, whose name differs.
+export DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
+export GEMINI_API_KEY=local-dummy-no-test-may-reach-the-real-api GEMINI_TIER=free
+export ENRICH_MONTHLY_BUDGET_USD=5 ASSISTANT_MONTHLY_BUDGET_USD=5
 
 PORT=3001 node apps/api/dist/main.js &        # do NOT set SUPABASE_JWT_SECRET
 node e2e/scripts/seed.mjs --reset
@@ -43,6 +48,17 @@ pnpm --filter @cortex/web exec playwright test               # or: --ui
 
 Playwright starts `next start` itself (`webServer` in `playwright.config.ts`) and reuses an
 already-running server outside CI.
+
+**Two traps, both of which cost a debugging session on 2026-08-23.**
+
+`NEXT_PUBLIC_*` are baked in at BUILD time, and `turbo run build` will happily replay a cached
+build made with different env — so the server serves a bundle pointing at whatever Supabase the
+last build saw, every spec redirects to `/login`, and it reads as an auth bug. Check the
+`Cached:` line, and use `--force` when the env has changed since the last build.
+
+`reuseExistingServer` means a `next start` you left running from an earlier attempt is silently
+adopted, cached bundle and all. `pkill -f "next start"` does not kill it on Windows; find the
+listener on the port and stop that PID.
 
 ## Running the mobile suite locally
 

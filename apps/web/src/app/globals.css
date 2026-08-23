@@ -205,13 +205,79 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
 .save-answer {
   background: none; border: none; padding: 0; margin-top: .25rem;
   color: var(--muted); font-size: .85rem; text-decoration: underline; cursor: pointer;
+  align-self: flex-start;
 }
+/* What replaces .save-answer once this reply has been kept. Same size and same colour so the
+   row does not shift when it swaps, and no underline -- it is a statement, not a control. */
+.saved-answer {
+  margin: .25rem 0 0; align-self: flex-start;
+  color: var(--muted); font-size: .85rem;
+}
+.saved-answer::before { content: "✓ "; }
 
 .chat-error { max-width: 720px; width: 100%; margin: 0 auto 8px; padding: 0 16px; }
 
-.chat-composer {
-  display: flex; gap: 10px; align-items: flex-end;
-  max-width: 720px; width: 100%; margin: 0 auto; padding: 12px 16px 20px;
+/* ---- The composer ----
+   Two elements, and the split is what makes the safe-area inset work: the WRAP carries the page
+   padding and env(safe-area-inset-bottom), the BLOCK is the bordered control. Putting the inset
+   on the block would push the border away from the text inside it instead of away from the
+   bottom of the screen. `env()` resolves to a real number only because layout.tsx sets
+   viewportFit: "cover". */
+.chat-composer-wrap {
+  max-width: 720px; width: 100%; margin: 0 auto;
+  padding: 8px 16px calc(12px + env(safe-area-inset-bottom, 0px));
 }
-.chat-composer textarea { max-height: 200px; }
-.chat-composer button { flex-shrink: 0; padding: 10px 16px; }
+
+.chat-composer {
+  display: flex; gap: 8px; align-items: flex-end;
+  padding: 7px 7px 7px 15px;
+  /* Pill rather than a rounded rectangle, and it stays a pill at one line because the radius is
+     larger than half the collapsed height. Multi-line, the corners simply stop being circles. */
+  border: 1px solid var(--line); border-radius: 24px; background: var(--panel);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+/* The composite control takes the focus ring, not the textarea inside it -- an outline on the
+   bare textarea would draw a rectangle inside the pill. `:focus-within` is what moves it out. */
+.chat-composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.chat-composer textarea {
+  /* Overrides the generic `textarea` rule above wholesale: inside the pill the border, the
+     background and the padding all belong to the parent. `resize: none` is not cosmetic --
+     assistant-box.tsx sets `style.height` from scrollHeight on every keystroke, so a
+     user-dragged height is overwritten on the next character and the handle is a lie. */
+  flex: 1; min-width: 0;
+  border: none; background: none; border-radius: 0;
+  padding: 7px 0; max-height: 200px; resize: none;
+}
+.chat-composer textarea:focus { outline: none; }
+.chat-composer button[type="submit"] {
+  flex-shrink: 0;
+  width: 34px; height: 34px; padding: 0;
+  display: grid; place-items: center;
+  border: none; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  font-size: 15px; line-height: 1;
+}
+.chat-composer button[type="submit"]:hover:not(:disabled) { filter: brightness(1.08); }
+.chat-composer button[type="submit"]:disabled { opacity: 0.4; }
+
+/* ---- Phones ----
+   Everything above was written and read at desktop width; until 2026-08-23 there was no viewport
+   meta tag at all, so a phone laid the page out at ~980px and scaled it down and none of these
+   widths were ever exercised at the size they now get. 16px of padding on each side is 9% of a
+   360px screen. */
+@media (max-width: 480px) {
+  .chat-scroll { padding: 12px 10px; }
+  .chat-composer-wrap { padding-left: 10px; padding-right: 10px; }
+  .chat-header { padding: 10px 12px; }
+  .chat-error, .chat-offline { padding-left: 10px; padding-right: 10px; }
+  /* A 78% bubble at 360px leaves 79px of gutter for a message that is usually one line. The
+     assistant side is already `stretch`; this is the user side only. */
+  .bubble { max-width: 88%; }
+  /* Both of these are `max-width: 78%` one-line rows with two buttons in them. At 360px the
+     buttons wrap under the text, and 78% of that leaves the statement in a column three words
+     wide. */
+  .offer, .save-proposal { max-width: 100%; }
+}

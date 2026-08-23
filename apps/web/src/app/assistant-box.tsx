@@ -58,6 +58,21 @@ export function AssistantBox(
     // cast is where that structural match is asserted once, instead of on every call site.
     fetchOlder = (before: string) =>
       fetchOlderTurns(createClient() as unknown as TranscriptClient, userId, before),
+    // THE TOKEN IS READ PER REQUEST, never once. `token` above comes from page.tsx, which reads
+    // it server-side at render and cannot read it again -- a Supabase access token expires in an
+    // hour, and an open chat tab performs no navigation, so middleware.ts's cookie refresh never
+    // runs. The box therefore went on presenting a dead JWT until the user reloaded the page
+    // (reported 2026-08-23: "web online nếu để yên đó 1 lát vô chat sẽ bị lỗi, phải refresh
+    // page"). Mobile never had this bug because every call site there awaits getSession() first,
+    // and getSession() refreshes an expired token before returning it -- this is that, on web.
+    //
+    // Overridable for the same reason fetchOlder is, and NOT because a caller outside a test
+    // ever passes it: createClient() checks NEXT_PUBLIC_SUPABASE_URL/ANON_KEY eagerly and throws
+    // under jsdom, where this component's tests run.
+    getToken = async () => {
+      const { data: { session } } = await createClient().auth.getSession();
+      return session?.access_token ?? token;
+    },
   }:
     {
       token: string;
@@ -65,8 +80,26 @@ export function AssistantBox(
       initialTurns?: TranscriptTurn[];
       hasMore?: boolean;
       fetchOlder?: (before: string) => ReturnType<typeof fetchOlderTurns>;
+      getToken?: () => Promise<string>;
     },
 ) {
+  /**
+   * The token for the request about to be made, with the SSR one as the floor.
+   *
+   * Both fallbacks are load-bearing and they cover different failures. An empty/absent session
+   * is the ordinary one -- a client that has not read the cookie yet -- and `token` is a real,
+   * valid token for the first hour, so falling back to it is what keeps the very first turn
+   * after a page load working instead of sending `Bearer undefined`. A THROW is the other:
+   * getSession() reaches storage and can fail, and a token read is not worth losing the note
+   * over when a possibly-stale token is right there and the server will say so if it is dead.
+   */
+  const authToken = async (): Promise<string> => {
+    try {
+      return (await getToken()) || token;
+    } catch {
+      return token;
+    }
+  };
   const [turns, setTurns] = useState<TranscriptTurn[]>(initialTurns ?? []);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -91,6 +124,19 @@ export function AssistantBox(
     { forId: string; statement: string; sourceUrl?: string } | null
   >(null);
   const [proposing, setProposing] = useState<string | null>(null);
+  // Which turns the user has already kept an answer from, by turn id. Client-side and
+  // per-session on purpose: a durable flag would need a column on chat_messages and a link back
+  // from the saved note to the message it came from, which is a bigger change than the reported
+  // defect and is recorded as out of scope in the design doc. Within a session it is exactly
+  // what the user asked for -- a way to tell that this one is done.
+  const [saved, setSaved] = useState<ReadonlySet<string>>(new Set());
+  // The note whose turn died before producing anything, so the hint can offer to run it again.
+  // Null whenever there is nothing to retry, which is almost always.
+  //
+  // Why it holds a NOTE ID rather than a boolean: the note is already saved by the time a stream
+  // can fail, so the retry must re-run the ANSWER only. A retry that went through submit() again
+  // would call createNote a second time and leave the user with two copies of one message.
+  const [retryNoteId, setRetryNoteId] = useState<string | null>(null);
   const [online, setOnline] = useState(true);
   const [more, setMore] = useState(hasMore ?? false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -173,6 +219,25 @@ export function AssistantBox(
     }
   }
 
+  /**
+   * Everything a turn resets before it starts. Shared by submit() and by the retry, because the
+   * retry is a second run of the same turn and must start from the same blank state -- leaving
+   * `answer` or `citations` behind would append the second attempt to the first.
+   */
+  function resetLiveTurn() {
+    setStatus(null);
+    setError(null);
+    setAttached(null);
+    setCitations([]);
+    setWeb(null);
+    setAnswer("");
+    setOffer(null);
+    setRetryNoteId(null);
+    answerRef.current = "";
+    citationsRef.current = [];
+    webRef.current = null;
+  }
+
   async function submit() {
     if (!text.trim() || busy) return;
     // Diagnostic only, temporary: one line per milestone on this turn, all relative to t0, with
@@ -185,16 +250,7 @@ export function AssistantBox(
 
     const pendingText = text;
     setBusy(true);
-    setStatus(null);
-    setError(null);
-    setAttached(null);
-    setCitations([]);
-    setWeb(null);
-    setAnswer("");
-    setOffer(null);
-    answerRef.current = "";
-    citationsRef.current = [];
-    webRef.current = null;
+    resetLiveTurn();
 
     // Shown the INSTANT Send is pressed, before createNote is even awaited -- otherwise `busy`
     // (and therefore `phase`'s "Đang lưu…") goes true a whole network round trip before this
@@ -218,7 +274,7 @@ export function AssistantBox(
     let note: { id: string };
     try {
       // Awaited in its OWN try/catch. The note is the deliverable; the answer is a bonus.
-      note = await api.createNote(token, { content: pendingText });
+      note = await api.createNote(await authToken(), { content: pendingText });
       mark("note saved");
     } catch {
       setTurns((prev) => prev.filter((t) => t.id !== tempId));
@@ -232,6 +288,20 @@ export function AssistantBox(
     // Reconciled to the server's real id -- a reload replaces this turn with the persisted one
     // from chat_messages either way, so the id only has to be locally unique until then.
     setTurns((prev) => prev.map((t) => (t.id === tempId ? { ...t, id: note.id } : t)));
+
+    await streamTurn(note.id, mark);
+  }
+
+  /**
+   * The answer half of a turn, for a note that is ALREADY SAVED.
+   *
+   * Split out of submit() so the retry (below the "no answer" hint) can run it again without
+   * calling createNote a second time -- a retry that re-saved would leave the user with two
+   * copies of their own message for one thing they typed. `setBusy(false)` in the finally covers
+   * both callers; `setBusy(true)` belongs to each caller, because submit() must go busy before
+   * the note is even saved and the retry has nothing to save.
+   */
+  async function streamTurn(noteId: string, mark: (label: string) => void) {
 
     // THE HAND-OFF, generalized. Both the normal "done" event and an interrupted stream that
     // ends without one migrate the live state into `turns` through this one path, so there is
@@ -291,16 +361,21 @@ export function AssistantBox(
       if (answerRef.current !== "" || citationsRef.current.length > 0 || webRef.current) {
         flushLiveIntoTurns(`local-${Date.now()}`, true);
       } else {
-        setStatus("Saved. No answer right now.");
+        // Nothing was produced at all. The note is safe, and the turn is worth another go: the
+        // failures that land here are transient by nature (a 429, a dropped stream, a provider
+        // blip -- see turn.ts's stream catch). Until 2026-08-23 this was a dead end, and the
+        // only way forward was to retype the message, which saved it a second time.
+        setStatus("Đã lưu. Chưa trả lời được.");
+        setRetryNoteId(noteId);
       }
     };
 
     try {
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/assistant`, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${await authToken()}` },
         body: JSON.stringify({
-          noteId: note.id,
+          noteId,
           // Read per turn rather than captured once: it costs nothing and it is correct across
           // a DST change or a flight. The server validates it (resolveTimeZone) -- this value
           // comes from the browser, and the browser is not trusted input.
@@ -309,7 +384,10 @@ export function AssistantBox(
       });
       mark(`fetch headers received (status ${res.status})`);
       if (!res.ok || !res.body) {
-        setStatus("Saved. No answer right now.");
+        // Same dead end as settleWithoutDone's empty branch, reached one step earlier -- a 5xx
+        // or a 401 rather than a stream that opened and died. Offer the same way out.
+        setStatus("Đã lưu. Chưa trả lời được.");
+        setRetryNoteId(noteId);
         return;
       }
       let sawFirstToken = false;
@@ -349,7 +427,9 @@ export function AssistantBox(
         } else if (ev.type === "declined") {
           mark("event: declined");
           declined = true;
-          setStatus("Saved. No answer right now (spending limit).");
+          // No retry offered here, deliberately: the budget will still be spent a second later,
+          // so a retry button would be a control that is guaranteed not to work.
+          setStatus("Đã lưu. Chưa trả lời được (đã chạm giới hạn chi tiêu).");
         }
         // "error" is intentionally NOT handled here. It always means the stream will end without
         // a `done` -- but whether that deserves a status hint or an interrupted transcript row
@@ -390,7 +470,7 @@ export function AssistantBox(
     try {
       await fetch(`${process.env.NEXT_PUBLIC_API_URL}/notes/save-answer`, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${await authToken()}` },
         body: JSON.stringify({
           statement: o.statement,
           ...(o.sourceUrl !== undefined ? { sourceUrl: o.sourceUrl } : {}),
@@ -409,11 +489,17 @@ export function AssistantBox(
   // offered again later -- fine, per §11 -- which is why the catch below does nothing at all.
   function declineOffer(o: Offer) {
     setOffer(null);
-    void fetch(`${process.env.NEXT_PUBLIC_API_URL}/assistant/decline`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ statement: o.statement }),
-    }).catch(() => {
+    // The token read is INSIDE the void-ed chain, and this function stays non-async, so
+    // setOffer(null) above is still the first and only synchronous thing that happens. Making
+    // this `async` to await the token would put a promise tick between the click and the state
+    // update -- the exact latency §11 says declining must not have.
+    void (async () => {
+      await fetch(`${process.env.NEXT_PUBLIC_API_URL}/assistant/decline`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${await authToken()}` },
+        body: JSON.stringify({ statement: o.statement }),
+      });
+    })().catch(() => {
       // Best-effort, same as acceptOffer: the offer is already off the screen.
     });
   }
@@ -432,7 +518,7 @@ export function AssistantBox(
     try {
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/assistant/distill`, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${await authToken()}` },
         body: JSON.stringify({ answer: answerText, ...(question ? { question } : {}) }),
       });
       if (res.ok) {
@@ -455,12 +541,20 @@ export function AssistantBox(
    * ASSISTANT should stop offering a fact, and the user declining to keep an answer they asked
    * about is not that.
    */
-  async function confirmSave(p: { statement: string; sourceUrl?: string }) {
+  async function confirmSave(p: { forId: string; statement: string; sourceUrl?: string }) {
     setProposal(null);
+    // Marked BEFORE the write, and optimistically, matching every other save in this box. A
+    // failed write costs the user one skipped note; a control that keeps offering a save they
+    // already made is a nag they cannot silence, and it was the second half of the 2026-08-23
+    // report ("lưu xong nó vẫn hiện tiếp cái 'Lưu câu trả lời'").
+    //
+    // A NEW Set, never `prev.add(...)`: mutating the existing one returns the same reference,
+    // React bails out of the re-render, and the label never changes on screen.
+    setSaved((prev) => new Set(prev).add(p.forId));
     try {
       await fetch(`${process.env.NEXT_PUBLIC_API_URL}/notes/save-answer`, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${await authToken()}` },
         body: JSON.stringify({
           statement: p.statement,
           ...(p.sourceUrl !== undefined ? { sourceUrl: p.sourceUrl } : {}),
@@ -478,6 +572,48 @@ export function AssistantBox(
   // between two rows of the same paint.
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const now = new Date();
+
+  /**
+   * The save control for one reply, and its confirmation, TOGETHER.
+   *
+   * The two used to live apart: the button on every turn, the confirmation as the last child of
+   * `.chat-scroll`. The control was therefore already on every reply -- the user's "lỡ tôi muốn
+   * lưu của mấy cái chat trước thì sao?" (2026-08-23) was about the CONFIRMATION, which popped
+   * up at the bottom of the thread with nothing tying it to the reply it came from. `forId` was
+   * being tracked and never read. Rendering the pair from one place is what makes it impossible
+   * for them to drift apart again.
+   *
+   * A function rather than a component: it closes over `proposal`/`proposing`/`saved` and is
+   * called from exactly two sites in the same render.
+   */
+  const saveControl = (forId: string, answerText: string, question?: string, sourceUrl?: string) => (
+    <>
+      {saved.has(forId) ? (
+        // Replaces the control rather than sitting beside it. Leaving a live "Lưu câu trả lời"
+        // next to "đã lưu" is the same nag with a label attached.
+        <p className="saved-answer" role="status">Đã lưu vào notes</p>
+      ) : (
+        <button
+          type="button"
+          className="save-answer"
+          disabled={proposing === forId}
+          onClick={() => void proposeSave(forId, answerText, question, sourceUrl)}
+        >
+          {proposing === forId ? "Đang rút gọn…" : "Lưu câu trả lời"}
+        </button>
+      )}
+      {proposal?.forId === forId && (
+        // Deliberately worded differently from the offer box. Both can be on screen at once, on
+        // the same reply, and they mean different things: the offer's statement was chosen by
+        // the assistant, this one by the user. Two buttons both saying "Lưu" would be a coin flip.
+        <div className="save-proposal" role="group" aria-label="Lưu câu trả lời này?">
+          <p>{proposal.statement}</p>
+          <button type="button" onClick={() => void confirmSave(proposal)}>Lưu câu này</button>
+          <button type="button" onClick={() => setProposal(null)}>Thôi</button>
+        </div>
+      )}
+    </>
+  );
 
   return (
     <div className="chat-pane">
@@ -522,20 +658,11 @@ export function AssistantBox(
                     // needs to know -- the model is already shielded from it at turn.ts:134.
                     <p className="interrupted" role="note">Câu trả lời bị gián đoạn (interrupted).</p>
                   )}
-                  {t.content && (
-                    <button
-                      type="button"
-                      className="save-answer"
-                      disabled={proposing === t.id}
-                      onClick={() => void proposeSave(
-                        t.id,
-                        t.content,
-                        turns[i - 1]?.role === "user" ? turns[i - 1]!.content : undefined,
-                        webUrlOf(t.citations),
-                      )}
-                    >
-                      {proposing === t.id ? "Đang rút gọn…" : "Lưu câu trả lời"}
-                    </button>
+                  {t.content && saveControl(
+                    t.id,
+                    t.content,
+                    turns[i - 1]?.role === "user" ? turns[i - 1]!.content : undefined,
+                    webUrlOf(t.citations),
                   )}
                 </div>
               )}
@@ -561,18 +688,33 @@ export function AssistantBox(
 
             {answer && <div className="answer"><Markdown>{answer}</Markdown></div>}
 
-            {answer && (
-              <button
-                type="button"
-                className="save-answer"
-                disabled={proposing === "live"}
-                onClick={() => void proposeSave("live", answer, undefined, web?.sources[0]?.url)}
-              >
-                {proposing === "live" ? "Đang rút gọn…" : "Lưu câu trả lời"}
-              </button>
-            )}
+            {answer && saveControl("live", answer, undefined, web?.sources[0]?.url)}
 
-            {!error && status && <p className="hint" role="status">{status}</p>}
+            {!error && status && (
+              <p className="hint" role="status">
+                {status}
+                {retryNoteId && (
+                  // Re-runs the ANSWER for a note that is already saved -- never submit(), which
+                  // would createNote again and leave two copies of one message.
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      className="save-answer"
+                      disabled={busy}
+                      onClick={() => {
+                        const id = retryNoteId;
+                        setBusy(true);
+                        resetLiveTurn();
+                        void streamTurn(id, () => {});
+                      }}
+                    >
+                      Thử lại
+                    </button>
+                  </>
+                )}
+              </p>
+            )}
           </div>
         )}
 
@@ -590,17 +732,9 @@ export function AssistantBox(
           </div>
         )}
 
-        {proposal && (
-          // Deliberately worded differently from the offer box above. Both can be on screen at
-          // once, on the same reply, and they mean different things: the offer's statement was
-          // chosen by the assistant, this one by the user. Two buttons both saying "Lưu" would be
-          // a coin flip.
-          <div className="save-proposal" role="group" aria-label="Lưu câu trả lời này?">
-            <p>{proposal.statement}</p>
-            <button type="button" onClick={() => void confirmSave(proposal)}>Lưu câu này</button>
-            <button type="button" onClick={() => setProposal(null)}>Thôi</button>
-          </div>
-        )}
+        {/* The proposal used to render HERE, as the last child of the scroll, which is why
+            saving a reply from this morning popped a box under the newest message with nothing
+            connecting the two. It now renders inside the turn it names -- see saveControl. */}
 
         {phase && (
           // aria-live="polite" and not "assertive": this is progress, and it must not interrupt
@@ -623,6 +757,10 @@ export function AssistantBox(
         </p>
       )}
 
+      {/* The wrapper carries the page padding and the safe-area inset; the form is the bordered
+          control itself. See globals.css -- putting the inset on the form would pad the text
+          away from its own border rather than away from the bottom of the screen. */}
+      <div className="chat-composer-wrap">
       <form
         className="chat-composer"
         onSubmit={(e) => { e.preventDefault(); void submit(); }}
@@ -650,8 +788,14 @@ export function AssistantBox(
             void submit();
           }}
         />
-        <button type="submit" disabled={busy || !online}>Send</button>
+        {/* The visible glyph is an arrow, so the accessible name has to be supplied separately --
+            and it must still match /send/i: three tests in assistant-box.test.tsx select this
+            control by that name, and so does apps/web/e2e. */}
+        <button type="submit" disabled={busy || !online} aria-label="Send" title="Send">
+          <span aria-hidden="true">↑</span>
+        </button>
       </form>
+      </div>
     </div>
   );
 }
