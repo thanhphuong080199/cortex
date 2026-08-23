@@ -22,7 +22,10 @@ const search = async (userId: string, query: string, embedding: number[], limit 
     p_user_id: userId, p_query: query, p_embedding: embedding, p_limit: limit,
   });
   if (error) throw error;
-  return data as { note_id: string; title: string | null; snippet: string; created_at: string; score: number; matched_by: string }[];
+  return data as {
+    note_id: string; title: string | null; snippet: string; created_at: string;
+    score: number; matched_by: string; source_type: string;
+  }[];
 };
 
 async function seed(userId: string, content: string, opts: { embedding?: number[]; sourceType?: string; createdAt?: string } = {}) {
@@ -71,6 +74,25 @@ describe("search_notes", () => {
     const row = rows.find((r) => r.note_id === id);
     expect(row, "the seeded note did not come back at all").toBeDefined();
     expect(new Date(row!.created_at).toISOString()).toBe("2026-08-12T03:00:00.000Z");
+  });
+
+  // 00035. The 0.8 provenance down-weight has read source_type since 00022, but the column never
+  // left the function -- so nothing downstream could tell the model that a note it is about to
+  // recall is the assistant's own earlier answer rather than the user's thinking (enums.ts has
+  // promised exactly that since 00020). Two rows, not one: asserting only the 'assistant' row
+  // passes against a function that hardcodes the string.
+  it("returns each note's source_type so the caller can tell whose words a note is", async () => {
+    const { id: prov } = await makeUser("search-provenance@example.com");
+    const v = vec(21);
+    const own = await seed(prov, "cá hồi giàu omega-3", { embedding: v, sourceType: "quick" });
+    const saved = await seed(prov, "omega-3 tốt cho mắt", { embedding: nudge(v), sourceType: "assistant" });
+
+    const rows = await search(prov, "omega-3", v);
+    const ownRow = rows.find((r) => r.note_id === own);
+    const savedRow = rows.find((r) => r.note_id === saved);
+
+    expect(ownRow!.source_type).toBe("quick");
+    expect(savedRow!.source_type).toBe("assistant");
   });
 
   it("finds a note by keyword alone, with no useful embedding", async () => {

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantBox, type TranscriptTurn } from "./assistant-box";
@@ -788,5 +788,119 @@ describe("provenance", () => {
   it("renders nothing when the only citations are notes", () => {
     const { container } = render(<Provenance citations={[noteCitation]} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("saving an answer on purpose", () => {
+  const ISO = "2026-08-22T00:00:00.000Z";
+
+  // Fills in the fields these tests don't care about, same convention as `turn()` above -- the
+  // brief's own literals omit `incomplete` because it is irrelevant to every test in this block.
+  function renderWithTurns(turns: Partial<TranscriptTurn>[]) {
+    const full = turns.map((t) => ({
+      id: "t", role: "assistant" as const, content: "", citations: [], incomplete: false,
+      createdAt: ISO, ...t,
+    }));
+    return render(<AssistantBox token="t" userId="u1" initialTurns={full} />);
+  }
+
+  // A real vi.fn() rather than a plain array-pushing stub: the tests below assert on it with
+  // toHaveBeenCalledWith, which needs a mock's own call-recording, not a hand-rolled substitute.
+  function mockFetch(responses: Record<string, unknown> = {}) {
+    const fn = vi.fn(async (url: string) => {
+      const u = String(url);
+      for (const [path, body] of Object.entries(responses)) {
+        if (u.includes(path)) return new Response(JSON.stringify(body), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    globalThis.fetch = fn as unknown as typeof fetch;
+    return fn;
+  }
+
+  // The control the user went looking for on 2026-08-22 and could not find, because the automatic
+  // offer is gated on a web-grounded answer (turn.ts:441) and most turns are not.
+  it("offers to save every assistant reply, not only the grounded ones", async () => {
+    renderWithTurns([
+      { id: "1", role: "user", content: "ăn gì tốt cho mắt", citations: [], createdAt: ISO },
+      { id: "2", role: "assistant", content: "Cá hồi.", citations: [], createdAt: ISO },
+    ]);
+    expect(await screen.findByRole("button", { name: "Lưu câu trả lời" })).toBeInTheDocument();
+  });
+
+  it("shows the condensed statement for confirmation before writing anything", async () => {
+    const fetchMock = mockFetch({ "/assistant/distill": { statement: "Cá hồi giàu omega-3." } });
+    renderWithTurns([{ id: "2", role: "assistant", content: "Cá hồi.", citations: [], createdAt: ISO }]);
+    await userEvent.click(screen.getByRole("button", { name: "Lưu câu trả lời" }));
+    expect(await screen.findByText("Cá hồi giàu omega-3.")).toBeInTheDocument();
+    // Nothing is written until the user confirms. Asserting the absence of the write is the
+    // point: a version that saved on the first click would pass a test that only looked for text.
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/notes/save-answer"), expect.anything(),
+    );
+  });
+
+  it("writes the note only after the confirmation is pressed", async () => {
+    const fetchMock = mockFetch({ "/assistant/distill": { statement: "Cá hồi giàu omega-3." } });
+    renderWithTurns([{ id: "2", role: "assistant", content: "Cá hồi.", citations: [], createdAt: ISO }]);
+    await userEvent.click(screen.getByRole("button", { name: "Lưu câu trả lời" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Lưu câu này" }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/notes/save-answer"),
+      expect.objectContaining({
+        body: JSON.stringify({ statement: "Cá hồi giàu omega-3." }),
+      }),
+    );
+  });
+
+  // NO DEAD END. A failed distillation must still let the user keep the answer -- verbatim,
+  // honestly. Returning nothing here would make the button look broken on exactly the turns
+  // where the model is having a bad day.
+  it("falls back to the verbatim reply when distillation returns null", async () => {
+    mockFetch({ "/assistant/distill": { statement: null } });
+    renderWithTurns([{ id: "2", role: "assistant", content: "Cá hồi.", citations: [], createdAt: ISO }]);
+    await userEvent.click(screen.getByRole("button", { name: "Lưu câu trả lời" }));
+    // Scoped to the confirmation box, not a bare findByText: the fallback statement is the
+    // verbatim reply, so it is genuinely identical to the already-visible answer bubble's own
+    // text -- an unscoped query legitimately matches both and would throw on ambiguity rather
+    // than proving the wrong thing.
+    const box = await screen.findByRole("group", { name: "Lưu câu trả lời này?" });
+    expect(within(box).getByText("Cá hồi.")).toBeInTheDocument();
+    expect(within(box).getByRole("button", { name: "Lưu câu này" })).toBeInTheDocument();
+  });
+
+  // Cancelling writes NOTHING -- specifically not a memory_facts decline. A decline exists to stop
+  // the assistant re-offering something on its own initiative; recording one here would suppress
+  // future offers about a fact the user merely changed their mind about keeping.
+  it("writes nothing at all when the proposal is dismissed", async () => {
+    const fetchMock = mockFetch({ "/assistant/distill": { statement: "Cá hồi giàu omega-3." } });
+    renderWithTurns([{ id: "2", role: "assistant", content: "Cá hồi.", citations: [], createdAt: ISO }]);
+    await userEvent.click(screen.getByRole("button", { name: "Lưu câu trả lời" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Thôi" }));
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/notes/save-answer"), expect.anything(),
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/assistant/decline"), expect.anything(),
+    );
+  });
+
+  // A reply carrying web sources is saved as 'web_search', not 'assistant' -- buildSavedAnswerRow
+  // picks between them on the presence of a url, and dropping it here would silently relabel the
+  // provenance of everything the user keeps from a grounded answer.
+  it("carries the web source url so the note is filed as a web-sourced save", async () => {
+    const fetchMock = mockFetch({ "/assistant/distill": { statement: "S." } });
+    renderWithTurns([{
+      id: "2", role: "assistant", content: "Cá hồi.", createdAt: ISO,
+      citations: [{ type: "web", url: "https://example.com/a", title: "A" }],
+    }]);
+    await userEvent.click(screen.getByRole("button", { name: "Lưu câu trả lời" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Lưu câu này" }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/notes/save-answer"),
+      expect.objectContaining({
+        body: JSON.stringify({ statement: "S.", sourceUrl: "https://example.com/a" }),
+      }),
+    );
   });
 });

@@ -3,14 +3,16 @@ import { randomUUID } from "expo-crypto";
 import { fetch as expoFetch } from "expo/fetch";
 import * as WebBrowser from "expo-web-browser";
 import { useRef, useState } from "react";
-import { ActivityIndicator, Pressable, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Pressable, Text, TextInput, useColorScheme, View } from "react-native";
 
 import { captureNote } from "../lib/capture";
 import { logCheckinWithId, undoCheckin } from "../lib/checkins";
 import { createInFlightGuard } from "../lib/in-flight";
 import { offlineAnswer, type OfflineMatch } from "../lib/assistant/offline-answer";
+import { declineStatement, saveStatement } from "../lib/assistant/save";
 import { streamAssistantTurn, StreamUnavailableError, type BoxEvent } from "../lib/assistant/stream";
 import { supabase } from "../lib/supabase";
+import { themeFor } from "../theme";
 import type { LiveTurn } from "../lib/transcript";
 
 /**
@@ -33,6 +35,7 @@ import type { LiveTurn } from "../lib/transcript";
  * timer that has no idea whether the answer actually made it to the table yet.
  */
 export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => void }) {
+  const theme = themeFor(useColorScheme());
   const db = usePowerSync();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -40,6 +43,10 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
   const [status, setStatus] = useState<string | null>(null);
   const [attached, setAttached] = useState<Extract<BoxEvent, { type: "attached" }> | null>(null);
   const [mood, setMood] = useState<{ checkinId: string; mood: number } | null>(null);
+  // NOT cleared by the `finally` that settles the turn: like web, the offer must survive the
+  // hand-off into the transcript -- it disappears only when the user acts on it, or when the next
+  // submit() starts (the reset block below).
+  const [offer, setOffer] = useState<{ statement: string; sourceUrl?: string } | null>(null);
   const [web, setWeb] = useState<Extract<BoxEvent, { type: "web" }> | null>(null);
   const [matches, setMatches] = useState<OfflineMatch[]>([]);
   const run = useRef(createInFlightGuard()).current;
@@ -51,6 +58,7 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
       setStatus(null);
       setAttached(null);
       setMood(null);
+      setOffer(null);
       setWeb(null);
       setMatches([]);
 
@@ -106,6 +114,12 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
               // replication catches up. See lib/checkins.ts.
               await logCheckinWithId(db, ev.checkinId, ev.mood).catch(() => {});
               setMood({ checkinId: ev.checkinId, mood: ev.mood });
+            }
+            else if (ev.type === "offer") {
+              setOffer({
+                statement: ev.statement,
+                ...(ev.sourceUrl !== undefined ? { sourceUrl: ev.sourceUrl } : {}),
+              });
             }
             else if (ev.type === "declined") setStatus("Đã lưu. Chưa trả lời được (đã chạm giới hạn chi tiêu).");
             else if (ev.type === "error") setStatus("Đã lưu. Chưa trả lời được.");
@@ -189,6 +203,50 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
           >
             <Text style={{ textDecorationLine: "underline" }}>Hoàn tác</Text>
           </Pressable>
+        </View>
+      ) : null}
+
+      {offer ? (
+        // One line, two buttons, easy to ignore -- same rule web's .offer follows: an offer that
+        // interrupts is a nag. Worded differently from chat.tsx's manual save box, because both
+        // can be on screen at once and mean different things (S1.5 §4).
+        <View testID="offer" style={{ gap: 8, padding: 12, borderRadius: 8,
+                                      borderWidth: 1, borderColor: theme.line }}>
+          <Text style={{ color: theme.text }}>{offer.statement}</Text>
+          <View style={{ flexDirection: "row", gap: 16 }}>
+            <Pressable testID="offer-accept" accessibilityRole="button" onPress={() => {
+              const o = offer;
+              setOffer(null);
+              void (async () => {
+                const { data: { session } } = await supabase.auth.getSession();
+                if (!session) return;
+                await saveStatement({
+                  apiUrl: process.env.EXPO_PUBLIC_API_URL!,
+                  token: session.access_token,
+                  statement: o.statement,
+                  ...(o.sourceUrl !== undefined ? { sourceUrl: o.sourceUrl } : {}),
+                });
+              })();
+            }}>
+              <Text style={{ color: theme.accent }}>Lưu</Text>
+            </Pressable>
+            <Pressable testID="offer-decline" accessibilityRole="button" onPress={() => {
+              const o = offer;
+              // Cleared FIRST, before any await: "declining costs nothing" is a claim about
+              // latency too, and the box must be gone the instant it is tapped.
+              setOffer(null);
+              void (async () => {
+                const { data: { session } } = await supabase.auth.getSession();
+                if (!session) return;
+                await declineStatement({
+                  apiUrl: process.env.EXPO_PUBLIC_API_URL!,
+                  token: session.access_token, statement: o.statement,
+                });
+              })();
+            }}>
+              <Text style={{ color: theme.muted }}>Bỏ qua</Text>
+            </Pressable>
+          </View>
         </View>
       ) : null}
 

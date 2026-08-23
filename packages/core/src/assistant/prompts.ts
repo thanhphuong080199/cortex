@@ -21,10 +21,17 @@ const LANGUAGE_RULE =
  * that shape; the prompts said "cite them like [1]" and nothing about phrasing, so the model
  * chose a match report. The fix is an instruction, not a template.
  *
- * The second half is load-bearing and is the half a later edit will drop: "do not sound
- * mechanical" on its own reads as "stop citing", and a model that stops emitting [1] takes
- * every link between a claim and the note behind it. The bracket is required in the same
- * sentence that forbids the framing.
+ * The second half USED to require the bracket, on the reasoning that dropping it takes every
+ * link between a claim and the note behind it. That reasoning described an intent the product
+ * never realised: nothing ever read `[2]` back out -- Provenance renders web sources only, mobile
+ * has no note-citation UI, and the citations sent to either client come from retrieval directly,
+ * never from numbers parsed out of the reply. So a WRONG `[2]` was invisible to everyone,
+ * including the user. Reported as unreadable on 2026-08-22 ("[1, 2] nhìn không biết gì hết").
+ *
+ * A date is the replacement, and it is a strictly better link for this product: the user can
+ * check it with no UI at all, and a wrong one is visible immediately. It also preserves what the
+ * bracket was actually doing -- forcing the model to point at a specific retrieved row instead of
+ * producing a vague "bạn từng nói...".
  *
  * Vietnamese examples, matching LANGUAGE_RULE's reasoning: the phrasings being ruled out are
  * Vietnamese phrasings, and an English paraphrase of them is not the thing to avoid.
@@ -33,10 +40,15 @@ const RECALL_RULE =
   "When one of their past notes is relevant, bring it up the way a person would recall " +
   "something you told them -- \"bạn có nhắc chuyện này rồi\", \"lần trước bạn có hỏi...\" -- " +
   "inline, in the middle of what you are saying. Do not report a database match: never " +
-  "\"Trong các ghi chú của bạn [1, 3] có nhắc đến...\", never \"Đã lưu ghi chú của bạn vào " +
+  "\"Trong các ghi chú của bạn có nhắc đến...\", never \"Đã lưu ghi chú của bạn vào " +
   "mục...\", and never state that a match was found or that something is identical to an " +
-  "earlier note. Still carry the bracket, like [1], so they can trace it -- change how you " +
-  "introduce the note, not whether you cite it.";
+  "earlier note. Anchor the recall so they can place it: say WHEN they wrote it (\"hôm 18/8 " +
+  "bạn có nhắc...\"), or name the note's title if it has one. Never use a bracketed number. " +
+  "If a note below shows no date and no title, do not invent an anchor for it -- recall it " +
+  "with no anchor at all." +
+  " Some notes below are marked as your own earlier answers that they chose to keep. Never " +
+  "recall one of those as something they thought or wrote -- say it came from an answer you " +
+  "gave them before.";
 
 /**
  * How long a reply should be and what shape it takes. On buildAnswerPrompt ONLY.
@@ -45,10 +57,16 @@ const RECALL_RULE =
  * headers -- the same shape as a question that had explicitly asked to list things out. The
  * prompt carried no shape guidance at all, so that was the model's default, not a template.
  *
- * BOTH halves are load-bearing and the second is the one a later edit will drop. A bare "keep
- * it short, avoid lists" cap degrades the turn that genuinely asked to enumerate, so the
- * exception is written into the same constant as the default rather than left to judgment.
- * prompts.test.ts asserts each half separately for exactly that reason.
+ * BOTH halves are load-bearing and they are now INDEPENDENT, which they were not before
+ * 2026-08-22. The rule used to read "a short, casual question gets a short, conversational
+ * answer -- two or three sentences of prose, no headings and no list", which tied length to
+ * structure and left no cell for LONG PROSE: a substantive question that deserves depth and is
+ * not a list. Such a question fell into the casual branch and came back capped. The user's
+ * verdict was that replies were too short; the fix is to let depth follow the question while
+ * keeping structure as the exception it already was.
+ *
+ * The exception clause is still the half a later edit will drop, and prompts.test.ts still
+ * asserts each half separately for exactly that reason.
  *
  * It says nothing about markdown syntax. Both clients render markdown as of 2026-08-18, so
  * `**bold**` is no longer literal punctuation on screen -- and a rule phrased around syntax
@@ -60,12 +78,13 @@ const RECALL_RULE =
  * gives the model two constraints to reconcile where it has one.
  */
 const FORMAT_RULE =
-  "Match the shape of the reply to the weight of the question. A short, casual question " +
-  "gets a short, conversational answer -- two or three sentences of prose, no headings and " +
-  "no list. Reach for headings or a numbered list only when the user actually asked to " +
-  "enumerate or compare (\"liệt kê\", \"các bước\", \"so sánh\", \"list out\"), or when the " +
-  "answer genuinely is a set of parallel items that prose would obscure. Structure is the " +
-  "exception, not the default shape of an answer.";
+  "Match the shape and the depth of the reply to the weight of the question. A short, casual " +
+  "question gets a short, conversational answer. A question that genuinely asks for something " +
+  "gets as much as it actually needs -- several paragraphs is fine, and prose is still the " +
+  "default shape at any length. Reach for headings or a numbered list only when the user " +
+  "actually asked to enumerate or compare (\"liệt kê\", \"các bước\", \"so sánh\", \"list " +
+  "out\"), or when the answer genuinely is a set of parallel items that prose would obscure. " +
+  "Structure is the exception, not the default shape of an answer.";
 
 /**
  * Stage C5 §9.3. Added to buildAcknowledgePrompt only when the classifier flagged the note as
@@ -133,20 +152,40 @@ const renderHistory = (history: ThreadTurn[], timeZone?: string) =>
 // retrieval never ran to completion (the search RPC or the embed call threw). Collapsing the two
 // into "no citations" makes the model assert "the user has no notes matching this" on a turn
 // where the server never actually got to look -- a false claim, not a hedge.
+//
+// The gap-filling disclaimer lives HERE, in the populated branch, and not in buildAnswerPrompt's
+// standing rule list. As a standing instruction it fired on every turn, including the majority
+// where retrieval returned nothing -- and with no citations there is nothing for outside material
+// to be confused with, so the user heard "Trong note của bạn không có, nhưng theo mình biết..."
+// on turn after turn for no information (reported 2026-08-22). The empty branch now says the
+// opposite: answer, and do not narrate the absence.
 const renderCitations = (citations: Citation[] | "failed", timeZone: string) =>
   citations === "failed"
     ? "\n\nThe user's notes could not be searched right now (a technical failure, not an empty " +
       "corpus). Say so plainly. Do not claim they have no notes on this."
     : citations.length === 0
-      ? "\n\nThe user has no notes matching this."
+      ? "\n\nThey have no notes on this. Just answer -- from the web or from your own general " +
+        "knowledge -- and do not announce that their notes had nothing. There is nothing of " +
+        "theirs to attribute here, so there is nothing to distinguish your answer from."
       : `\n\nThe user's own notes:\n${citations
-          .map((c, i) => {
+          .map((c) => {
             // Spread-if in string form: a citation with no date renders with no parenthesis at
             // all, never "()" or "(null)". Everything in this prompt is read as fact.
             const on = c.createdAt ? formatNoteDate(c.createdAt, timeZone) : null;
-            return `[${i + 1}] ${on ? `(${on}) ` : ""}${c.title ? `${c.title}: ` : ""}${c.snippet}`;
+            // The label is a SUFFIX, after the snippet, so it reads as provenance rather than as
+            // part of the note's content. "mình"/"họ" rather than "I"/"they": the surrounding
+            // Vietnamese examples in RECALL_RULE set the register, and an English parenthetical
+            // inside an otherwise Vietnamese recall nudges the reply toward English
+            // (LANGUAGE_RULE's reasoning).
+            const mine = c.authoredBy === "assistant" ? " (câu trả lời của mình mà họ đã lưu)" : "";
+            // A bullet, not "[n]". Numbering the input while forbidding brackets in the output
+            // is a prompt arguing with itself, and the model will occasionally echo the very
+            // thing just banned.
+            return `- ${on ? `(${on}) ` : ""}${c.title ? `${c.title}: ` : ""}${c.snippet}${mine}`;
           })
-          .join("\n")}`;
+          .join("\n")}\n\nIf these do not fully answer the question, you may fill the gap -- from ` +
+        "the web, or from your own general knowledge -- but say plainly which part is not from " +
+        "their notes.";
 
 /**
  * Stage C3 is life-domains spec §6: Gemini `google_search` grounding, with dual "from your
@@ -168,11 +207,7 @@ export function buildAnswerPrompt(a: {
     LANGUAGE_RULE,
     FORMAT_RULE,
     temporalRule(a.now, a.timeZone),
-    "Cite the notes you used by their bracketed number, like [1].",
     RECALL_RULE,
-    "If their notes do not fully answer the question, you may fill the gap -- from the web, or " +
-      "from your own general knowledge -- but say plainly that it is not from their notes " +
-      "(e.g. \"Trong note của bạn không có, nhưng theo mình biết...\").",
     // Life-domains spec §6.1. Grounding replaced the narrower rule this line used to carry: the
     // gap-filler is no longer only the model's own memory, so the disclosure rule has to name
     // the web explicitly rather than "outside knowledge" in general.
@@ -206,7 +241,8 @@ export function buildAcknowledgePrompt(a: {
   verify: boolean;
 }): string {
   return [
-    "The user just saved a note. Acknowledge it in one or two sentences.",
+    "The user just saved a note. Acknowledge it briefly -- this is an acknowledgement, not an " +
+      "answer, so keep it to what is worth saying and no more.",
     LANGUAGE_RULE,
     temporalRule(a.now, a.timeZone),
     // Named in words, never interpolated raw: `${a.domain}` on a null renders the string "null"
@@ -219,7 +255,7 @@ export function buildAcknowledgePrompt(a: {
     // acknowledgement telling the user what was attached -- that is the content this branch
     // exists to deliver (parent spec §6, obligation 3).
     "Mention what you attached, briefly. If any of their earlier notes below are genuinely " +
-      "related, say so and cite them like [1].",
+      "related, say so and say when they wrote it.",
     RECALL_RULE,
     "The user did not ask a question. Do not answer one, and do not invent one to answer.",
     // Spread-in rather than an empty string: an ordinary acknowledgement must carry no
@@ -246,8 +282,9 @@ export function buildAcknowledgePrompt(a: {
  */
 export function buildChitchatPrompt(a: { text: string; history: ThreadTurn[] }): string {
   return [
-    "The user said something conversational -- a greeting, a reaction, or noise. Reply in one " +
-      "short, natural line. Do not ask a follow-up question and do not start a topic.",
+    "The user said something conversational -- a greeting, a reaction, or noise. Reply " +
+      "naturally and keep it light; this is small talk, not a topic. Do not ask a follow-up " +
+      "question and do not start a topic.",
     LANGUAGE_RULE,
     renderHistory(a.history),
     `\n\nThey said: ${a.text}`,

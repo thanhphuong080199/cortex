@@ -35,7 +35,10 @@ export interface LiveTurn {
 
 export type Item =
   | { kind: "separator"; id: string; label: string }
-  | { kind: "message"; id: string; role: "user" | "assistant"; content: string; incomplete: boolean };
+  | {
+      kind: "message"; id: string; role: "user" | "assistant"; content: string; incomplete: boolean;
+      citations: string | null;
+    };
 
 /** Malformed or absent both mean "not interrupted". A parse error must not cost the transcript. */
 function isIncomplete(meta: string | null): boolean {
@@ -142,6 +145,7 @@ export function buildTranscript(
       role: row.role === "assistant" ? "assistant" : "user",
       content: row.content,
       incomplete: isIncomplete(row.retrieval_meta),
+      citations: row.citations,
     });
   }
 
@@ -167,12 +171,18 @@ export function buildTranscript(
       }
     }
     if (!userReplicated) {
-      items.push({ kind: "message", id: `live-${live.noteId}`, role: "user", content: live.text, incomplete: false });
+      items.push({
+        kind: "message", id: `live-${live.noteId}`, role: "user", content: live.text, incomplete: false,
+        citations: null,
+      });
     }
     // Only once a token has arrived. An empty assistant row is a blank gap held open for the
     // whole silence, and the composer's own spinner already says a turn is in flight.
     if (showAnswer) {
-      items.push({ kind: "message", id: `live-answer-${live.noteId}`, role: "assistant", content: live.answer, incomplete: false });
+      items.push({
+        kind: "message", id: `live-answer-${live.noteId}`, role: "assistant", content: live.answer, incomplete: false,
+        citations: null,
+      });
     }
   }
 

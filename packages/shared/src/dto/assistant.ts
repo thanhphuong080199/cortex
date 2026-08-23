@@ -55,6 +55,30 @@ export const saveAnswerInput = z
 export type SaveAnswerInput = z.infer<typeof saveAnswerInput>;
 
 /**
+ * `POST /assistant/distill`'s body (S1.5 §4). The user pressed "Lưu câu trả lời" and the server
+ * condenses the reply into one keepable sentence before showing it back for confirmation.
+ *
+ * `question` is optional because the control sits on EVERY assistant reply, including ones
+ * scrolled back to, where the turn that produced them may not be on screen. Absent is honest;
+ * an empty string would be a line the model has to interpret.
+ *
+ * The `answer` cap matches saveAnswerInput's 100_000 rather than OFFER_MAX_CHARS: this is the
+ * whole reply going IN, not the statement coming out. The statement is capped at
+ * OFFER_MAX_CHARS inside `distill`.
+ *
+ * No `sourceUrl`: this endpoint writes nothing. The client carries the url to
+ * POST /notes/save-answer itself, which is the request that actually creates the note.
+ */
+export const distillInput = z
+  .object({
+    answer: z.string().min(1).max(100_000),
+    question: z.string().max(100_000).optional(),
+  })
+  .strict();
+
+export type DistillInput = z.infer<typeof distillInput>;
+
+/**
  * `POST /assistant/decline`'s body (C5 §12, task 13). `.strict()` for the same reason
  * saveAnswerInput above is: the user id comes from the verified JWT, never from the body.
  *

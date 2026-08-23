@@ -1,10 +1,12 @@
 import { useQuery } from "@powersync/react-native";
 import { useColorScheme } from "react-native";
 import { useEffect, useMemo, useState } from "react";
-import { FlatList, KeyboardAvoidingView, Platform, Text, View } from "react-native";
+import { FlatList, KeyboardAvoidingView, Platform, Pressable, Text, View } from "react-native";
 
 import { AssistantBox } from "./assistant-box";
 import { ConnectionPill } from "../components/connection-pill";
+import { proposeStatement, saveStatement, webUrlOf } from "../lib/assistant/save";
+import { supabase } from "../lib/supabase";
 import { buildTranscript, liveHasReplicated, type ChatRow, type Item, type LiveTurn } from "../lib/transcript";
 import { themeFor } from "../theme";
 
@@ -68,6 +70,43 @@ export function Chat() {
   );
   const inverted = useMemo(() => [...items].reverse(), [items]);
 
+  // The manual save, S1.5 §4. Lives in Chat rather than in AssistantBox because this screen owns
+  // the replicated rows -- the control sits on every assistant reply, not only on the live turn.
+  const [proposal, setProposal] = useState<
+    { statement: string; sourceUrl?: string } | null
+  >(null);
+  const [proposing, setProposing] = useState<string | null>(null);
+
+  async function onSave(id: string, answer: string, question: string | undefined, sourceUrl: string | undefined) {
+    setProposal(null);
+    setProposing(id);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      const statement = await proposeStatement({
+        apiUrl: process.env.EXPO_PUBLIC_API_URL!,
+        token: session.access_token,
+        answer,
+        ...(question ? { question } : {}),
+      });
+      setProposal({ statement, ...(sourceUrl !== undefined ? { sourceUrl } : {}) });
+    } finally {
+      setProposing(null);
+    }
+  }
+
+  async function onConfirm(p: { statement: string; sourceUrl?: string }) {
+    setProposal(null);
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return;
+    await saveStatement({
+      apiUrl: process.env.EXPO_PUBLIC_API_URL!,
+      token: session.access_token,
+      statement: p.statement,
+      ...(p.sourceUrl !== undefined ? { sourceUrl: p.sourceUrl } : {}),
+    });
+  }
+
   return (
     <KeyboardAvoidingView
       style={{ flex: 1, backgroundColor: theme.bg }}
@@ -88,14 +127,49 @@ export function Chat() {
             Bạn đang nghĩ gì?
           </Text>
         }
-        renderItem={({ item }) => <Row item={item} />}
+        renderItem={({ item, index }) => {
+          // `inverted` holds items NEWEST FIRST, so the user's question is the NEXT index, not
+          // the previous one. Getting this backwards attaches the wrong question to the reply,
+          // which the model then answers around.
+          const next = inverted[index + 1];
+          return (
+            <Row
+              item={item}
+              proposing={proposing === item.id}
+              question={next?.kind === "message" && next.role === "user" ? next.content : undefined}
+              onSave={onSave}
+            />
+          );
+        }}
       />
+      {proposal ? (
+        <View testID="save-proposal" style={{
+          gap: 8, margin: 12, padding: 12, borderRadius: 8,
+          borderWidth: 1, borderStyle: "dashed", borderColor: theme.line,
+        }}>
+          <Text style={{ color: theme.muted }}>{proposal.statement}</Text>
+          <View style={{ flexDirection: "row", gap: 16 }}>
+            <Pressable testID="save-confirm" accessibilityRole="button" onPress={() => void onConfirm(proposal)}>
+              <Text style={{ color: theme.accent }}>Lưu câu này</Text>
+            </Pressable>
+            {/* Dismiss writes NOTHING -- specifically not a decline. See save.ts's module doc. */}
+            <Pressable testID="save-dismiss" accessibilityRole="button" onPress={() => setProposal(null)}>
+              <Text style={{ color: theme.muted }}>Thôi</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
       <AssistantBox onLive={setLive} />
     </KeyboardAvoidingView>
   );
 }
 
-function Row({ item }: { item: Item }) {
+function Row({ item, proposing, question, onSave }: {
+  item: Item;
+  proposing: boolean;
+  question: string | undefined;
+  onSave: (id: string, answer: string, question: string | undefined, sourceUrl: string | undefined) => void;
+}) {
   const theme = themeFor(useColorScheme());
   if (item.kind === "separator") {
     return (
@@ -121,6 +195,18 @@ function Row({ item }: { item: Item }) {
         <Text style={{ color: theme.muted, fontStyle: "italic", fontSize: 12 }}>
           Câu trả lời bị gián đoạn.
         </Text>
+      ) : null}
+      {item.content ? (
+        <Pressable
+          testID="save-answer"
+          accessibilityRole="button"
+          disabled={proposing}
+          onPress={() => onSave(item.id, item.content, question, webUrlOf(item.citations ?? null))}
+        >
+          <Text style={{ color: theme.muted, fontSize: 13, textDecorationLine: "underline" }}>
+            {proposing ? "Đang rút gọn…" : "Lưu câu trả lời"}
+          </Text>
+        </Pressable>
       ) : null}
     </View>
   );

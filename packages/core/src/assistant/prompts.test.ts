@@ -11,7 +11,7 @@ const TZ = "Asia/Ho_Chi_Minh";
 
 const cite = (over: Partial<Citation> = {}): Citation => ({
   type: "note", noteId: "n", title: null, snippet: "s", score: 1, matchedBy: "fts",
-  createdAt: null, ...over,
+  createdAt: null, authoredBy: "user", ...over,
 });
 
 const turn = (role: ThreadTurn["role"], content: string): ThreadTurn => ({
@@ -43,7 +43,7 @@ describe("buildAnswerPrompt", () => {
     // Paired with the heading, not asserted in isolation: `toContain("[1] first")` alone
     // survives deleting "The user's own notes:", and that heading is the only thing telling the
     // model the snippets below are the user's rather than the assistant's own.
-    expect(p).toContain("The user's own notes:\n[1] first\n[2] second");
+    expect(p).toContain("The user's own notes:\n- first\n- second");
   });
 
   it("renders a note's title beside its snippet when it has one", () => {
@@ -52,22 +52,32 @@ describe("buildAnswerPrompt", () => {
       citations: [cite({ title: "Giấc ngủ", snippet: "ngủ 5 tiếng" })],
       history: [], timeZone: TZ, now: NOW,
     });
-    expect(p).toContain("[1] Giấc ngủ: ngủ 5 tiếng");
+    expect(p).toContain("- Giấc ngủ: ngủ 5 tiếng");
   });
 
-  it("tells the model there are no matching notes, and that it may answer from general knowledge instead", () => {
+  // Reported 2026-08-22: "đa phần tình huống tôi chat với AI là không có note sẵn, cứ nghe câu
+  // này suốt cũng phiền". The disclaimer was a STANDING instruction, so it fired on every turn --
+  // including the majority where retrieval returned nothing and there was therefore nothing for
+  // outside material to be confused WITH. It now lives in the branch where it does work.
+  it("does not ask the model to disclaim anything when there are no notes at all", () => {
     const empty = buildAnswerPrompt({
       question: "q", citations: [], history: [], timeZone: TZ, now: NOW,
     });
-    expect(empty).toMatch(/no notes matching/i);
     expect(empty).toMatch(/general knowledge/i);
-    expect(empty).toMatch(/say plainly/i);
-    // The other half of the branch. Without it, inverting the ternary in the renderer only
-    // shows up as a missing citation, and a prompt that tells the model there is nothing to
-    // read WHILE handing it notes is the harder failure to spot in an eval.
+    expect(empty).not.toMatch(/not from their notes/i);
+    expect(empty).not.toMatch(/say plainly/i);
+    // The empty branch's own text used to read "The user has no notes matching this.", which is
+    // an invitation to report the absence. It must now tell the model not to.
+    expect(empty).toMatch(/do not announce|no need to mention|đừng nói/i);
+  });
+
+  // THE BRANCH WHERE IT EARNS ITS PLACE. The reply mixes the user's material with outside
+  // material, and in a second brain a false "bạn từng viết..." costs more than a redundant hedge.
+  it("keeps the disclaimer when notes were found", () => {
     const withNotes = buildAnswerPrompt({
       question: "q", citations: [cite({ snippet: "first" })], history: [], timeZone: TZ, now: NOW,
     });
+    expect(withNotes).toMatch(/not from their notes/i);
     expect(withNotes).not.toMatch(/no notes matching/i);
   });
 
@@ -81,6 +91,10 @@ describe("buildAnswerPrompt", () => {
     });
     expect(failed).toMatch(/could not be searched/i);
     expect(failed).not.toMatch(/no notes matching/i);
+    // NOT NEGOTIABLE. This branch exists so the model never says "bạn không có note nào về
+    // chuyện này" on a turn where the search never ran -- dropping the disclaimer here would
+    // convert a technical failure into a false assertion about the user's corpus.
+    expect(failed).toMatch(/not claim they have no notes/i);
 
     const empty = buildAnswerPrompt({
       question: "q", citations: [], history: [], timeZone: TZ, now: NOW,
@@ -190,7 +204,7 @@ describe("buildAcknowledgePrompt", () => {
       note: "n", domain: null, tags: [], related: [cite({ snippet: "ghi chú cũ" })], history: [],
       timeZone: TZ, now: NOW, verify: false,
     });
-    expect(p).toContain("The user's own notes:\n[1] ghi chú cũ");
+    expect(p).toContain("The user's own notes:\n- ghi chú cũ");
   });
 
   it("renders the conversation history with each side labelled", () => {
@@ -274,28 +288,47 @@ describe("the recall rule", () => {
     expect(p).toMatch(/Trong các ghi chú của bạn/);
   });
 
-  // THE HALF THAT GETS DROPPED. "Do not sound mechanical" alone reads as "stop citing", and a
-  // model that stops emitting [1] takes traceability with it -- the citations are still the
-  // only link between a claim and the note behind it. The rule must forbid the FRAMING and
-  // require the bracket in the same breath.
-  it("keeps the bracket citation while changing how it is introduced (answer prompt)", () => {
-    const p = buildAnswerPrompt({ question: "mỏi mắt ăn gì", ...args });
-    // Pre-existing "Cite the notes..." line already has [1], so we must assert on text unique
-    // to RECALL_RULE's own bracket-preservation clause, not just the bracket itself.
-    expect(p).toMatch(/\[1\]/);
-    expect(p).toMatch(/still carry the bracket|change how you introduce/i);
+  // The bracket is gone from ALL FOUR sites, which is why this asserts on the built prompt rather
+  // than on any one instruction line. Removing three of the four leaves the model still modelling
+  // brackets off renderCitations' numbering, and every per-site assertion would still be green.
+  it("emits no bracket citation anywhere in the answer prompt", () => {
+    const p = buildAnswerPrompt({
+      question: "q",
+      citations: [cite({ snippet: "first" }), cite({ snippet: "second" })],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).not.toMatch(/\[\d/);
   });
 
-  // The bracket preservation must also appear on acknowledge, with the same safeguard against
-  // the pre-existing citation line being the only source.
-  it("keeps the bracket citation while changing how it is introduced (acknowledge prompt)", () => {
+  it("emits no bracket citation anywhere in the acknowledge prompt", () => {
     const p = buildAcknowledgePrompt({
-      note: "dạo này mỏi mắt", domain: null, tags: [], related: args.citations,
-      history: [], timeZone: args.timeZone, now: args.now, verify: false,
+      note: "n", domain: null, tags: [], related: [cite({ snippet: "ghi chú cũ" })],
+      history: [], timeZone: TZ, now: NOW, verify: false,
     });
-    // Pre-existing instruction line already mentions citing like [1], so isolate RECALL_RULE's own.
-    expect(p).toMatch(/\[1\]/);
-    expect(p).toMatch(/still carry the bracket|change how you introduce/i);
+    expect(p).not.toMatch(/\[\d/);
+  });
+
+  // What REPLACES the bracket, and the reason it is a date: a wrong `[2]` is invisible to every
+  // party including the user, because nothing reads it back. A wrong date is visible immediately.
+  // Both prompts, because RECALL_RULE is on both.
+  it("tells the model to anchor a recall to when the note was written", () => {
+    const p = buildAnswerPrompt({
+      question: "q", citations: [cite({ snippet: "s", createdAt: "2026-08-18T02:00:00Z" })],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toMatch(/ngày|khi nào|when they wrote/i);
+    expect(p).toMatch(/do not invent|đừng đoán|no anchor/i);
+  });
+
+  // THE HALF THAT MUST SURVIVE. RECALL_RULE's first clause forbids the database-match framing
+  // the user complained about in the first place; an edit that removes the bracket and takes
+  // this with it re-opens a bug that was already closed.
+  it("still forbids reporting a database match", () => {
+    const p = buildAnswerPrompt({
+      question: "q", citations: [cite({ snippet: "s" })], history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toContain("Trong các ghi chú của bạn");
+    expect(p).toMatch(/never state that a match was found/i);
   });
 
   // Chitchat has no citations and no filing to talk about. Adding the rule there would be a
@@ -306,10 +339,43 @@ describe("the recall rule", () => {
   });
 });
 
+describe("a saved answer is labelled as the assistant's own words", () => {
+  // enums.ts has promised this since 00020 -- 'assistant' notes are "cited as something you
+  // saved, never as your own thinking" -- and until now there was no mechanism, because
+  // search_notes read source_type for the 0.8 down-weight and did not return it.
+  //
+  // The user's corpus holds approximately zero 'assistant' notes (saving one has required the
+  // automatic offer to fire, which is gated on a web-grounded answer), so this MUST be seeded.
+  // A test reading real data would assert nothing.
+  it("marks a saved answer as the assistant's own words, and leaves the user's notes unmarked", () => {
+    const p = buildAnswerPrompt({
+      question: "q",
+      citations: [
+        cite({ snippet: "tôi ngủ 5 tiếng", authoredBy: "user" }),
+        cite({ snippet: "omega-3 tốt cho mắt", authoredBy: "assistant" }),
+      ],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toContain("- omega-3 tốt cho mắt (câu trả lời của mình mà họ đã lưu)");
+    // The negative half: a label on every row would satisfy the assertion above and destroy the
+    // distinction the row exists to draw.
+    expect(p).toContain("- tôi ngủ 5 tiếng\n");
+  });
+
+  it("forbids recalling its own past words as the user's thinking", () => {
+    const p = buildAnswerPrompt({
+      question: "q", citations: [cite({ snippet: "s", authoredBy: "assistant" })],
+      history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toMatch(/your own (earlier )?(answer|words)/i);
+    expect(p).toMatch(/not.*something they thought|never as their own/i);
+  });
+});
+
 const dated = (createdAt: string | null): Citation => ({
   type: "note", noteId: "n1", title: null,
   snippet: "Ngày mai có hẹn đi xem spiderman lúc 8h sáng",
-  score: 1, matchedBy: "fts", createdAt,
+  score: 1, matchedBy: "fts", createdAt, authoredBy: "user",
 });
 
 describe("temporal anchoring", () => {
@@ -399,9 +465,15 @@ describe("FORMAT_RULE", () => {
     timeZone: "Asia/Ho_Chi_Minh", now: new Date("2026-08-18T03:00:00.000Z"),
   });
 
-  it("asks for short conversational prose by default", () => {
+  // The defect this replaces: FORMAT_RULE bound LENGTH to STRUCTURE (short<->prose,
+  // long<->headings), so the missing cell was LONG PROSE -- a substantive question that deserves
+  // depth and is not a list. With no cell for it, such a question fell into the casual branch and
+  // was capped at "two or three sentences". The fixed number compounded it: a model latches onto
+  // a number before it latches onto the word "casual". Reported by the user on 2026-08-22.
+  it("scales depth to the question instead of capping it at a sentence count", () => {
     expect(answer()).toMatch(/conversational|prose/i);
-    expect(answer()).toMatch(/short/i);
+    // The number is the thing that had to go. Any digit-plus-"sentence" phrasing reintroduces it.
+    expect(answer()).not.toMatch(/(two|three|\d)\s+(or\s+\w+\s+)?sentences/i);
   });
 
   // THE HALF THAT GETS DROPPED, and the reason this is two assertions rather than one. A
@@ -412,6 +484,32 @@ describe("FORMAT_RULE", () => {
   it("carries the explicit-request exception", () => {
     expect(answer()).toContain("liệt kê");
     expect(answer()).toMatch(/only when|exception/i);
+  });
+
+  // Both other prompts were capped by a COUNT too, and the user's complaint was about replies in
+  // general. Each is loosened inside its own sentence rather than by extending FORMAT_RULE to
+  // cover it -- a second, differently worded length rule gives the model two constraints to
+  // reconcile where it currently has one.
+  it("drops the sentence count from the acknowledge and chitchat prompts", () => {
+    const ack = buildAcknowledgePrompt({
+      note: "dạo này mỏi mắt", domain: null, tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW, verify: false,
+    });
+    expect(ack).not.toMatch(/one or two sentences/i);
+    expect(buildChitchatPrompt({ text: "haha ok", history: [] })).not.toMatch(/one short, natural line/i);
+  });
+
+  // The PURPOSE clause is what each of them keeps. Dropping the count must not turn an
+  // acknowledgement into an answer or chitchat into an essay.
+  it("keeps each prompt's purpose clause after the count is dropped", () => {
+    const ack = buildAcknowledgePrompt({
+      note: "n", domain: null, tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW, verify: false,
+    });
+    expect(ack).toMatch(/did not ask a question/i);
+    expect(ack).toMatch(/acknowledge/i);
+    expect(buildChitchatPrompt({ text: "haha ok", history: [] }))
+      .toMatch(/do not ask a follow-up|do not start a topic/i);
   });
 
   // SCOPING. The natural mistake with a good rule is to apply it everywhere. Both other

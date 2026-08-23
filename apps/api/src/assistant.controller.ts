@@ -3,9 +3,13 @@ import { Body, Controller, HttpCode, Inject, Post, Req, Res, UseGuards } from "@
 import type { Request, Response } from "express";
 import type { AiClient } from "@cortex/core";
 import {
-  createServiceClient, createUserClient, declineOffer, errorMessage, recordUsage, runTurn,
+  createServiceClient, createUserClient, declineOffer, distill as distillStatement,
+  errorMessage, MANUAL_SAVE_PROMPT, recordUsage, runTurn,
 } from "@cortex/core";
-import { assistantInput, declineOfferInput, type AssistantInput, type DeclineOfferInput } from "@cortex/shared";
+import {
+  assistantInput, declineOfferInput, distillInput, type AssistantInput, type DeclineOfferInput,
+  type DistillInput,
+} from "@cortex/shared";
 import { AI_CLIENT } from "./ai-client.provider";
 import { CurrentUser } from "./auth/current-user.decorator";
 import type { AuthedUser } from "./auth/supabase-auth.guard";
@@ -135,5 +139,33 @@ export class AssistantController {
     }
 
     await declineOffer(this.serviceDb, { userId: user.id, statement: body.statement, embedding });
+  }
+
+  /**
+   * S1.5 §4. The user pressed "Lưu câu trả lời"; this condenses the reply so they can confirm a
+   * sentence rather than a transcript.
+   *
+   * 200 with `{ statement: null }` rather than an error status when distillation fails, and this
+   * is a contract both clients depend on: they fall back to offering the verbatim reply, so a
+   * 5xx here would dead-end a request the user deliberately made. `distill` never throws.
+   *
+   * Service-role db for the ledger only, matching every other metered call on this controller;
+   * nothing user-owned is read or written here, because this endpoint creates no note. The note
+   * is created by the client's follow-up POST /notes/save-answer, under the caller's own JWT.
+   */
+  @Post("distill")
+  @HttpCode(200)
+  async distill(
+    @CurrentUser() user: AuthedUser,
+    @Body(new ZodValidationPipe(distillInput)) body: DistillInput,
+  ): Promise<{ statement: string | null }> {
+    const statement = await distillStatement({ db: this.serviceDb, ai: this.ai }, {
+      userId: user.id,
+      prompt: MANUAL_SAVE_PROMPT,
+      answer: body.answer,
+      ...(body.question !== undefined ? { question: body.question } : {}),
+      requestId: randomUUID(),
+    });
+    return { statement };
   }
 }

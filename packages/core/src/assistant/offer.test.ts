@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createFakeAi } from "../ai/fake.js";
-import { proposeOffer } from "./offer.js";
+import { distill, MANUAL_SAVE_PROMPT, OFFER_MAX_CHARS, OFFER_PROMPT, proposeOffer } from "./offer.js";
 
 // Both halves matter. `insert` is recordUsage's ledger write; the `select` chain is the dedup
 // read Task 14 adds INSIDE this same function. Stub it now, returning no facts, so these tests
@@ -55,6 +55,60 @@ describe("proposeOffer", () => {
     const failing = createFakeAi({ generateJson: async () => { throw new Error("boom"); } });
     await expect(proposeOffer({ db: db(), ai: failing },
       { userId: "u1", question: "q", answer: "a", requestId: "r1" })).resolves.toBeNull();
+  });
+});
+
+describe("distill", () => {
+  // The manual path's prompt must NOT be the offer's. The offer's opens with "knowledge that was
+  // NOT in the user's own notes", which is false on a path the user invoked deliberately -- they
+  // may well want to keep an answer drawn from their own notes. And "Returning null is the normal
+  // case" must not appear: on a path the user asked for, null is a failure, not modesty.
+  it("uses a manual-save prompt that does not assume the answer came from outside their notes", () => {
+    expect(MANUAL_SAVE_PROMPT).not.toMatch(/NOT in the user's own notes/i);
+    expect(MANUAL_SAVE_PROMPT).not.toMatch(/null is the normal case/i);
+    expect(OFFER_PROMPT).toMatch(/NOT in the user's own notes/i);
+  });
+
+  it("returns the condensed statement", async () => {
+    const out = await distill({ db: db(), ai: ai("Cá hồi giàu omega-3.") },
+      { userId: "u", prompt: MANUAL_SAVE_PROMPT, answer: "a long answer", requestId: "r" });
+    expect(out).toBe("Cá hồi giàu omega-3.");
+  });
+
+  // The caller's fallback depends on this being null rather than a throw: the client shows the
+  // verbatim reply instead, so a failed distillation must never dead-end the user's request.
+  it("returns null rather than throwing when the model call fails", async () => {
+    const failing = createFakeAi({ generateJson: async () => { throw new Error("gemini down"); } });
+    const out = await distill({ db: db(), ai: failing },
+      { userId: "u", prompt: MANUAL_SAVE_PROMPT, answer: "a", requestId: "r" });
+    expect(out).toBeNull();
+  });
+
+  it("returns null when the model produced nothing usable", async () => {
+    const out = await distill({ db: db(), ai: ai("   ") },
+      { userId: "u", prompt: MANUAL_SAVE_PROMPT, answer: "a", requestId: "r" });
+    expect(out).toBeNull();
+  });
+
+  // A statement over the cap means the model did not distil -- it echoed. Null, so the caller
+  // falls back to the verbatim reply, which is at least honestly labelled as such.
+  it("returns null when the statement exceeds OFFER_MAX_CHARS", async () => {
+    const out = await distill({ db: db(), ai: ai("x".repeat(OFFER_MAX_CHARS + 1)) },
+      { userId: "u", prompt: MANUAL_SAVE_PROMPT, answer: "a", requestId: "r" });
+    expect(out).toBeNull();
+  });
+
+  // No dedup on this path, and the assertion is that a stored fact IDENTICAL to the statement
+  // does not suppress it. Silence because the statement resembles something previously declined
+  // would be indistinguishable from a broken button, with no way for the user to find out why.
+  it("does not consult memory_facts", async () => {
+    const from = vi.fn((_t: string) => ({
+      insert: async () => ({ data: null, error: null }),
+      select: () => ({ eq: () => ({ in: async () => ({ data: [], error: null }) }) }),
+    }));
+    await distill({ db: { from } as never, ai: ai("Cá hồi giàu omega-3.") },
+      { userId: "u", prompt: MANUAL_SAVE_PROMPT, answer: "a", requestId: "r" });
+    expect(from).not.toHaveBeenCalledWith("memory_facts");
   });
 });
 

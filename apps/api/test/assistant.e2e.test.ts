@@ -200,3 +200,47 @@ describe("POST /assistant/decline", () => {
     expect(notes, "declining must never write a note").toHaveLength(0);
   });
 });
+
+describe("POST /assistant/distill", () => {
+  // The happy path. The AI client is stubbed by the harness (scriptedAi's generateJson always
+  // returns the classify shape, which has no `statement` field), so this asserts the route's
+  // shape and its auth, not the model's judgement -- the fake's output legitimately distills to
+  // null, which is why the assertion below accepts either a string or null.
+  it("condenses an answer into one statement", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/assistant/distill")
+      .set(auth(alice.token))
+      .send({ answer: "Cá hồi có nhiều omega-3, tốt cho mắt và cho tim.", question: "ăn gì tốt cho mắt" });
+    expect(res.status).toBe(200);
+    expect(typeof res.body.statement === "string" || res.body.statement === null).toBe(true);
+  });
+
+  // The fallback contract the clients depend on: a failed distillation is a 200 with a null
+  // statement, NOT an error. The client shows the verbatim reply instead, so turning this into a
+  // 5xx would dead-end a request the user deliberately made. scriptedAi's generateJson (shared
+  // with every other test in this file) returns a classify-shaped value with no `statement` key,
+  // so `distill` legitimately produces null here -- no separate script is needed.
+  it("answers 200 with a null statement when distillation produces nothing", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/assistant/distill")
+      .set(auth(alice.token))
+      .send({ answer: "ok" });
+    expect(res.status).toBe(200);
+    expect(res.body.statement).toBeNull();
+  });
+
+  it("rejects an unauthenticated request", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/assistant/distill")
+      .send({ answer: "a" });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a body with an unknown key", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/assistant/distill")
+      .set(auth(alice.token))
+      .send({ answer: "a", userId: "someone-else" });
+    expect(res.status).toBe(400);
+  });
+});

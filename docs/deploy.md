@@ -1125,6 +1125,20 @@ permission denied` at the grant layer instead of a silent empty result from RLS.
 > created by these migrations are owned by `postgres`, not `supabase_admin`, so it does not
 > apply to them.
 
+### `00035` drops and recreates `search_notes` — the revoke/grant pair in the diff is expected
+
+Stage S1.5 (2026-08-23) widened `search_notes`'s return by one column (`source_type`), so it can
+tell the assistant whether a matched note is the user's own words or a saved answer of its own.
+Postgres cannot `CREATE OR REPLACE FUNCTION` a changed return type — it has to `DROP FUNCTION` and
+recreate it, same as `00032` before it. Because `search_notes` is `SECURITY DEFINER` and its
+`DROP` discards its ACL, the migration ends with the same `revoke ... from public` /
+`grant execute ... to service_role` footer `00022` established. **That footer showing up in the
+diff is the migration working correctly, not a sign something was accidentally widened** — a
+missing footer would leave the function briefly `PUBLIC`-executable, not present at all.
+
+Pushed to hosted 2026-08-23; `supabase migration list` confirmed local == remote through `00035`
+before and after.
+
 ### Ship log — 2026-08-12
 
 Everything that went wrong getting here — including the two defects this deploy itself

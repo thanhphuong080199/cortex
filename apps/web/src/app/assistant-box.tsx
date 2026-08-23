@@ -16,6 +16,10 @@ type Attached = {
 
 type Web = { sources: WebCitation[]; queries: string[]; entryPoint?: string };
 
+/** The first web source on a reply, which is what turns a save into a 'web_search' note. */
+const webUrlOf = (citations: AnyCitation[]): string | undefined =>
+  citations.find((c): c is WebCitation => c.type === "web")?.url;
+
 /**
  * One row of chat_messages, ready to render. Built in page.tsx, where the jsonb `citations`
  * column is read through readCitation -- the single place a pre-C3 entry with no `type` key
@@ -79,6 +83,14 @@ export function AssistantBox(
   // survive the hand-off into `turns` -- it is the whole point of the row, and it disappears
   // only when the user acts on it (accept/decline) or the next submit() starts.
   const [offer, setOffer] = useState<Offer | null>(null);
+  // The MANUAL save, distinct from `offer` above in both direction and meaning: `offer` is the
+  // assistant proposing something unasked, this is the user asking. They can be on screen at the
+  // same time, on the same reply, which is why the two boxes are labelled differently rather than
+  // being two identically-named buttons.
+  const [proposal, setProposal] = useState<
+    { forId: string; statement: string; sourceUrl?: string } | null
+  >(null);
+  const [proposing, setProposing] = useState<string | null>(null);
   const [online, setOnline] = useState(true);
   const [more, setMore] = useState(hasMore ?? false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -406,6 +418,59 @@ export function AssistantBox(
     });
   }
 
+  /**
+   * Ask the server to condense a reply, then show it back for confirmation. Writes nothing.
+   *
+   * NEVER dead-ends: a null statement, a non-200, or a thrown fetch all fall through to the
+   * verbatim reply. The user pressed a button and must get a box either way -- a silent no-op is
+   * indistinguishable from a broken control.
+   */
+  async function proposeSave(forId: string, answerText: string, question?: string, sourceUrl?: string) {
+    setProposal(null);
+    setProposing(forId);
+    let statement = answerText;
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/assistant/distill`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ answer: answerText, ...(question ? { question } : {}) }),
+      });
+      if (res.ok) {
+        const d = (await res.json()) as { statement: string | null };
+        if (typeof d.statement === "string" && d.statement !== "") statement = d.statement;
+      }
+    } catch {
+      // Fall through to the verbatim reply, deliberately silent: the box below IS the feedback.
+    } finally {
+      setProposing(null);
+    }
+    setProposal({ forId, statement, ...(sourceUrl !== undefined ? { sourceUrl } : {}) });
+  }
+
+  /**
+   * The write. Same endpoint and same body shape the offer's accept uses, which is what makes the
+   * two produce an identical row -- see save-answer.ts's buildSavedAnswerRow doc.
+   *
+   * Dismissing instead calls NOTHING. Not POST /assistant/decline: a decline records that the
+   * ASSISTANT should stop offering a fact, and the user declining to keep an answer they asked
+   * about is not that.
+   */
+  async function confirmSave(p: { statement: string; sourceUrl?: string }) {
+    setProposal(null);
+    try {
+      await fetch(`${process.env.NEXT_PUBLIC_API_URL}/notes/save-answer`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          statement: p.statement,
+          ...(p.sourceUrl !== undefined ? { sourceUrl: p.sourceUrl } : {}),
+        }),
+      });
+    } catch {
+      // Best-effort, same as acceptOffer: the box is already off screen.
+    }
+  }
+
   const hasReply =
     attached !== null || citations.length > 0 || web !== null || answer !== "" || status !== null;
 
@@ -457,6 +522,21 @@ export function AssistantBox(
                     // needs to know -- the model is already shielded from it at turn.ts:134.
                     <p className="interrupted" role="note">Câu trả lời bị gián đoạn (interrupted).</p>
                   )}
+                  {t.content && (
+                    <button
+                      type="button"
+                      className="save-answer"
+                      disabled={proposing === t.id}
+                      onClick={() => void proposeSave(
+                        t.id,
+                        t.content,
+                        turns[i - 1]?.role === "user" ? turns[i - 1]!.content : undefined,
+                        webUrlOf(t.citations),
+                      )}
+                    >
+                      {proposing === t.id ? "Đang rút gọn…" : "Lưu câu trả lời"}
+                    </button>
+                  )}
                 </div>
               )}
             </Fragment>
@@ -481,6 +561,17 @@ export function AssistantBox(
 
             {answer && <div className="answer"><Markdown>{answer}</Markdown></div>}
 
+            {answer && (
+              <button
+                type="button"
+                className="save-answer"
+                disabled={proposing === "live"}
+                onClick={() => void proposeSave("live", answer, undefined, web?.sources[0]?.url)}
+              >
+                {proposing === "live" ? "Đang rút gọn…" : "Lưu câu trả lời"}
+              </button>
+            )}
+
             {!error && status && <p className="hint" role="status">{status}</p>}
           </div>
         )}
@@ -496,6 +587,18 @@ export function AssistantBox(
             <p>{offer.statement}</p>
             <button type="button" onClick={() => void acceptOffer(offer)}>Lưu</button>
             <button type="button" onClick={() => void declineOffer(offer)}>Bỏ qua</button>
+          </div>
+        )}
+
+        {proposal && (
+          // Deliberately worded differently from the offer box above. Both can be on screen at
+          // once, on the same reply, and they mean different things: the offer's statement was
+          // chosen by the assistant, this one by the user. Two buttons both saying "Lưu" would be
+          // a coin flip.
+          <div className="save-proposal" role="group" aria-label="Lưu câu trả lời này?">
+            <p>{proposal.statement}</p>
+            <button type="button" onClick={() => void confirmSave(proposal)}>Lưu câu này</button>
+            <button type="button" onClick={() => setProposal(null)}>Thôi</button>
           </div>
         )}
 

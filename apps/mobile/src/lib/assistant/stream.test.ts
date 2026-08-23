@@ -109,4 +109,37 @@ describe("streamAssistantTurn", () => {
       queries: ["Dune 3"],
     });
   });
+
+  // The server has emitted this event since C5 and this client has silently dropped it since C5 --
+  // which is why an answer could never be kept on the device at all (S1.5 §"Current architecture").
+  it("yields the offer event", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      sseResponse(
+        `event: offer\ndata: ${JSON.stringify({ statement: "Cá hồi giàu omega-3.", sourceUrl: "https://e.com" })}\n\n`,
+      ),
+    );
+    const events = await collect(streamAssistantTurn({ ...args, fetchFn }));
+    expect(events).toContainEqual({
+      type: "offer", statement: "Cá hồi giàu omega-3.", sourceUrl: "https://e.com",
+    });
+  });
+
+  // sourceUrl is absent for general knowledge, and an explicit `sourceUrl: undefined` would be
+  // written into the note's source_meta as a null on one path and an absent key on another --
+  // the exact split buildSavedAnswerRow's spread-if comment exists to prevent.
+  it("omits sourceUrl entirely when the offer carries none", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      sseResponse(`event: offer\ndata: ${JSON.stringify({ statement: "S." })}\n\n`),
+    );
+    const events = await collect(streamAssistantTurn({ ...args, fetchFn }));
+    expect(events).toContainEqual({ type: "offer", statement: "S." });
+  });
+
+  it("drops an offer event with no statement", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      sseResponse(`event: offer\ndata: ${JSON.stringify({})}\n\n`),
+    );
+    const events = await collect(streamAssistantTurn({ ...args, fetchFn }));
+    expect(events.some((e) => (e as { type: string }).type === "offer")).toBe(false);
+  });
 });

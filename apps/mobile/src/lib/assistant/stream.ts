@@ -16,6 +16,7 @@ export type BoxEvent =
   | { type: "web"; sources: WebCitation[]; queries: string[] }
   | { type: "token"; text: string }
   | { type: "mood"; checkinId: string; mood: number }
+  | { type: "offer"; statement: string; sourceUrl?: string }
   | { type: "declined" }
   | { type: "done" }
   | { type: "error"; message: string };
@@ -100,6 +101,19 @@ export async function* streamAssistantTurn(args: {
       case "mood":
         yield { type: "mood", checkinId: String(d.checkinId), mood: Number(d.mood) };
         break;
+      case "offer": {
+        // Guarded on a non-empty statement: an offer with nothing to save is a box with a blank
+        // line and two buttons. Spread-if on sourceUrl for the reason buildSavedAnswerRow
+        // documents -- absent and null are two different rows.
+        const statement = typeof d.statement === "string" ? d.statement : "";
+        if (statement !== "") {
+          yield {
+            type: "offer", statement,
+            ...(typeof d.sourceUrl === "string" ? { sourceUrl: d.sourceUrl } : {}),
+          };
+        }
+        break;
+      }
       case "declined":
         yield { type: "declined" };
         break;
