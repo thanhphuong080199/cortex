@@ -451,9 +451,15 @@ describe("FORMAT_RULE", () => {
     timeZone: "Asia/Ho_Chi_Minh", now: new Date("2026-08-18T03:00:00.000Z"),
   });
 
-  it("asks for short conversational prose by default", () => {
+  // The defect this replaces: FORMAT_RULE bound LENGTH to STRUCTURE (short<->prose,
+  // long<->headings), so the missing cell was LONG PROSE -- a substantive question that deserves
+  // depth and is not a list. With no cell for it, such a question fell into the casual branch and
+  // was capped at "two or three sentences". The fixed number compounded it: a model latches onto
+  // a number before it latches onto the word "casual". Reported by the user on 2026-08-22.
+  it("scales depth to the question instead of capping it at a sentence count", () => {
     expect(answer()).toMatch(/conversational|prose/i);
-    expect(answer()).toMatch(/short/i);
+    // The number is the thing that had to go. Any digit-plus-"sentence" phrasing reintroduces it.
+    expect(answer()).not.toMatch(/(two|three|\d)\s+(or\s+\w+\s+)?sentences/i);
   });
 
   // THE HALF THAT GETS DROPPED, and the reason this is two assertions rather than one. A
@@ -464,6 +470,32 @@ describe("FORMAT_RULE", () => {
   it("carries the explicit-request exception", () => {
     expect(answer()).toContain("liệt kê");
     expect(answer()).toMatch(/only when|exception/i);
+  });
+
+  // Both other prompts were capped by a COUNT too, and the user's complaint was about replies in
+  // general. Each is loosened inside its own sentence rather than by extending FORMAT_RULE to
+  // cover it -- a second, differently worded length rule gives the model two constraints to
+  // reconcile where it currently has one.
+  it("drops the sentence count from the acknowledge and chitchat prompts", () => {
+    const ack = buildAcknowledgePrompt({
+      note: "dạo này mỏi mắt", domain: null, tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW, verify: false,
+    });
+    expect(ack).not.toMatch(/one or two sentences/i);
+    expect(buildChitchatPrompt({ text: "haha ok", history: [] })).not.toMatch(/one short, natural line/i);
+  });
+
+  // The PURPOSE clause is what each of them keeps. Dropping the count must not turn an
+  // acknowledgement into an answer or chitchat into an essay.
+  it("keeps each prompt's purpose clause after the count is dropped", () => {
+    const ack = buildAcknowledgePrompt({
+      note: "n", domain: null, tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW, verify: false,
+    });
+    expect(ack).toMatch(/did not ask a question/i);
+    expect(ack).toMatch(/acknowledge/i);
+    expect(buildChitchatPrompt({ text: "haha ok", history: [] }))
+      .toMatch(/do not ask a follow-up|do not start a topic/i);
   });
 
   // SCOPING. The natural mistake with a good rule is to apply it everywhere. Both other

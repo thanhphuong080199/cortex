@@ -57,10 +57,16 @@ const RECALL_RULE =
  * headers -- the same shape as a question that had explicitly asked to list things out. The
  * prompt carried no shape guidance at all, so that was the model's default, not a template.
  *
- * BOTH halves are load-bearing and the second is the one a later edit will drop. A bare "keep
- * it short, avoid lists" cap degrades the turn that genuinely asked to enumerate, so the
- * exception is written into the same constant as the default rather than left to judgment.
- * prompts.test.ts asserts each half separately for exactly that reason.
+ * BOTH halves are load-bearing and they are now INDEPENDENT, which they were not before
+ * 2026-08-22. The rule used to read "a short, casual question gets a short, conversational
+ * answer -- two or three sentences of prose, no headings and no list", which tied length to
+ * structure and left no cell for LONG PROSE: a substantive question that deserves depth and is
+ * not a list. Such a question fell into the casual branch and came back capped. The user's
+ * verdict was that replies were too short; the fix is to let depth follow the question while
+ * keeping structure as the exception it already was.
+ *
+ * The exception clause is still the half a later edit will drop, and prompts.test.ts still
+ * asserts each half separately for exactly that reason.
  *
  * It says nothing about markdown syntax. Both clients render markdown as of 2026-08-18, so
  * `**bold**` is no longer literal punctuation on screen -- and a rule phrased around syntax
@@ -72,12 +78,13 @@ const RECALL_RULE =
  * gives the model two constraints to reconcile where it has one.
  */
 const FORMAT_RULE =
-  "Match the shape of the reply to the weight of the question. A short, casual question " +
-  "gets a short, conversational answer -- two or three sentences of prose, no headings and " +
-  "no list. Reach for headings or a numbered list only when the user actually asked to " +
-  "enumerate or compare (\"liệt kê\", \"các bước\", \"so sánh\", \"list out\"), or when the " +
-  "answer genuinely is a set of parallel items that prose would obscure. Structure is the " +
-  "exception, not the default shape of an answer.";
+  "Match the shape and the depth of the reply to the weight of the question. A short, casual " +
+  "question gets a short, conversational answer. A question that genuinely asks for something " +
+  "gets as much as it actually needs -- several paragraphs is fine, and prose is still the " +
+  "default shape at any length. Reach for headings or a numbered list only when the user " +
+  "actually asked to enumerate or compare (\"liệt kê\", \"các bước\", \"so sánh\", \"list " +
+  "out\"), or when the answer genuinely is a set of parallel items that prose would obscure. " +
+  "Structure is the exception, not the default shape of an answer.";
 
 /**
  * Stage C5 §9.3. Added to buildAcknowledgePrompt only when the classifier flagged the note as
@@ -226,7 +233,8 @@ export function buildAcknowledgePrompt(a: {
   verify: boolean;
 }): string {
   return [
-    "The user just saved a note. Acknowledge it in one or two sentences.",
+    "The user just saved a note. Acknowledge it briefly -- this is an acknowledgement, not an " +
+      "answer, so keep it to what is worth saying and no more.",
     LANGUAGE_RULE,
     temporalRule(a.now, a.timeZone),
     // Named in words, never interpolated raw: `${a.domain}` on a null renders the string "null"
@@ -266,8 +274,9 @@ export function buildAcknowledgePrompt(a: {
  */
 export function buildChitchatPrompt(a: { text: string; history: ThreadTurn[] }): string {
   return [
-    "The user said something conversational -- a greeting, a reaction, or noise. Reply in one " +
-      "short, natural line. Do not ask a follow-up question and do not start a topic.",
+    "The user said something conversational -- a greeting, a reaction, or noise. Reply " +
+      "naturally and keep it light; this is small talk, not a topic. Do not ask a follow-up " +
+      "question and do not start a topic.",
     LANGUAGE_RULE,
     renderHistory(a.history),
     `\n\nThey said: ${a.text}`,
