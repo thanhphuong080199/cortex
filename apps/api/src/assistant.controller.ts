@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { Body, Controller, HttpCode, Inject, Post, Req, Res, UseGuards } from "@nestjs/common";
-import type { Request, Response } from "express";
+import { Body, Controller, HttpCode, Inject, Post, Res, UseGuards } from "@nestjs/common";
+import type { Response } from "express";
 import type { AiClient } from "@cortex/core";
 import {
   createServiceClient, createUserClient, declineOffer, distill as distillStatement,
@@ -54,7 +54,6 @@ export class AssistantController {
   async assist(
     @CurrentUser() user: AuthedUser,
     @Body(new ZodValidationPipe(assistantInput)) body: AssistantInput,
-    @Req() req: Request,
     @Res() res: Response,
   ): Promise<void> {
     const budgetUsd = this.env().ASSISTANT_MONTHLY_BUDGET_USD;
@@ -72,8 +71,29 @@ export class AssistantController {
 
     // Closing the tab must actually stop the work. Without this the answer streams to
     // completion into a socket nobody is reading, and we pay for all of it.
+    //
+    // `res`, NOT `req`, and the difference is the whole bug. Since Node 16,
+    // `http.IncomingMessage` emits 'close' when the request MESSAGE completes -- not when the
+    // connection does. `express.json()` reads the body to EOF and the event fires on the next
+    // tick, which is BEFORE this handler exists: Nest runs SupabaseAuthGuard (async) in between,
+    // and a listener registered after even one await is registered after the event has already
+    // fired. Measured on express 5.2.1 (2026-08-23):
+    //
+    //   [bare]      listener registered synchronously -> close fired? true
+    //   [guarded]   listener registered after 1 await -> close fired? false
+    //
+    // This handler is the `[guarded]` row, so `abort.abort()` had NEVER run since C1 and an
+    // abandoned turn streamed and billed to completion -- the exact thing the paragraph above
+    // claims to prevent. The near miss is worth recording too: in the `[bare]` shape the
+    // listener fires at ~2ms and aborts every turn in the product before the model stream opens
+    // (verified end to end: `MODEL STREAM THREW: AbortError` -> `incomplete=true`), so moving
+    // this line earlier is not a harmless tidy-up.
+    //
+    // `res` closes when the response finishes OR when the socket dies, and `writableEnded` is
+    // what tells those two apart -- without the guard, every successful turn would "abort"
+    // itself a tick after its own last write.
     const abort = new AbortController();
-    req.on("close", () => abort.abort());
+    res.on("close", () => { if (!res.writableEnded) abort.abort(); });
 
     try {
       for await (const event of runTurn(

@@ -405,4 +405,38 @@ describe("search_notes", () => {
     const rows = await search(bob, "nothing-matches-this-keyword-zzz", target);
     expect(rows.map((r) => r.note_id)).not.toContain(chit);
   });
+
+  // 00039, and the two tests below mirror the two above deliberately: 'chat' joins 'chitchat'
+  // for the same reason and must be excluded from BOTH arms, which is a thing the full outer
+  // join makes easy to get half right.
+  //
+  // What this is for: asked "Game này có hướng dẫn gì không", the assistant answered partly out
+  // of "liet ke vai cach di" and "Tìm đi" -- commands the user had typed AT it in an unrelated
+  // conversation, stamped source_type 'chat' by turn.ts and left fully recallable. Measured
+  // against the real embedding model, those two sit CLOSER to the question than the note it was
+  // actually about, so no distance floor can separate them; only what they are can.
+  it("never returns a note the user typed as a question, matched by keyword", async () => {
+    const control = await seed(bob, "the snozzcumber protocol, a real note");
+    const asked = await seed(bob, "the snozzcumber protocol, liệt kê vài cách đi", { sourceType: "chat" });
+    const rows = await search(bob, "snozzcumber protocol", vec(7));
+    expect(rows.map((r) => r.note_id)).toContain(control);
+    expect(rows.map((r) => r.note_id)).not.toContain(asked);
+  });
+
+  it("never returns a note the user typed as a question, matched by embedding", async () => {
+    const target = vec(31);
+    const asked = await seed(bob, "tìm đi", { sourceType: "chat", embedding: target });
+    const rows = await search(bob, "nothing-matches-this-keyword-zzz", target);
+    expect(rows.map((r) => r.note_id)).not.toContain(asked);
+  });
+
+  // The other side of the same migration, and the one that stops it over-reaching. A plain
+  // capture must still be recallable -- an exclusion that swallowed 'quick' too would pass both
+  // tests above and quietly empty the corpus.
+  it("still returns an ordinary note of the same shape", async () => {
+    const target = vec(41);
+    const kept = await seed(bob, "tìm đi", { embedding: target });
+    const rows = await search(bob, "nothing-matches-this-keyword-zzz", target);
+    expect(rows.map((r) => r.note_id)).toContain(kept);
+  });
 });

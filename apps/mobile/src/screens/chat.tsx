@@ -1,10 +1,12 @@
 import { useQuery } from "@powersync/react-native";
 import { useColorScheme } from "react-native";
 import { useEffect, useMemo, useState } from "react";
-import { FlatList, KeyboardAvoidingView, Platform, Pressable, Text, View } from "react-native";
+import { FlatList, Keyboard, Platform, Pressable, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AssistantBox } from "./assistant-box";
 import { ConnectionPill } from "../components/connection-pill";
+import { composerInset } from "../lib/composer-inset";
 import { proposeStatement, saveStatement, webUrlOf } from "../lib/assistant/save";
 import { supabase } from "../lib/supabase";
 import { buildTranscript, liveHasReplicated, type ChatRow, type Item, type LiveTurn } from "../lib/transcript";
@@ -30,6 +32,37 @@ const RETIRE_TIMEOUT_MS = 8_000;
  * once, at the boundary, with the reason written down.
  */
 const PAGE = 50;
+
+/**
+ * `composerInset` (lib/composer-inset.ts, where the arithmetic and its reasoning live) wired to
+ * the live keyboard. Here rather than beside the pure function because this file already imports
+ * react-native and that file deliberately does not -- the same split theme.ts uses.
+ *
+ * NOT `KeyboardAvoidingView`, which this replaces. That component needs a
+ * `keyboardVerticalOffset` equal to the height of everything above it -- expo-router's Stack
+ * header plus the top inset -- and that is only readable through `@react-navigation/elements`,
+ * which is not a direct dependency of this app; importing it would be a phantom dependency
+ * pnpm's strict layout can drop at any install. The keyboard's own frame needs no such
+ * correction: `endCoordinates.height` is measured from the bottom of the window, which is the
+ * edge being padded.
+ *
+ * `keyboardWillShow` on iOS, so the composer moves WITH the keyboard rather than after it;
+ * `keyboardDidShow` on Android, which has no `will` events.
+ */
+function useComposerInset(): number {
+  const insets = useSafeAreaInsets();
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  useEffect(() => {
+    const show = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hide = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const shown = Keyboard.addListener(show, (e) => setKeyboardHeight(e.endCoordinates.height));
+    const hidden = Keyboard.addListener(hide, () => setKeyboardHeight(0));
+    return () => { shown.remove(); hidden.remove(); };
+  }, []);
+
+  return composerInset({ keyboardHeight, safeAreaBottom: insets.bottom });
+}
 
 export function Chat() {
   const theme = themeFor(useColorScheme());
@@ -72,10 +105,21 @@ export function Chat() {
 
   // The manual save, S1.5 §4. Lives in Chat rather than in AssistantBox because this screen owns
   // the replicated rows -- the control sits on every assistant reply, not only on the live turn.
+  //
+  // `forId` was added 2026-08-23. The proposal used to render between the list and the composer,
+  // detached from the reply it came from, so saving an older answer put a box at the bottom of
+  // the screen with nothing tying the two together -- the same defect the web box had, reported
+  // together with it.
   const [proposal, setProposal] = useState<
-    { statement: string; sourceUrl?: string } | null
+    { forId: string; statement: string; sourceUrl?: string } | null
   >(null);
   const [proposing, setProposing] = useState<string | null>(null);
+  // Which replies have already been kept. Client-side and per-session, same as web: a durable
+  // flag needs a column on chat_messages and a link back from the saved note, which is out of
+  // scope for this fix. Before this, saving changed nothing on screen and the control went on
+  // offering the same save forever.
+  const [saved, setSaved] = useState<ReadonlySet<string>>(new Set());
+  const bottomInset = useComposerInset();
 
   async function onSave(id: string, answer: string, question: string | undefined, sourceUrl: string | undefined) {
     setProposal(null);
@@ -89,14 +133,17 @@ export function Chat() {
         answer,
         ...(question ? { question } : {}),
       });
-      setProposal({ statement, ...(sourceUrl !== undefined ? { sourceUrl } : {}) });
+      setProposal({ forId: id, statement, ...(sourceUrl !== undefined ? { sourceUrl } : {}) });
     } finally {
       setProposing(null);
     }
   }
 
-  async function onConfirm(p: { statement: string; sourceUrl?: string }) {
+  async function onConfirm(p: { forId: string; statement: string; sourceUrl?: string }) {
     setProposal(null);
+    // Optimistic, and a NEW Set rather than a mutation: `prev.add(...)` returns the same
+    // reference, React bails out of the re-render, and the label never changes on screen.
+    setSaved((prev) => new Set(prev).add(p.forId));
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) return;
     await saveStatement({
@@ -108,10 +155,15 @@ export function Chat() {
   }
 
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1, backgroundColor: theme.bg }}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
+    // The inset goes on the ROOT of the screen, not on the composer itself, and that placement
+    // is what keeps the last message visible: padding here shrinks the flex box the FlatList
+    // fills, so the thread gets shorter as the keyboard comes up instead of scrolling under it.
+    //
+    // This replaces a KeyboardAvoidingView that was passed `behavior={undefined}` on Android --
+    // which is that component doing nothing at all, and is why the keyboard drew straight over
+    // the input (reported 2026-08-23). See lib/composer-inset.ts for why the replacement reads
+    // the keyboard frame directly rather than fixing the behavior prop.
+    <View style={{ flex: 1, backgroundColor: theme.bg, paddingBottom: bottomInset }}>
       <ConnectionPill />
       <FlatList
         inverted
@@ -136,37 +188,30 @@ export function Chat() {
             <Row
               item={item}
               proposing={proposing === item.id}
+              saved={saved.has(item.id)}
+              // Rendered inside the row it names, not below the list. See `proposal`'s
+              // declaration for what that fixed.
+              proposal={proposal?.forId === item.id ? proposal : null}
+              onConfirm={onConfirm}
+              onDismiss={() => setProposal(null)}
               question={next?.kind === "message" && next.role === "user" ? next.content : undefined}
               onSave={onSave}
             />
           );
         }}
       />
-      {proposal ? (
-        <View testID="save-proposal" style={{
-          gap: 8, margin: 12, padding: 12, borderRadius: 8,
-          borderWidth: 1, borderStyle: "dashed", borderColor: theme.line,
-        }}>
-          <Text style={{ color: theme.muted }}>{proposal.statement}</Text>
-          <View style={{ flexDirection: "row", gap: 16 }}>
-            <Pressable testID="save-confirm" accessibilityRole="button" onPress={() => void onConfirm(proposal)}>
-              <Text style={{ color: theme.accent }}>Lưu câu này</Text>
-            </Pressable>
-            {/* Dismiss writes NOTHING -- specifically not a decline. See save.ts's module doc. */}
-            <Pressable testID="save-dismiss" accessibilityRole="button" onPress={() => setProposal(null)}>
-              <Text style={{ color: theme.muted }}>Thôi</Text>
-            </Pressable>
-          </View>
-        </View>
-      ) : null}
       <AssistantBox onLive={setLive} />
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
-function Row({ item, proposing, question, onSave }: {
+function Row({ item, proposing, saved, proposal, onConfirm, onDismiss, question, onSave }: {
   item: Item;
   proposing: boolean;
+  saved: boolean;
+  proposal: { forId: string; statement: string; sourceUrl?: string } | null;
+  onConfirm: (p: { forId: string; statement: string; sourceUrl?: string }) => void;
+  onDismiss: () => void;
   question: string | undefined;
   onSave: (id: string, answer: string, question: string | undefined, sourceUrl: string | undefined) => void;
 }) {
@@ -196,7 +241,13 @@ function Row({ item, proposing, question, onSave }: {
           Câu trả lời bị gián đoạn.
         </Text>
       ) : null}
-      {item.content ? (
+      {item.content && saved ? (
+        // Replaces the control rather than sitting beside it: a live "Lưu câu trả lời" next to
+        // "đã lưu" is the same nag with a label attached.
+        <Text testID="saved-answer" style={{ color: theme.muted, fontSize: 13 }}>
+          ✓ Đã lưu vào notes
+        </Text>
+      ) : item.content ? (
         <Pressable
           testID="save-answer"
           accessibilityRole="button"
@@ -207,6 +258,24 @@ function Row({ item, proposing, question, onSave }: {
             {proposing ? "Đang rút gọn…" : "Lưu câu trả lời"}
           </Text>
         </Pressable>
+      ) : null}
+
+      {proposal ? (
+        <View testID="save-proposal" style={{
+          gap: 8, marginTop: 8, padding: 12, borderRadius: 8,
+          borderWidth: 1, borderStyle: "dashed", borderColor: theme.line,
+        }}>
+          <Text style={{ color: theme.muted }}>{proposal.statement}</Text>
+          <View style={{ flexDirection: "row", gap: 16 }}>
+            <Pressable testID="save-confirm" accessibilityRole="button" onPress={() => onConfirm(proposal)}>
+              <Text style={{ color: theme.accent }}>Lưu câu này</Text>
+            </Pressable>
+            {/* Dismiss writes NOTHING -- specifically not a decline. See save.ts's module doc. */}
+            <Pressable testID="save-dismiss" accessibilityRole="button" onPress={onDismiss}>
+              <Text style={{ color: theme.muted }}>Thôi</Text>
+            </Pressable>
+          </View>
+        </View>
       ) : null}
     </View>
   );

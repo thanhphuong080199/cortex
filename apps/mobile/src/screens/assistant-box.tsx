@@ -49,6 +49,10 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
   const [offer, setOffer] = useState<{ statement: string; sourceUrl?: string } | null>(null);
   const [web, setWeb] = useState<Extract<BoxEvent, { type: "web" }> | null>(null);
   const [matches, setMatches] = useState<OfflineMatch[]>([]);
+  // The composer's measured height, in dp. 22 is one line at fontSize 15; the cap keeps a pasted
+  // page from swallowing the thread. Held here rather than left to `multiline`'s own growth
+  // because a TextInput with `flex: 1` inside a row does not auto-size on Android.
+  const [inputHeight, setInputHeight] = useState(22);
   const run = useRef(createInFlightGuard()).current;
 
   async function submit() {
@@ -148,35 +152,62 @@ export function AssistantBox({ onLive }: { onLive: (live: LiveTurn | null) => vo
   }
 
   return (
-    <View style={{ gap: 12, padding: 16 }}>
-      <TextInput
-        value={text}
-        onChangeText={setText}
-        placeholder="Bạn đang nghĩ gì?"
-        multiline
-        accessibilityLabel="Bạn đang nghĩ gì?"
-        // testID, not the label: it becomes the Android resource-id, which is unique and
-        // stable, unlike an accessibilityLabel a text matcher could collide with.
-        testID="box-input"
-        style={{ minHeight: 96, borderWidth: 1, borderColor: "#ccc", borderRadius: 8, padding: 12 }}
-      />
+    <View style={{ gap: 12, padding: 12 }}>
+      {/* One rounded block with the send control inside it, matching web's .chat-composer. The
+          old shape was a 96px-tall bordered box with a full-width dark button under it -- three
+          hardcoded colours (#ccc, #222, "crimson") that ignored `themeFor` entirely, so the
+          whole composer stayed light-mode grey on a dark screen. */}
+      <View
+        style={{
+          flexDirection: "row", alignItems: "flex-end", gap: 8,
+          paddingVertical: 6, paddingLeft: 14, paddingRight: 6,
+          borderWidth: 1, borderColor: theme.line, borderRadius: 24,
+          backgroundColor: theme.panel,
+        }}
+      >
+        <TextInput
+          value={text}
+          onChangeText={setText}
+          placeholder="Bạn đang nghĩ gì?"
+          placeholderTextColor={theme.muted}
+          multiline
+          accessibilityLabel="Bạn đang nghĩ gì?"
+          // testID, not the label: it becomes the Android resource-id, which is unique and
+          // stable, unlike an accessibilityLabel a text matcher could collide with. Both this
+          // and box-send below are keyed on by .maestro flows -- renaming either breaks the
+          // suite while every unit test stays green.
+          testID="box-input"
+          // Grows with the text, capped. `height` is driven by the measured content rather than
+          // a minHeight, so an empty box is one line instead of the three the old 96px forced.
+          onContentSizeChange={(e) =>
+            setInputHeight(Math.min(Math.max(e.nativeEvent.contentSize.height, 22), 140))}
+          style={{
+            flex: 1, minWidth: 0, height: inputHeight,
+            color: theme.text, fontSize: 15, padding: 0, textAlignVertical: "center",
+          }}
+        />
+        <Pressable
+          onPress={() => void submit()}
+          accessibilityRole="button"
+          accessibilityLabel="Gửi"
+          disabled={busy}
+          testID="box-send"
+          style={{
+            width: 34, height: 34, borderRadius: 17,
+            alignItems: "center", justifyContent: "center",
+            backgroundColor: theme.accent, opacity: busy ? 0.4 : 1,
+          }}
+        >
+          {busy
+            ? <ActivityIndicator size="small" color="#fff" />
+            : <Text style={{ color: "#fff", fontSize: 16, lineHeight: 18 }}>↑</Text>}
+        </Pressable>
+      </View>
       {saveFailed ? (
-        <Text style={{ color: "crimson" }}>
+        <Text style={{ color: theme.danger }}>
           Không lưu được vào máy. Chữ của bạn vẫn còn đây — thử lại nhé.
         </Text>
       ) : null}
-      <Pressable
-        onPress={() => void submit()}
-        accessibilityRole="button"
-        disabled={busy}
-        testID="box-send"
-        style={{ padding: 14, borderRadius: 8, backgroundColor: "#222", alignItems: "center",
-                 opacity: busy ? 0.6 : 1 }}
-      >
-        <Text style={{ color: "white" }}>Gửi</Text>
-      </Pressable>
-
-      {busy ? <ActivityIndicator /> : null}
 
       {attached ? (
         <Text testID="box-attached">
