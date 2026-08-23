@@ -31,7 +31,7 @@ export async function recordUsage(
   db: SupabaseClient,
   u: {
     userId: string;
-    kind: "embed" | "tag" | "chat" | "grounding";
+    kind: "embed" | "tag" | "chat" | "grounding" | "mood";
     model: string;
     inputTokens: number;
     outputTokens: number;
