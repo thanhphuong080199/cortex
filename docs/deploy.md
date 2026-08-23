@@ -1132,7 +1132,7 @@ tell the assistant whether a matched note is the user's own words or a saved ans
 Postgres cannot `CREATE OR REPLACE FUNCTION` a changed return type — it has to `DROP FUNCTION` and
 recreate it, same as `00032` before it. Because `search_notes` is `SECURITY DEFINER` and its
 `DROP` discards its ACL, the migration ends with the same `revoke ... from public` /
-`grant execute ... to authenticated` footer `00022` established. **That footer showing up in the
+`grant execute ... to service_role` footer `00022` established. **That footer showing up in the
 diff is the migration working correctly, not a sign something was accidentally widened** — a
 missing footer would leave the function briefly `PUBLIC`-executable, not present at all.
 
