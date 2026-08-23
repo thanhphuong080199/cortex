@@ -202,9 +202,21 @@ from the file as written:
 - `.chat-header` is `position: sticky` inside a `overflow: hidden` flex body. Confirm it still
   pins.
 
-- [ ] **Step 2: Verify** — dev server, device emulation at 360×740 and 390×844. Both the
-  composer and the last message must be visible with the keyboard closed, and the page must not
-  scroll horizontally.
+- [x] **Step 2: Verify** — done against the real stack (local Supabase + `apps/api` on 3001 +
+  `next start`), driven through Playwright with the seeded session, at 360×740 and 390×844:
+
+  ```
+    viewport meta : width=device-width, initial-scale=1, viewport-fit=cover
+    scrollWidth   : 360  clientWidth: 360  horizontal overflow: no
+    composer      : present  send: present
+  ```
+
+  Screenshotted at both widths; thread, day separator and composer all render correctly. The
+  full web e2e suite passes 7/7 after one copy assertion was updated for the Vietnamese hint.
+  The inline save was checked the same way: the confirmation is a descendant of the reply's own
+  `.bubble` (not the last child of `.chat-scroll`, which is where it used to land), and
+  confirming replaces the control with "Đã lưu vào notes" while leaving the other replies' own
+  controls alone.
 
 ---
 
@@ -511,10 +523,20 @@ would pass the first two and silently empty the corpus.
 This is tuned RRF SQL with a documented window-function ordering trap in it, and retyping is how
 a transcription bug ships behind a green suite. Keep `extensions.vector(1536)` schema-qualified.
 
-- [ ] **Step 4: Verify** —
-`pnpm turbo run test --filter=@cortex/db` with the local stack up. **Docker would not start on
-this machine, so the three new db tests are UNRUN.** This step is not done; the migration must
-not be pushed to hosted (Task 10) until it is. `turn.test.ts` is green (53 passing).
+- [x] **Step 4: Verify** — Docker was brought up and the migration applied with
+`supabase db push --local`. `packages/db` search-notes: **24 passed**, including the three new
+tests. `packages/core`: 394 passed. `apps/api`: 168 passed.
+
+One EXISTING test had to be turned around rather than kept: "does not down-weight a chat note,
+which is the user's own question" asserted that a `chat` note comes back at full weight, which
+is precisely the decision 00039 reverses. Its fixture is the sharpest in the file (a `chat` note
+seeded to outrank an `assistant` note outright), so it was rewritten as
+"excludes a chat note even where it would otherwise have outranked everything" — the strongest
+exclusion assertion available, with the history of the change written into it.
+
+Unrelated pre-existing failure, confirmed against a stashed tree: the nine
+`claim-sessions-for-mood` (00038) tests fail on this machine from accumulated rows in the local
+database, not from anything in this stage.
 
 ---
 
