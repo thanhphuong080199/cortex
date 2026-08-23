@@ -88,4 +88,43 @@ describe("mood_readings (00036)", () => {
     expect(error).toBeNull();
     expect(data).toMatchObject({ status: "pending", attempts: 0, topics: [] });
   });
+
+  // Round-trips the exact object shapes mood.service.ts writes -- first the claim's pending
+  // upsert, then the 'ok' resolve -- against the real schema. mood-sweep.test.ts only exercises
+  // this against a scripted fake db, and the other tests in this file never send evidence,
+  // summary, confidence, or a realistic topics array, so a renamed column or a type mismatch
+  // (e.g. evidence in the wrong shape, confidence out of 0..1, topics not a plain string array)
+  // would pass every existing test while breaking the service in production.
+  it("accepts the pending-upsert and 'ok'-resolve shapes mood.service.ts writes", async () => {
+    const { id: userId } = await makeUser("s3-roundtrip@example.com");
+    const sessionId = crypto.randomUUID();
+    const sessionStart = new Date(Date.now() - 60_000).toISOString();
+    const sessionEnd = new Date().toISOString();
+
+    // Step 1: the claim's pending upsert (runMoodSweep, mood.service.ts).
+    const { data: row, error: insertErr } = await admin.from("mood_readings").upsert(
+      {
+        user_id: userId,
+        session_id: sessionId,
+        status: "pending",
+        attempts: 1,
+        message_count: 3,
+        session_start: sessionStart,
+        session_end: sessionEnd,
+      },
+      { onConflict: "session_id" },
+    ).select("id").single();
+    expect(insertErr).toBeNull();
+
+    // Step 2: the 'ok'-path resolve (runMoodSweep, mood.service.ts).
+    const { error: updateErr } = await admin.from("mood_readings").update({
+      status: "ok",
+      valence: 4,
+      summary: "Người dùng vui vẻ khi bàn về kế hoạch cuối tuần.",
+      topics: ["công việc", "gia đình", "cuối tuần"],
+      confidence: 0.82,
+      evidence: [crypto.randomUUID(), crypto.randomUUID()],
+    }).eq("id", row!.id);
+    expect(updateErr).toBeNull();
+  });
 });

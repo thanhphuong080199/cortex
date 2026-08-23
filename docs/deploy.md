@@ -1143,9 +1143,12 @@ before and after.
 
 Three migrations, all additive and all safe to apply to a live project:
 
-- `00036_mood_readings.sql` — creates `mood_readings` (server-only: no policy, no grant block —
-  see the file's header for why the omission is deliberate), an index on
-  `chat_messages (session_id)`, and the `_test_policy_count` helper.
+- `00036_mood_readings.sql` — creates `mood_readings` and `mood_readings_user_end_idx` (server-only:
+  RLS on with zero policies, and `select, insert, update, delete` granted to `service_role` only —
+  no grant to anon/authenticated, so no client can reach the table regardless of policy — see the
+  file's header for why the omission is deliberate), plus the `_test_policy_count` helper used to
+  assert the zero-policy claim in tests. No new index on `chat_messages`: the existing
+  `chat_messages_session_idx` (00006) already covers the claim RPC's scan.
 - `00037_usage_kind_mood.sql` — re-states `usage_ledger_kind_check` with `'mood'` added.
 - `00038_claim_sessions_for_mood.sql` — creates the claim RPC, granted to `service_role` only.
 

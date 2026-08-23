@@ -6,7 +6,7 @@
 -- would write at arbitrary times, for old content, with no screen to undo it on. This table is
 -- how S3 obeys that constraint rather than working around it.
 --
--- SERVER-ONLY, and deliberately WITHOUT a grant block. Since 00025 §4 ran `alter default
+-- SERVER-ONLY, and deliberately WITHOUT a grant to client roles. Since 00025 §4 ran `alter default
 -- privileges in schema public revoke all on tables from anon, authenticated`, a new table is born
 -- with no client privileges on the hosted project as well as locally. The trap now runs the other
 -- way -- a CLIENT-facing table added without an explicit grant fails with 42501 before RLS is ever
@@ -33,6 +33,10 @@ create table public.mood_readings (
   -- conclude that nothing is readable, and must never be retried. Keeping that distinction in the
   -- schema rather than in the prompt means a prompt regression cannot quietly turn a null reading
   -- into an invented number.
+  -- A session is retired once attempts >= 3 (see 00038's claim_sessions_for_mood), but its status
+  -- stays 'pending' -- no code path in this stage ever writes 'failed' (mood.service.ts leaves a
+  -- transient error 'pending' on purpose). A row with status='pending' and attempts>=3 IS the
+  -- terminal/exhausted state, not one still in flight.
   status        text not null default 'pending'
                 check (status in ('pending','ok','no_reading','failed')),
   -- 1..5, the same scale as checkins.mood (00013:55), so the two are comparable if anything ever
@@ -75,7 +79,7 @@ create trigger mood_readings_set_updated_at before update on public.mood_reading
 grant select, insert, update, delete on public.mood_readings to service_role;
 
 -- ---- test helper ----
--- A grant test cannot see a policy: with zero grants a policy is inert, so adding one would not
+-- A grant test cannot see a policy: with no client grant a policy is inert, so adding one would not
 -- turn a has_table_privilege assertion red. This is what lets mood-readings-schema.test.ts assert
 -- "and exactly zero policies" -- the other half of "nothing may read this table".
 create or replace function public._test_policy_count(p_table text)

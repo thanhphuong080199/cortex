@@ -106,6 +106,11 @@ export async function runMoodSweep(deps: MoodSweepDeps): Promise<MoodSweepResult
         const { data: messageRows, error: msgErr } = await db.from("chat_messages")
           .select("id, role, content")
           .eq("session_id", session.session_id)
+          .eq("user_id", session.user_id)
+          // PostgREST's db-max-rows is 1000 (supabase/config.toml) and truncates silently with no
+          // error -- the same trap budget.ts and extract.ts already document. 500 is comfortably
+          // under that cap for a single chat session.
+          .limit(500)
           .order("created_at", { ascending: true });
         if (msgErr) throw msgErr;
         const messages = (messageRows ?? []) as SessionMessage[];

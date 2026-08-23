@@ -34,7 +34,14 @@ function fakeDb(opts: {
         return {
           select: () => ({
             eq: (_col: string, sessionId: string) => ({
-              order: () => ({ data: opts.messages?.[sessionId] ?? [], error: null }),
+              // Chained twice in the real query (session_id, then user_id), followed by a
+              // .limit() bounding the read -- see mood.service.ts. The fake only needs to thread
+              // the session id through to look up the fixture.
+              eq: () => ({
+                limit: () => ({
+                  order: () => ({ data: opts.messages?.[sessionId] ?? [], error: null }),
+                }),
+              }),
             }),
           }),
         };

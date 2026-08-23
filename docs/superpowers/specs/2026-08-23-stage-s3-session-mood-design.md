@@ -269,6 +269,26 @@ and S1 removed every screen on which a wrongly archived fact could have been cau
 
 Left for S4's own brainstorm; the user chose on 2026-08-23 to record it and proceed with S3.
 
+**7.3 Two findings from the final whole-branch review, 2026-08-23.**
+
+- **Budget sharing has no reservation or priority between the two sweeps.** Both the mood job and
+  the enrichment sweep call `isOverBudget(..., "sweep")` against the same
+  `ENRICH_MONTHLY_BUDGET_USD` pool, with no reservation between them. Mood synthesis (a stage
+  nothing reads yet, per §6) can exhaust the budget of note enrichment (a feature the user directly
+  sees), and which one wins depends entirely on which cron happens to tick first in a given month.
+  Not worth a new environment variable for this stage, but worth stating as a known, accepted
+  tradeoff rather than leaving it implicit.
+- **A deleted or soft-deleted chat session's mood reading is never cleaned up.**
+  `mood_readings.session_id` deliberately has no FK to `chat_sessions` (see `00036`'s own comments
+  for why). If a hard-delete path is ever added for `chat_sessions`, the cascade would remove
+  `chat_messages` but leave the `mood_readings` row — which contains a natural-language summary of
+  the deleted conversation — orphaned. Separately, `chat_sessions.deleted_at` (a soft-delete column
+  that exists today but is never written by any app code) is not filtered by the claim RPC at all,
+  so a future soft-delete feature would have the sweep read and summarise sessions the user already
+  asked to delete. No delete path exists in the app today, so this is forward-looking, not an
+  active bug — recorded here so whoever adds session deletion inherits the requirement rather than
+  discovering it.
+
 ### 8. Testing
 
 This repo's recurring defect is a test that cannot fail. Each case below is listed with the change
