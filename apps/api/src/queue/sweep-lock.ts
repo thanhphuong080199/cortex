@@ -9,6 +9,13 @@ import { Client } from "pg";
  */
 export const SWEEP_LOCK_NAMESPACE = 0x434f5254; // 1129271892, comfortably inside int4
 export const SWEEP_LOCK_ID = 1;
+/**
+ * S3's hourly mood job. A DIFFERENT id from the enrichment sweep, and that is the entire point:
+ * the sweep ticks every 60 seconds and holds its lock across AI calls, so a mood job sharing id 1
+ * would lose the lock on most hours and read nothing, logging "skipped" as though that were
+ * healthy. Advisory locks are per (namespace, id), so two ids never contend.
+ */
+export const MOOD_LOCK_ID = 2;
 
 /**
  * The slice of a `pg.Client` this module needs, named as an interface so the behaviour below can
@@ -57,12 +64,13 @@ export type SweepLockOutcome<T> = { ran: true; result: T } | { ran: false };
  */
 export async function withSweepLock<T>(
   session: LockSession,
+  lockId: number,
   fn: () => Promise<T>,
 ): Promise<SweepLockOutcome<T>> {
   try {
     const res = await session.query("select pg_try_advisory_lock($1, $2) as locked", [
       SWEEP_LOCK_NAMESPACE,
-      SWEEP_LOCK_ID,
+      lockId,
     ]);
     const locked = (res.rows[0] as { locked?: unknown } | undefined)?.locked;
     // Strict `=== true`, not truthiness: node-postgres decodes `bool` to a real boolean, so
@@ -79,7 +87,7 @@ export async function withSweepLock<T>(
       // start leaking locks.
       await session.query("select pg_advisory_unlock($1, $2)", [
         SWEEP_LOCK_NAMESPACE,
-        SWEEP_LOCK_ID,
+        lockId,
       ]);
     }
   } finally {
