@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assistantInput, readCitation } from "./assistant.js";
+import { assistantInput, distillInput, readCitation } from "./assistant.js";
 
 describe("assistantInput", () => {
   it("accepts a note id alone", () => {
@@ -116,5 +116,33 @@ describe("readCitation", () => {
       type: "note", noteId: "n1", title: null, snippet: "s", score: 1, matchedBy: "fts",
       createdAt: 1_754_000_000,
     })).toMatchObject({ createdAt: null });
+  });
+});
+
+describe("distillInput", () => {
+  it("accepts an answer with an optional question", () => {
+    expect(distillInput.parse({ answer: "a" })).toEqual({ answer: "a" });
+    expect(distillInput.parse({ answer: "a", question: "q" }).question).toBe("q");
+  });
+
+  // Same cap as saveAnswerInput and createNoteInput, for the same reason that comment gives: a
+  // value acceptable through POST /notes and rejected here would be the same note failing for no
+  // reason the user can see.
+  it("caps the answer at 100_000, matching saveAnswerInput", () => {
+    expect(() => distillInput.parse({ answer: "x".repeat(100_001) })).toThrow();
+    expect(distillInput.parse({ answer: "x".repeat(100_000) }).answer).toHaveLength(100_000);
+  });
+
+  // .strict(), matching every other body in this file: the user id comes from the verified JWT
+  // and a body carrying one must be a 400, not a value the server quietly drops.
+  it("rejects an unknown key", () => {
+    expect(() => distillInput.parse({ answer: "a", userId: "u" })).toThrow();
+  });
+
+  // No sourceUrl. Distillation does not write a note -- the client sends the url to
+  // POST /notes/save-answer afterwards -- so a url here would be an unused field the server
+  // would have to be trusted not to act on.
+  it("has no sourceUrl field", () => {
+    expect(() => distillInput.parse({ answer: "a", sourceUrl: "https://example.com" })).toThrow();
   });
 });
