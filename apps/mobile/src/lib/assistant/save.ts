@@ -66,6 +66,28 @@ export async function saveStatement(a: {
 }
 
 /**
+ * Record that the assistant should stop offering this fact (C5 §12). ONLY for the automatic
+ * offer -- the manual save's "Thôi" must not call this. A decline says "do not raise this with me
+ * again"; a user who asked to keep an answer and then changed their mind said no such thing, and
+ * writing one would suppress future offers about a fact they never rejected.
+ */
+export async function declineStatement(a: {
+  apiUrl: string; token: string; statement: string; fetchFn?: typeof fetch;
+}): Promise<void> {
+  const f = a.fetchFn ?? fetch;
+  try {
+    await f(`${a.apiUrl}/assistant/decline`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${a.token}` },
+      body: JSON.stringify({ statement: a.statement }),
+    });
+  } catch {
+    // §11: "declining costs nothing" is a claim about latency as much as about writes. The box is
+    // already gone; a failed decline means it may be offered again, which is fine.
+  }
+}
+
+/**
  * The first web source on a replicated reply, which is what makes a save a 'web_search' note
  * rather than an 'assistant' one.
  *

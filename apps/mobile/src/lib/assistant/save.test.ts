@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { proposeStatement, saveStatement, webUrlOf } from "./save";
+import { declineStatement, proposeStatement, saveStatement, webUrlOf } from "./save";
 
 const ok = (body: unknown) => vi.fn().mockResolvedValue({
   ok: true, json: async () => body,
@@ -48,6 +48,23 @@ describe("saveStatement", () => {
   it("does not throw when the write fails", async () => {
     const fetchFn = vi.fn().mockRejectedValue(new Error("offline"));
     await expect(saveStatement({
+      apiUrl: "http://api", token: "t", statement: "s", fetchFn: fetchFn as unknown as typeof fetch,
+    })).resolves.toBeUndefined();
+  });
+});
+
+describe("declineStatement", () => {
+  it("posts the statement to the decline endpoint", async () => {
+    const fetchFn = ok({});
+    await declineStatement({ apiUrl: "http://api", token: "t", statement: "s", fetchFn });
+    expect(fetchFn.mock.calls[0]![0]).toBe("http://api/assistant/decline");
+    expect(JSON.parse((fetchFn.mock.calls[0]![1] as RequestInit).body as string))
+      .toEqual({ statement: "s" });
+  });
+
+  it("does not throw when the decline fails", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(new Error("offline"));
+    await expect(declineStatement({
       apiUrl: "http://api", token: "t", statement: "s", fetchFn: fetchFn as unknown as typeof fetch,
     })).resolves.toBeUndefined();
   });
