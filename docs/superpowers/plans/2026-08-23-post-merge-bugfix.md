@@ -544,12 +544,23 @@ database, not from anything in this stage.
 
 **Files:** Modify `docs/deploy.md` (the migration log at the end).
 
-- [ ] `supabase db push --local` first, and confirm the local suite is green against it.
-- [ ] Then, deliberately: `supabase db push` (no flag = hosted; this is the documented trap).
-- [ ] Confirm the hosted function's ACL: `search_notes` must be executable by `service_role`
-      and by nobody else. `create or replace` preserves it, so this is a check, not a grant.
-- [ ] Record the date and the migration in `docs/deploy.md`, matching how 00035 and 00038 are
-      recorded there.
+- [x] `supabase db push --local` first, and confirm the local suite is green against it. Done;
+      `packages/db` search-notes 24/24 against the live local function.
+- [x] Then, deliberately: `supabase db push` (no flag = hosted; this is the documented trap).
+
+      **Remote was at `00035`, not `00038`.** S3's three migrations had never been applied,
+      though `main` has carried them since 740ff90 — so `MoodModule` was deployed and failing
+      hourly against tables that did not exist. Migrations are ordered, so there is no way to
+      apply `00039` alone; all four went together, with the user's decision on the record.
+      `supabase migration list` afterwards: 39 migrations, local == remote, no drift.
+- [~] Confirm the hosted function's ACL. **Not run.** The read-only connection to the hosted
+      database was refused by the permission classifier. It is a check rather than a fix in any
+      case: `00039` is a `create or replace`, which preserves the ACL by construction — the
+      revoke/grant pair `00032` and `00035` needed existed only because `drop function` discards
+      it. The query to run by hand is in `docs/deploy.md` under the `00039` heading.
+- [x] Record the date and the migration in `docs/deploy.md`. Done, including the fact that the
+      S3 backfill count was NOT captured before the push and must be read from `usage_ledger`
+      after the fact instead.
 
 ---
 
