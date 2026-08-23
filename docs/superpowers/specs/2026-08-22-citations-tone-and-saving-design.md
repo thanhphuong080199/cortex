@@ -1,6 +1,6 @@
 # Stage S1.5: what the assistant says it knows, and what you can keep
 
-Status: designed and approved by the user on 2026-08-22. Not implemented.
+Status: implemented on 2026-08-23, not yet merged.
 
 This stage closes three of the debts stage S1 carried in from C5 (§11.1, §11.5, §11.6), one
 defect found by using the shipped shell on the same day, and one capability the user went
