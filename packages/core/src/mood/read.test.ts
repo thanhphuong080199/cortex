@@ -128,14 +128,19 @@ describe("readSessionMood", () => {
   });
 
   it("meters the call under the mood kind and the sweep source", async () => {
-    const db = fakeDb();
+    const inserted: Record<string, unknown>[] = [];
+    const db = {
+      from: () => ({
+        insert: async (row: Record<string, unknown>) => { inserted.push(row); return { error: null }; },
+      }),
+    } as never;
     const ai = fakeAi({ valence: 3, summary: "x", topics: [], confidence: 0.5 });
 
     await readSessionMood({ db, ai }, {
       userId: "u1", messages: [msg("user", "a"), msg("user", "b")],
     });
 
-    expect((db as never as ReturnType<typeof fakeDb>).inserted[0]).toMatchObject({
+    expect(inserted[0]).toMatchObject({
       user_id: "u1", kind: "mood", source: "sweep", input_tokens: 400, output_tokens: 60,
     });
   });
