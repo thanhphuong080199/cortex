@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createPgLockSession,
+  MOOD_LOCK_ID,
   SWEEP_LOCK_ID,
   SWEEP_LOCK_NAMESPACE,
   withSweepLock,
@@ -33,7 +34,7 @@ function scriptedSession(locked: unknown): LockSession & { sql: string[]; ended:
 describe("withSweepLock", () => {
   it("runs the sweep and returns its result when it wins the lock", async () => {
     const session = scriptedSession(true);
-    const outcome = await withSweepLock(session, async () => "swept");
+    const outcome = await withSweepLock(session, SWEEP_LOCK_ID, async () => "swept");
 
     expect(outcome).toEqual({ ran: true, result: "swept" });
     expect(session.sql[0]).toContain("pg_try_advisory_lock");
@@ -44,7 +45,7 @@ describe("withSweepLock", () => {
   it("does not run the sweep when another session holds the lock", async () => {
     const session = scriptedSession(false);
     const fn = vi.fn().mockResolvedValue("swept");
-    const outcome = await withSweepLock(session, fn);
+    const outcome = await withSweepLock(session, SWEEP_LOCK_ID, fn);
 
     expect(outcome).toEqual({ ran: false });
     expect(fn).not.toHaveBeenCalled();
@@ -61,14 +62,14 @@ describe("withSweepLock", () => {
     "treats a non-boolean lock result (%s) as NOT acquired",
     async (value) => {
       const fn = vi.fn();
-      expect(await withSweepLock(scriptedSession(value), fn)).toEqual({ ran: false });
+      expect(await withSweepLock(scriptedSession(value), SWEEP_LOCK_ID, fn)).toEqual({ ran: false });
       expect(fn).not.toHaveBeenCalled();
     },
   );
 
   it("releases the lock after a successful sweep", async () => {
     const session = scriptedSession(true);
-    await withSweepLock(session, async () => "ok");
+    await withSweepLock(session, SWEEP_LOCK_ID, async () => "ok");
     expect(session.sql.some((s) => s.includes("pg_advisory_unlock"))).toBe(true);
   });
 
@@ -78,7 +79,7 @@ describe("withSweepLock", () => {
   // kind of failure nobody is watching for.
   it("releases the lock when the sweep throws, and propagates the error", async () => {
     const session = scriptedSession(true);
-    await expect(withSweepLock(session, async () => { throw new Error("sweep exploded"); }))
+    await expect(withSweepLock(session, SWEEP_LOCK_ID, async () => { throw new Error("sweep exploded"); }))
       .rejects.toThrow("sweep exploded");
 
     expect(session.sql.some((s) => s.includes("pg_advisory_unlock"))).toBe(true);
@@ -92,7 +93,7 @@ describe("withSweepLock", () => {
     ["lost the lock", false],
   ])("closes the session when it %s", async (_label, locked) => {
     const session = scriptedSession(locked);
-    await withSweepLock(session, async () => "ok");
+    await withSweepLock(session, SWEEP_LOCK_ID, async () => "ok");
     expect(session.ended).toBe(1);
   });
 
@@ -102,8 +103,33 @@ describe("withSweepLock", () => {
       query: async () => { throw new Error("connection reset"); },
       end: async () => { ended++; },
     };
-    await expect(withSweepLock(session, async () => "ok")).rejects.toThrow("connection reset");
+    await expect(withSweepLock(session, SWEEP_LOCK_ID, async () => "ok")).rejects.toThrow("connection reset");
     expect(ended).toBe(1);
+  });
+
+  // The whole reason this parameter exists. The enrichment sweep ticks every 60 seconds and runs
+  // long because it awaits AI calls; an hourly job sharing its lock id would lose most hours and
+  // simply never read a session, with "sweep skipped" in the log as the only sign. Asserting on
+  // the ARGUMENTS is what rules that out -- a version that ignores lockId and always locks 1
+  // passes every other test in this file.
+  it("locks and unlocks the id it is given", async () => {
+    const calls: unknown[][] = [];
+    const session: LockSession = {
+      async query(sql: string, values?: unknown[]) {
+        calls.push(values ?? []);
+        return { rows: sql.includes("pg_try_advisory_lock") ? [{ locked: true }] : [{}] };
+      },
+      async end() {},
+    };
+
+    await withSweepLock(session, MOOD_LOCK_ID, async () => "read");
+
+    expect(calls[0]).toEqual([SWEEP_LOCK_NAMESPACE, MOOD_LOCK_ID]);
+    expect(calls[1]).toEqual([SWEEP_LOCK_NAMESPACE, MOOD_LOCK_ID]);
+  });
+
+  it("keeps the two jobs on different ids", () => {
+    expect(MOOD_LOCK_ID).not.toBe(SWEEP_LOCK_ID);
   });
 });
 
@@ -122,8 +148,8 @@ describe("advisory lock against the configured database", () => {
     // from inside that sweep -- the real shape of a redeploy overlap, where the second container
     // ticks while the first is mid-sweep, not one where both start at the same instant.
     let bOutcome: { ran: boolean } | undefined;
-    const aOutcome = await withSweepLock(a, async () => {
-      bOutcome = await withSweepLock(b, async () => "b swept");
+    const aOutcome = await withSweepLock(a, SWEEP_LOCK_ID, async () => {
+      bOutcome = await withSweepLock(b, SWEEP_LOCK_ID, async () => "b swept");
       return "a swept";
     });
 
@@ -137,12 +163,14 @@ describe("advisory lock against the configured database", () => {
   it("frees the lock for the next session once the sweep ends", async () => {
     const first = await withSweepLock(
       await createPgLockSession(process.env.DATABASE_URL!),
+      SWEEP_LOCK_ID,
       async () => "first",
     );
     expect(first).toEqual({ ran: true, result: "first" });
 
     const second = await withSweepLock(
       await createPgLockSession(process.env.DATABASE_URL!),
+      SWEEP_LOCK_ID,
       async () => "second",
     );
     expect(second).toEqual({ ran: true, result: "second" });

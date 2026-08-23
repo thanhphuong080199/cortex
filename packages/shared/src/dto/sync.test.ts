@@ -102,6 +102,7 @@ describe("SERVER_ONLY_TABLES", () => {
         "ingest_inbox",
         "integrations",
         "memory_revisions",
+        "mood_readings",
         "note_chunks",
         "note_enrichment",
         "usage_ledger",

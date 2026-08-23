@@ -2,7 +2,7 @@ import { Module, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/c
 import type { PgBoss } from "pg-boss";
 import { assertTierAllowsRealData, createGeminiAi, createServiceClient } from "@cortex/core";
 import { createBoss, startBoss, stopBoss } from "../queue/boss";
-import { createPgLockSession, withSweepLock } from "../queue/sweep-lock";
+import { createPgLockSession, SWEEP_LOCK_ID, withSweepLock } from "../queue/sweep-lock";
 import { parseApiEnv } from "../env";
 import { runSweep } from "./enrich.service";
 
@@ -45,8 +45,10 @@ export class EnrichModule implements OnModuleInit, OnApplicationShutdown {
     // queue/sweep-lock.ts for why a lock rather than `policy: 'singleton'` (which would
     // silently drop a tick whenever a sweep runs long).
     await this.boss.work(QUEUE, async () => {
-      const outcome = await withSweepLock(await createPgLockSession(env.DATABASE_URL), () =>
-        runSweep(deps),
+      const outcome = await withSweepLock(
+        await createPgLockSession(env.DATABASE_URL),
+        SWEEP_LOCK_ID,
+        () => runSweep(deps),
       );
       if (!outcome.ran) {
         // Expected during a rolling redeploy, and it must be visible: a permanently-skipping

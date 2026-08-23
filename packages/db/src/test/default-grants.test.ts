@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SERVER_ONLY_TABLES } from "@cortex/shared";
 import { admin } from "./clients.js";
 
 // Supabase's pg_default_acl grants TRUNCATE, REFERENCES, TRIGGER, and (on Postgres 17+)
@@ -10,10 +11,9 @@ import { admin } from "./clients.js";
 // privileges` for future tables) is actually in effect. Verified live before the fix:
 // both allowed_emails and integrations showed authenticated:TRUNCATE despite their
 // migration comments claiming zero grant.
-const SERVER_ONLY_TABLES = [
-  "note_chunks", "ingest_inbox", "memory_revisions",
-  "feedback_events", "integrations", "usage_ledger", "allowed_emails",
-];
+//
+// The list is imported rather than restated: a server-only table added to @cortex/shared and not
+// to this file used to be a silently unchecked table.
 
 describe("default ACL revocation (00009_revoke_default_grants.sql)", () => {
   it.each(SERVER_ONLY_TABLES)("authenticated holds no TRUNCATE on %s", async (table) => {

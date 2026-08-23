@@ -81,7 +81,7 @@ export const flashcardStatus = z.enum(["suggested", "active", "suspended"]);
 // recordUsage briefly had "extract" here, which does not appear in the constraint below, and
 // nothing caught it before the first real insert. Existing to close exactly that gap.
 export const usageLedgerKind = z.enum([
-  "embed", "chat", "tag", "digest", "memory", "transcribe", "grounding",
+  "embed", "chat", "tag", "digest", "memory", "transcribe", "grounding", "mood",
 ]);
 
 // Pinned by 00012_embedding_dims_gemini.sql and asserted against the live column width

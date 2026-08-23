@@ -42,6 +42,10 @@ export const SERVER_ONLY_TABLES = [
   "note_chunks",
   "usage_ledger",
   "integrations",
+  // S3's per-session mood readings. Server-written, server-read, and read by nothing at all
+  // today -- see the S3 spec §6. Listed here so schema.test.ts's "never declares a server-only
+  // table" assertion covers it without anyone remembering to add it.
+  "mood_readings",
   "feedback_events",
   "memory_revisions",
   "ingest_inbox",

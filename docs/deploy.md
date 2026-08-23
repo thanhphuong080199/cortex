@@ -1139,6 +1139,39 @@ missing footer would leave the function briefly `PUBLIC`-executable, not present
 Pushed to hosted 2026-08-23; `supabase migration list` confirmed local == remote through `00035`
 before and after.
 
+### Stage S3 (`00036`–`00038`)
+
+Three migrations, all additive and all safe to apply to a live project:
+
+- `00036_mood_readings.sql` — creates `mood_readings` and `mood_readings_user_end_idx` (server-only:
+  RLS on with zero policies, and `select, insert, update, delete` granted to `service_role` only —
+  no grant to anon/authenticated, so no client can reach the table regardless of policy — see the
+  file's header for why the omission is deliberate), plus the `_test_policy_count` helper used to
+  assert the zero-policy claim in tests. No new index on `chat_messages`: the existing
+  `chat_messages_session_idx` (00006) already covers the claim RPC's scan.
+- `00037_usage_kind_mood.sql` — re-states `usage_ledger_kind_check` with `'mood'` added.
+- `00038_claim_sessions_for_mood.sql` — creates the claim RPC, granted to `service_role` only.
+
+Apply to the hosted project after the PR merges:
+
+```bash
+pnpm supabase db push          # no --local: this targets HOSTED
+```
+
+**Before the first hosted run**, count what the backfill will process and record the number here,
+so the first hour's spend is a known quantity rather than a surprise:
+
+```sql
+select count(*) from (
+  select session_id from public.chat_messages
+  group by session_id
+  having max(created_at) < now() - interval '4 hours'
+) s;
+```
+
+No new environment variable. The job shares `ENRICH_MONTHLY_BUDGET_USD` with the enrichment sweep
+and is distinguishable in `usage_ledger` by `kind = 'mood'`.
+
 ### Ship log — 2026-08-12
 
 Everything that went wrong getting here — including the two defects this deploy itself
