@@ -1139,6 +1139,36 @@ missing footer would leave the function briefly `PUBLIC`-executable, not present
 Pushed to hosted 2026-08-23; `supabase migration list` confirmed local == remote through `00035`
 before and after.
 
+### Stage S3 (`00036`–`00038`)
+
+Three migrations, all additive and all safe to apply to a live project:
+
+- `00036_mood_readings.sql` — creates `mood_readings` (server-only: no policy, no grant block —
+  see the file's header for why the omission is deliberate), an index on
+  `chat_messages (session_id)`, and the `_test_policy_count` helper.
+- `00037_usage_kind_mood.sql` — re-states `usage_ledger_kind_check` with `'mood'` added.
+- `00038_claim_sessions_for_mood.sql` — creates the claim RPC, granted to `service_role` only.
+
+Apply to the hosted project after the PR merges:
+
+```bash
+pnpm supabase db push          # no --local: this targets HOSTED
+```
+
+**Before the first hosted run**, count what the backfill will process and record the number here,
+so the first hour's spend is a known quantity rather than a surprise:
+
+```sql
+select count(*) from (
+  select session_id from public.chat_messages
+  group by session_id
+  having max(created_at) < now() - interval '4 hours'
+) s;
+```
+
+No new environment variable. The job shares `ENRICH_MONTHLY_BUDGET_USD` with the enrichment sweep
+and is distinguishable in `usage_ledger` by `kind = 'mood'`.
+
 ### Ship log — 2026-08-12
 
 Everything that went wrong getting here — including the two defects this deploy itself
