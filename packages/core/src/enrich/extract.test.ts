@@ -690,6 +690,29 @@ describe("the media prompt and the mediaKind enum", () => {
   });
 });
 
+// Reported 2026-08-24: the user asked "Thường thì bơi lội kiểu nào dễ nhất?", the assistant
+// answered and asked back "Bạn định tự ra hồ bơi tập hay đăng ký một khóa học bài bản thế?",
+// and "Tôi đang định tự ra hồ bơi" -- a plain reply, no question mark -- fell into the
+// acknowledge branch and ended the conversation instead of continuing it. The classifier had no
+// rule saying that answering the ASSISTANT's own question still wants a reply.
+describe("continuing a conversation the assistant started", () => {
+  it("tells the classifier a reply to the assistant's own question also wants an answer", () => {
+    const p = buildPrompt("Tôi đang định tự tập", []);
+    expect(p).toMatch(/alsoWantsAnswer is also TRUE/i);
+    expect(p).toMatch(/even when the reply itself asks nothing/i);
+  });
+});
+
+// Same report, other half: "Thường thì bơi lội kiểu nào dễ nhất" (no "?") was not recognised as
+// a question at all on its first turn. Vietnamese casual texting routinely drops the mark.
+describe("a question with no question mark", () => {
+  it("tells the classifier Vietnamese questions can drop the question mark", () => {
+    const p = buildPrompt("bất kỳ", []);
+    expect(p).toMatch(/drop the "\?"/i);
+    expect(p).toContain("bơi lội kiểu nào dễ nhất");
+  });
+});
+
 describe("alsoWantsAnswer", () => {
   // THE OBSERVED BUG. A turn can be a fact to file AND a question in one sentence; `intent`
   // holds one value and therefore cannot say so. Without a rule naming that shape explicitly,

@@ -596,6 +596,41 @@ describe("the verification exception", () => {
   });
 });
 
+// Reported 2026-08-24: "Hôm nay chán quá" got back a flat "filed under X" and nothing else --
+// an inbox, not a conversation partner. Mutually exclusive with the two rules above: each of
+// those already owns its own follow-up shape, and a third rule stacked on top would give the
+// model two or three instructions to reconcile in one acknowledgement.
+describe("the engagement rule", () => {
+  it("asks the model to react to an ordinary statement, not just file it", () => {
+    const p = buildAcknowledgePrompt({
+      note: "hôm nay chán quá", domain: null, tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW, verify: false,
+    });
+    expect(p).toMatch(/ONE brief, natural line/i);
+    expect(p).toMatch(/never a generic/i);
+  });
+
+  // VERIFY_RULE already forbids a follow-up outright ("do not ask a follow-up"); stacking the
+  // engagement rule on top would tell the model to both never ask and always add a line.
+  it("stays off the verifying path", () => {
+    const p = buildAcknowledgePrompt({
+      note: "omega-3 chữa được cận thị", domain: null, tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW, verify: true,
+    });
+    expect(p).not.toMatch(/ONE brief, natural line/i);
+  });
+
+  // The S2 entity-gap follow-up already renders its own one-question rule. Two questions in one
+  // acknowledgement is the interview S2's followUpRule was written to avoid.
+  it("stays off the entity-gap follow-up path", () => {
+    const p = buildAcknowledgePrompt({
+      note: "hôm nay tôi mới đi xem phim", domain: "media", tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW, verify: false, askAbout: "which film, series or book it was",
+    });
+    expect(p).not.toMatch(/ONE brief, natural line/i);
+  });
+});
+
 describe("Stage S2 follow-up rule", () => {
   it("asks for the missing thing, once, when given something to ask about", () => {
     const p = buildAcknowledgePrompt({
