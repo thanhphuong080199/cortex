@@ -140,6 +140,29 @@ describe("buildAnswerPrompt", () => {
     expect(p).toMatch(/time-sensitive/i);
     expect(p).toMatch(/never present web content as the user's own/i);
   });
+
+  // Reported 2026-08-24: a web-grounded answer defaulted to US context (prices, availability)
+  // for a user who never said they were in the US -- because nothing in the prompt gave the
+  // model any location signal at all. The resolved IANA zone is already computed for the
+  // temporal rule; this is what turns it into a location signal too, rather than leaving the
+  // model to answer around a blank.
+  it("tells the model to localize using the time zone rather than default to the US", () => {
+    const p = buildAnswerPrompt({
+      question: "giá vé xem phim bao nhiêu", citations: [], history: [], timeZone: TZ, now: NOW,
+    });
+    expect(p).toContain(TZ);
+    expect(p).toMatch(/đừng mặc định.*Mỹ/i);
+  });
+
+  // A different zone must produce a different signal -- pinning only the Vietnam case would
+  // pass even if the rule hardcoded "Asia/Ho_Chi_Minh" instead of reading the parameter.
+  it("uses whatever time zone it is given, not a hardcoded one", () => {
+    const p = buildAnswerPrompt({
+      question: "q", citations: [], history: [], timeZone: "Europe/Berlin", now: NOW,
+    });
+    expect(p).toContain("Europe/Berlin");
+    expect(p).not.toContain(TZ);
+  });
 });
 
 describe("buildAcknowledgePrompt", () => {

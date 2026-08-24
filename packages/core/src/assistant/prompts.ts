@@ -152,6 +152,23 @@ const temporalRule = (now: Date, timeZone: string) =>
   "về nó như việc sắp xảy ra. Note không có ngày thì đừng đoán ngày cho nó. Riêng note hoặc " +
   "câu hỏi ở cuối cùng — cái người dùng vừa viết — là của HÔM NAY.";
 
+/**
+ * Reported 2026-08-24: a web-grounded reply defaulted to US context (prices, availability, "in
+ * the US") for a user who never said they were in the US -- because nothing in the prompt gave
+ * the model any location signal at all. `timeZone` was already resolved for the temporal rule
+ * (and defaults to Asia/Ho_Chi_Minh, this corpus's actual users), so this is what turns that
+ * value into a location signal too, rather than leaving grounding to answer around a blank.
+ *
+ * On buildAnswerPrompt only: it is the only prompt that tells the model it may search the web at
+ * all, in words. buildAcknowledgePrompt's verify branch can also ground (turn.ts's `grounds =
+ * wantsAnswer || verifies`), but carries no such permission sentence today either -- a pre-
+ * existing gap this task does not touch.
+ */
+const locationRule = (timeZone: string) =>
+  `Múi giờ của người dùng là ${timeZone}. Suy ra khu vực hoặc quốc gia của họ từ đó (và từ ngôn ` +
+  "ngữ họ dùng), và dùng nó khi câu trả lời phụ thuộc vào vị trí -- giá cả, đơn vị tiền tệ, thời " +
+  "tiết, giờ mở cửa, luật lệ, tin tức địa phương. Đừng mặc định họ đang ở Mỹ.";
+
 // `timeZone` is optional here (not on the two answer/acknowledge builders) solely so
 // buildChitchatPrompt -- which has no clock at all -- can keep calling this with one argument.
 // Its own history renders with no dates, which is correct: small talk carries no temporal rule
@@ -228,6 +245,7 @@ export function buildAnswerPrompt(a: {
     LANGUAGE_RULE,
     FORMAT_RULE,
     temporalRule(a.now, a.timeZone),
+    locationRule(a.timeZone),
     RECALL_RULE,
     // Life-domains spec §6.1. Grounding replaced the narrower rule this line used to carry: the
     // gap-filler is no longer only the model's own memory, so the disclosure rule has to name
