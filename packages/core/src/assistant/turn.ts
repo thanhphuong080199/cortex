@@ -11,6 +11,7 @@ import { CheckinService } from "../checkins/service.js";
 import { MediaService } from "../media/service.js";
 import { NoteService } from "../notes/service.js";
 import { resolveCurrentSession, selectContext, type ThreadTurn } from "./context.js";
+import { detectEntityGap } from "./follow-up.js";
 import { proposeOffer } from "./offer.js";
 import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
 import { retrieve, type Citation } from "./retrieve.js";
@@ -285,6 +286,18 @@ export async function* runTurn(
   // are read in different places is exactly how this collision was created.
   const verifies = !wantsAnswer && !isChitchat && extracted?.checkableClaim === true;
 
+  // S2 §2/§4. THE FOURTH LINK in the same ordered chain, and derived ONCE: this value both puts
+  // the rule in the prompt and decides what gets recorded as asked, so the two can never describe
+  // different questions.
+  //
+  // Every conjunct is an exclusion the design names. `!wantsAnswer` -- they asked something, so
+  // answer it. `!isChitchat` -- small talk files nothing. `!verifies` -- VERIFY_RULE forbids
+  // follow-ups outright (prompts.ts), and correcting a false claim outranks curiosity.
+  // `extracted &&` -- a degraded or timed-out extraction knows of no domain and no gap.
+  const gap = extracted && !wantsAnswer && !isChitchat && !verifies
+    ? detectEntityGap(extracted.domain, extracted.domainMeta)
+    : null;
+
   // A note that already exists, restamped after classification -- the shape 'chat' has used
   // since C1. An ordinary statement is the default branch and writes nothing: every plain
   // capture keeps the 'quick' the row was created with.
@@ -321,6 +334,7 @@ export async function* runTurn(
           // derivation, three uses -- a second condition here could disagree with the model
           // choice and produce a verification prompt running on flash-lite.
           verify: verifies,
+          ...(gap !== null ? { askAbout: gap.wants } : {}),
         });
   // Two ways onto the reasoning model and no third. `verifies` is capped by the classifier's
   // own threshold ("only when you have real reason to doubt"), so an ordinary capture is
@@ -484,7 +498,21 @@ export async function* runTurn(
     // Spread-if, so a turn that completed carries no `error` key at all rather than an explicit
     // null. A row with an `error` field on it is read by a human as evidence something went
     // wrong, and "went wrong: nothing" is a worse thing to write down than silence.
-    retrieval_meta: { requestId, incomplete, ...(streamError !== null ? { error: streamError } : {}) },
+    retrieval_meta: {
+      requestId, incomplete,
+      ...(streamError !== null ? { error: streamError } : {}),
+      // S2 §5. `asked` records an INSTRUCTION, not an observation: we told the model to ask, and
+      // whether it did is only knowable from the text. The `?` test is the honest approximation,
+      // and both of its failure directions are harmless -- a rhetorical `?` records a question
+      // nobody was asked (the next turn simply finds nothing to backfill), and a question with no
+      // `?` goes unrecorded (no backfill, nothing broken).
+      //
+      // `!incomplete`: an answer that was cut off mid-sentence may have been cut off before the
+      // question, so it must not leave one outstanding.
+      ...(gap !== null && !incomplete && answer.includes("?")
+        ? { asked: { noteId: args.noteId, field: gap.field } }
+        : {}),
+    },
   }).select("id").single();
   mark("assistant message written");
 

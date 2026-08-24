@@ -1159,6 +1159,108 @@ describe("runTurn", () => {
     expect(events.some((e) => e.type === "offer")).toBe(false);
     expect(jsonCalls, "extraction only -- proposeOffer's classify call must not run").toBe(1);
   });
+
+  /** Like `ai()`, but the reply is a question and the prompt it was built from is captured. */
+  const askingAi = (value: Record<string, unknown>, reply = "Phim gì vậy?") => {
+    const seen: string[] = [];
+    return {
+      seen,
+      client: createFakeAi({
+        generateJson: async () => ({
+          value: { intent: "statement", complexity: "simple", domain: null,
+                   domain_meta: {}, tags: [], mood: null, ...value },
+          inputTokens: 10, outputTokens: 5, model: "fake-classify",
+        }),
+        generateStream: async ({ prompt }) => {
+          seen.push(prompt);
+          return {
+            chunks: (async function* () { yield { text: reply }; })(),
+            usage: () => ({ inputTokens: 20, outputTokens: 4, model: "fake-answer" }),
+          };
+        },
+      }),
+    };
+  };
+
+  const assistantRow = (inserted: Record<string, Record<string, unknown>[]>) =>
+    (inserted.chat_messages ?? []).find((r) => r.role === "assistant");
+
+  const MEDIA_NO_TITLE = { domain: "media", domain_meta: {} };
+
+  it("asks one question when a media note names no work", async () => {
+    const { client, inserted } = dbs();
+    const { seen, client: fake } = askingAi(MEDIA_NO_TITLE);
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(seen[0]).toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta)
+      .toMatchObject({ asked: { noteId: "n1", field: "pending_item.title" } });
+  });
+
+  // We know we told the model to ask. We do not know that it did. Recording `asked` anyway would
+  // leave the next turn hunting for an answer to a question nobody was given.
+  it("records nothing when the reply contains no question at all", async () => {
+    const { client, inserted } = dbs();
+    const { client: fake } = askingAi(MEDIA_NO_TITLE, "Đã lưu.");
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  it("never asks on a turn that is correcting a false claim", async () => {
+    const { client, inserted } = dbs();
+    const { seen, client: fake } = askingAi({ ...MEDIA_NO_TITLE, checkable_claim: true });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(seen[0]).not.toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  it("never asks on a turn that answered a question", async () => {
+    const { client, inserted } = dbs();
+    const { seen, client: fake } = askingAi({ ...MEDIA_NO_TITLE, intent: "question" });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(seen[0]).not.toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  // Reachable, and not covered by the prompt builder: buildChitchatPrompt has no askAbout to
+  // pass, so the RULE could never leak there -- but the RECORD would still be written, leaving a
+  // question outstanding that nobody was asked. The guard has to be in the gap derivation.
+  it("never asks on small talk, even if the classifier called it media", async () => {
+    const { client, inserted } = dbs();
+    const { client: fake } = askingAi({ ...MEDIA_NO_TITLE, intent: "chitchat" });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  // A degraded extraction knows of no domain and therefore of no gap. Asking anyway would be the
+  // assistant inventing curiosity about a note it failed to read.
+  it("never asks when the extraction failed", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { client, inserted } = dbs();
+      const broken = createFakeAi({
+        generateJson: async () => { throw new Error("classify exploded"); },
+        generateStream: async () => ({
+          chunks: (async function* () { yield { text: "Phim gì vậy?" }; })(),
+          usage: () => null,
+        }),
+      });
+      await collect(runTurn({ userDb: client, serviceDb: client, ai: broken },
+        { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+      expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 // One recorder for the whole describe: each of these cases cares about the same three
