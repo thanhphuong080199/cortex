@@ -17,7 +17,10 @@ interface HistoryRow {
   role: string;
   content: string;
   created_at: string;
-  retrieval_meta: { incomplete?: boolean } | null;
+  retrieval_meta: {
+    incomplete?: boolean;
+    asked?: { noteId: string; field: string };
+  } | null;
 }
 
 /**
@@ -89,6 +92,14 @@ function dbs(
       if (name === "notes" && cols === "domain") {
         return chain(() => ({ data: { domain: null }, error: null }));
       }
+      // The client-supplied sessionId ownership check (runTurn, before session resolution).
+      // Always "not found": this double's `eq()` does not record its arguments, so it cannot
+      // tell a genuinely-owned id from a guessed one. Returning null here is safe because it
+      // only pushes resolution onto the "last message" probe below, which is what every test
+      // that cares about which session a turn lands in already supplies via `opts.lastMessage`.
+      if (name === "chat_sessions" && cols === "id") {
+        return chain(() => ({ data: null, error: null }));
+      }
       // The "last message" probe (session resolution). Empty by default, so a turn with no
       // `lastMessage` starts a fresh session -- which is what every test written before C4
       // assumed. `lastMessage` is what lets a test say "this user was mid-conversation".
@@ -109,7 +120,14 @@ function dbs(
             created_at: new Date().toISOString(),
             retrieval_meta: (r.retrieval_meta as HistoryRow["retrieval_meta"]) ?? null,
           }));
-          return { data: [...(opts.history ?? []), ...already], error: null };
+          // Newest first, matching the real query's `order("created_at", { ascending: false })`.
+          // runTurn now reads history[0] as "the message immediately before this turn", so a
+          // double that answered in insertion order would silently invert that.
+          return {
+            data: [...(opts.history ?? []), ...already]
+              .sort((a, b) => b.created_at.localeCompare(a.created_at)),
+            error: null,
+          };
         });
       }
       if (name === "tags" && cols?.includes("id, name")) {
@@ -1260,6 +1278,41 @@ describe("runTurn", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // S2 §7. The whole ceiling, and there is no number in it: if the message immediately before
+  // this turn asked something, this turn does not ask -- whether or not it was answered.
+  it("does not ask again on the turn right after a question", async () => {
+    const { client, inserted } = dbs({
+      history: [{
+        role: "assistant", content: "Phim gì vậy?", created_at: "2026-08-24T10:00:00.000Z",
+        retrieval_meta: { asked: { noteId: "n0", field: "pending_item.title" } },
+      }],
+      lastMessage: { session_id: "s1", created_at: "2026-08-24T10:00:00.000Z" },
+    });
+    const { seen, client: fake } = askingAi(MEDIA_NO_TITLE);
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    expect(seen[0]).not.toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  // The other side of the same condition: an ordinary prior exchange does not suppress a question.
+  it("still asks when the previous turn asked nothing", async () => {
+    const { client, inserted } = dbs({
+      history: [{
+        role: "assistant", content: "Đã lưu.", created_at: "2026-08-24T10:00:00.000Z",
+        retrieval_meta: { incomplete: false },
+      }],
+      lastMessage: { session_id: "s1", created_at: "2026-08-24T10:00:00.000Z" },
+    });
+    const { seen, client: fake } = askingAi(MEDIA_NO_TITLE);
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    expect(seen[0]).toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta).toHaveProperty("asked");
   });
 });
 

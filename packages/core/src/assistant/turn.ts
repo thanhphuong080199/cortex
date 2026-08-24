@@ -139,6 +139,22 @@ export async function* runTurn(
     .eq("session_id", sessionId).order("created_at", { ascending: false }).limit(40);
   mark("session+history resolved");
 
+  // S2 §6/§7. `[0]`, NEVER `find()`. The query is `created_at desc` and it runs before this
+  // turn's own message is written, so [0] is the message immediately before this one. Restricting
+  // an answer to the very next turn is what makes "ask once, never nag" STRUCTURAL: a user who
+  // says something else has ended it, with no counter to decrement and no timeout to expire.
+  //
+  // It is also the entire ceiling. One condition covers both halves of what the design asks for
+  // -- never while a question is outstanding, and never two turns running -- with no invented
+  // number in it.
+  const previousMessage = ((historyRows ?? []) as {
+    role: string;
+    retrieval_meta: { asked?: { noteId: string; field: string } } | null;
+  }[])[0];
+  const pendingAsk = previousMessage?.role === "assistant"
+    ? previousMessage.retrieval_meta?.asked ?? null
+    : null;
+
   await userDb.from("chat_messages")
     .insert({ user_id: args.userId, session_id: sessionId, role: "user", content: text });
   mark("user message written");
@@ -294,7 +310,10 @@ export async function* runTurn(
   // answer it. `!isChitchat` -- small talk files nothing. `!verifies` -- VERIFY_RULE forbids
   // follow-ups outright (prompts.ts), and correcting a false claim outranks curiosity.
   // `extracted &&` -- a degraded or timed-out extraction knows of no domain and no gap.
-  const gap = extracted && !wantsAnswer && !isChitchat && !verifies
+  //
+  // `pendingAsk === null` is the ceiling (§7): the turn after a question never asks another,
+  // whether this turn answered it or ignored it.
+  const gap = extracted && !wantsAnswer && !isChitchat && !verifies && pendingAsk === null
     ? detectEntityGap(extracted.domain, extracted.domainMeta)
     : null;
 
