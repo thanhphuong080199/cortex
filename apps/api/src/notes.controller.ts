@@ -58,6 +58,7 @@ export class NotesController {
       userId: user.id,
       statement: body.statement,
       ...(body.sourceUrl !== undefined ? { sourceUrl: body.sourceUrl } : {}),
+      ...(body.forMessageId !== undefined ? { forMessageId: body.forMessageId } : {}),
     });
   }
 }

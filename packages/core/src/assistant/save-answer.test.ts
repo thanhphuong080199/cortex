@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { buildSavedAnswerRow } from "./save-answer.js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { describe, expect, it, vi } from "vitest";
+import { buildSavedAnswerRow, saveAnswer } from "./save-answer.js";
 
 describe("buildSavedAnswerRow", () => {
   // The source type carries the provenance the retrieval ranking keys on. search_notes
@@ -41,5 +42,91 @@ describe("buildSavedAnswerRow", () => {
     expect(Object.keys(row).sort()).toEqual(
       ["content", "lifecycle", "source_meta", "source_type", "user_id"],
     );
+  });
+});
+
+/**
+ * A minimal double covering exactly the two tables `saveAnswer` touches: `notes.insert(...)
+ * .select("id").single()`, and, only when `forMessageId` is given, `chat_messages.select(...)
+ * .eq().maybeSingle()` followed by `.update(...).eq()`. `marks` records every `chat_messages`
+ * update so a test can assert what was written and to which row, the same shape turn.test.ts's
+ * `dbs()` double uses for the same reason.
+ */
+function fakeDb(opts: { existingMeta?: Record<string, unknown> | null; failSelect?: boolean } = {}) {
+  const marks: { row: Record<string, unknown>; id: unknown }[] = [];
+  const client = {
+    from(table: string) {
+      if (table === "notes") {
+        return {
+          insert: () => ({
+            select: () => ({ single: async () => ({ data: { id: "note-1" }, error: null }) }),
+          }),
+        };
+      }
+      if (table === "chat_messages") {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => {
+                if (opts.failSelect) throw new Error("select boom");
+                return { data: { retrieval_meta: opts.existingMeta ?? null }, error: null };
+              },
+            }),
+          }),
+          update: (row: Record<string, unknown>) => ({
+            eq: async (_col: string, id: unknown) => {
+              marks.push({ row, id });
+              return { data: null, error: null };
+            },
+          }),
+        };
+      }
+      throw new Error(`fakeDb: unexpected table ${table}`);
+    },
+  } as unknown as SupabaseClient;
+  return { client, marks };
+}
+
+describe("saveAnswer", () => {
+  // The common case: an offer or a manual save whose caller has no chat_messages id to give
+  // (the "live" reply, streaming before its own row exists -- see assistant-box.tsx). No id
+  // means no attempt, not a call with an undefined id.
+  it("writes nothing to chat_messages when there is no message to link", async () => {
+    const { client, marks } = fakeDb();
+    const result = await saveAnswer(client, { userId: "u1", statement: "s" });
+    expect(result).toEqual({ id: "note-1" });
+    expect(marks).toEqual([]);
+  });
+
+  // THE DELIVERABLE: the message the save came from is marked with the note it produced.
+  it("marks the source message with the new note's id", async () => {
+    const { client, marks } = fakeDb();
+    await saveAnswer(client, { userId: "u1", statement: "s", forMessageId: "m1" });
+    expect(marks).toEqual([{ row: { retrieval_meta: { savedAnswerNoteId: "note-1" } }, id: "m1" }]);
+  });
+
+  // PostgREST replaces the whole jsonb column on a bare update -- a version that skipped the
+  // read and wrote only `{ savedAnswerNoteId }` would erase `requestId` and every other key
+  // turn.ts already put there, silently, on every save.
+  it("merges into the message's existing retrieval_meta rather than replacing it", async () => {
+    const { client, marks } = fakeDb({ existingMeta: { requestId: "r1", incomplete: false } });
+    await saveAnswer(client, { userId: "u1", statement: "s", forMessageId: "m1" });
+    expect(marks[0]!.row.retrieval_meta).toEqual({
+      requestId: "r1", incomplete: false, savedAnswerNoteId: "note-1",
+    });
+  });
+
+  // Best-effort: the note is already written by the time this runs, and it is the actual
+  // deliverable the user asked for. A failed link must not turn a successful save into a
+  // failed one.
+  it("still returns the saved note when marking the message fails", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { client } = fakeDb({ failSelect: true });
+      const result = await saveAnswer(client, { userId: "u1", statement: "s", forMessageId: "m1" });
+      expect(result).toEqual({ id: "note-1" });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

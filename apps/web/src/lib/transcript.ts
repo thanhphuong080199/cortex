@@ -53,7 +53,9 @@ export async function fetchOlderTurns(
 
   const rows = (data ?? []) as {
     id: string; role: string; content: string;
-    citations: unknown; retrieval_meta: { incomplete?: boolean } | null; created_at: string;
+    citations: unknown;
+    retrieval_meta: { incomplete?: boolean; savedAnswerNoteId?: string } | null;
+    created_at: string;
   }[];
 
   return {
@@ -66,6 +68,7 @@ export async function fetchOlderTurns(
         .map(readCitation)
         .filter((c): c is AnyCitation => c !== null),
       incomplete: row.retrieval_meta?.incomplete === true,
+      savedAsNote: row.retrieval_meta?.savedAnswerNoteId !== undefined,
     })),
     hasMore: rows.length === PAGE_SIZE,
   };

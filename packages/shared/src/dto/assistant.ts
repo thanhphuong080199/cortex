@@ -49,6 +49,13 @@ export const saveAnswerInput = z
   .object({
     statement: z.string().min(1).max(100_000),
     sourceUrl: z.string().url().max(2048).optional(),
+    /**
+     * The `chat_messages` row this save came from, when the caller has a real one -- both
+     * clients' save controls carry the turn's own id (S1.5 §4). Absent, never trusted beyond
+     * "try to link it": the write it enables is best-effort and RLS-scoped, and a wrong or
+     * missing id costs the "already saved" indicator on reload, never the save itself.
+     */
+    forMessageId: z.string().uuid().optional(),
   })
   .strict();
 

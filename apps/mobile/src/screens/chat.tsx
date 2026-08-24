@@ -21,6 +21,15 @@ import { themeFor } from "../theme";
 const RETIRE_TIMEOUT_MS = 8_000;
 
 /**
+ * Whether `id` is a real `chat_messages.id` (a Postgres `gen_random_uuid()`) rather than one of
+ * transcript.ts's own placeholders for the still-streaming turn -- `live-${noteId}` and
+ * `live-answer-${noteId}`. Only a real id can be sent as `forMessageId`: the server would
+ * otherwise try to mark a row that does not exist, harmlessly but pointlessly.
+ */
+const isRealMessageId = (id: string): boolean =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+/**
  * The whole app. Until 2026-08-22 this screen was a note list with the chat box wedged in as
  * its ListHeaderComponent -- which is why every Maestro flow had to scroll past a header taller
  * than the viewport to reach anything.
@@ -114,10 +123,12 @@ export function Chat() {
     { forId: string; statement: string; sourceUrl?: string } | null
   >(null);
   const [proposing, setProposing] = useState<string | null>(null);
-  // Which replies have already been kept. Client-side and per-session, same as web: a durable
-  // flag needs a column on chat_messages and a link back from the saved note, which is out of
-  // scope for this fix. Before this, saving changed nothing on screen and the control went on
-  // offering the same save forever.
+  // Which replies have been kept THIS SESSION -- the optimistic half. The durable half is
+  // `item.savedAsNote`, read straight off `retrieval_meta.savedAnswerNoteId` (transcript.ts),
+  // which PowerSync replicates down like any other write once save-answer.ts marks the source
+  // message. `saved` alone used to be the whole story, and forgot every save on app restart
+  // (reported 2026-08-24, same defect web had) -- this Set now only needs to cover the gap
+  // between "saved" and "PowerSync has synced that write back down".
   const [saved, setSaved] = useState<ReadonlySet<string>>(new Set());
   const bottomInset = useComposerInset();
 
@@ -151,6 +162,10 @@ export function Chat() {
       token: session.access_token,
       statement: p.statement,
       ...(p.sourceUrl !== undefined ? { sourceUrl: p.sourceUrl } : {}),
+      // Only when `forId` is a real chat_messages id -- `live-...`/`live-answer-...` (the
+      // still-streaming turn, see transcript.ts) have none yet. The save still succeeds; it just
+      // cannot be marked durably until a replicated row exists to mark.
+      ...(isRealMessageId(p.forId) ? { forMessageId: p.forId } : {}),
     });
   }
 
@@ -188,7 +203,9 @@ export function Chat() {
             <Row
               item={item}
               proposing={proposing === item.id}
-              saved={saved.has(item.id)}
+              // The durable half (item.savedAsNote, from retrieval_meta) or the optimistic half
+              // (saved, set the instant this session's own onConfirm fires) -- either is enough.
+              saved={saved.has(item.id) || (item.kind === "message" && item.savedAsNote)}
               // Rendered inside the row it names, not below the list. See `proposal`'s
               // declaration for what that fixed.
               proposal={proposal?.forId === item.id ? proposal : null}

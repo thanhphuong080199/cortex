@@ -21,6 +21,17 @@ const webUrlOf = (citations: AnyCitation[]): string | undefined =>
   citations.find((c): c is WebCitation => c.type === "web")?.url;
 
 /**
+ * Whether `id` is a real `chat_messages.id` (a Postgres `gen_random_uuid()`) rather than one of
+ * this file's own placeholders -- `"live"` (saveControl's key for the still-streaming reply),
+ * `pending-${t0}` (the optimistic user bubble), or `local-${Date.now()}` (settleWithoutDone's
+ * flush of an interrupted stream with no `done` event, so no server id was ever issued). Only a
+ * real id can be sent as `forMessageId`: the server would otherwise try to mark a row that does
+ * not exist, harmlessly but pointlessly.
+ */
+const isRealMessageId = (id: string): boolean =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+/**
  * One row of chat_messages, ready to render. Built in page.tsx, where the jsonb `citations`
  * column is read through readCitation -- the single place a pre-C3 entry with no `type` key
  * becomes a note citation, and a malformed one is dropped rather than taking the transcript
@@ -33,6 +44,12 @@ export interface TranscriptTurn {
   citations: AnyCitation[];
   /** retrieval_meta.incomplete: the stream died mid-answer. Shown, never hidden. */
   incomplete: boolean;
+  /**
+   * retrieval_meta.savedAnswerNoteId is set. Seeds `saved` on load and after pagination -- see
+   * this file's `saved` state doc -- so a reply already kept does not offer "Lưu câu trả lời"
+   * again after a reload (reported 2026-08-24).
+   */
+  savedAsNote: boolean;
   /** ISO. Feeds the day separators (Task 4) and the pagination cursor (Task 5). */
   createdAt: string;
 }
@@ -115,7 +132,14 @@ export function AssistantBox(
   // NOT reset by flushLiveIntoTurns: unlike attached/citations/web/answer, the offer must
   // survive the hand-off into `turns` -- it is the whole point of the row, and it disappears
   // only when the user acts on it (accept/decline) or the next submit() starts.
-  const [offer, setOffer] = useState<Offer | null>(null);
+  //
+  // `messageId` is NOT part of the wire `Offer` -- the server emits the offer (turn.ts) before
+  // it has written the chat_messages row the offer is about, so there is no id to send at that
+  // point. It is patched in here once `done` supplies one (below), so acceptOffer can link the
+  // save back to the reply it came from -- without it, accepting an offer left that reply's own
+  // "Lưu câu trả lời" control still offering the same save (reported together with the reload
+  // defect, 2026-08-24: same root cause, one control earlier).
+  const [offer, setOffer] = useState<(Offer & { messageId?: string }) | null>(null);
   // The MANUAL save, distinct from `offer` above in both direction and meaning: `offer` is the
   // assistant proposing something unasked, this is the user asking. They can be on screen at the
   // same time, on the same reply, which is why the two boxes are labelled differently rather than
@@ -124,12 +148,18 @@ export function AssistantBox(
     { forId: string; statement: string; sourceUrl?: string } | null
   >(null);
   const [proposing, setProposing] = useState<string | null>(null);
-  // Which turns the user has already kept an answer from, by turn id. Client-side and
-  // per-session on purpose: a durable flag would need a column on chat_messages and a link back
-  // from the saved note to the message it came from, which is a bigger change than the reported
-  // defect and is recorded as out of scope in the design doc. Within a session it is exactly
-  // what the user asked for -- a way to tell that this one is done.
-  const [saved, setSaved] = useState<ReadonlySet<string>>(new Set());
+  // Which turns the user has already kept an answer from, by turn id. Used to be client-side and
+  // per-session ONLY, which forgot every save on reload (reported 2026-08-24) -- durable now via
+  // retrieval_meta.savedAnswerNoteId (save-answer.ts's markMessageSaved), seeded below. This Set
+  // still exists for the gap a durable flag cannot cover on its own: the instant BETWEEN a save
+  // and the next reload, before the server round trip that would prove it even resolves.
+  const [saved, setSaved] = useState<ReadonlySet<string>>(
+    // Seeded from the server's own record of what was saved (retrieval_meta.savedAnswerNoteId,
+    // set by save-answer.ts), not just the empty set a fresh session used to start from -- that
+    // omission is exactly what made "Lưu câu trả lời" reappear on every reload (reported
+    // 2026-08-24) for a reply that had, in fact, already been kept.
+    () => new Set((initialTurns ?? []).filter((t) => t.savedAsNote).map((t) => t.id)),
+  );
   // The note whose turn died before producing anything, so the hint can offer to run it again.
   // Null whenever there is nothing to retry, which is almost always.
   //
@@ -209,6 +239,11 @@ export function AssistantBox(
     try {
       const { turns: older, hasMore: stillMore } = await fetchOlder(oldest.createdAt);
       setTurns((prev) => [...older, ...prev]);
+      // Same seeding loadOlder's caller (initialTurns) already gets -- a page loaded further
+      // back in the thread must carry the same "already saved" evidence, or scrolling up would
+      // un-save every reply that scrolls into view.
+      const nowSaved = older.filter((t) => t.savedAsNote).map((t) => t.id);
+      if (nowSaved.length > 0) setSaved((prev) => new Set([...prev, ...nowSaved]));
       setMore(stillMore);
       requestAnimationFrame(() => { el.scrollTop = el.scrollHeight - heightBefore; });
     } catch {
@@ -262,7 +297,7 @@ export function AssistantBox(
     const tempId = `pending-${t0}`;
     setTurns((prev) => [...prev, {
       id: tempId, role: "user", content: pendingText, citations: [], incomplete: false,
-      createdAt: new Date().toISOString(),
+      savedAsNote: false, createdAt: new Date().toISOString(),
     }]);
     setText("");
     // The user just pressed Send; their own bubble must be visible. Explicit now that `turns`
@@ -323,8 +358,24 @@ export function AssistantBox(
         content: answerRef.current,
         citations: [...citationsRef.current, ...(webRef.current?.sources ?? [])],
         incomplete,
+        // Never true here: this turn has no server-persisted retrieval_meta yet, so it cannot
+        // yet be marked FROM the server. A save made while it was still "live" is carried across
+        // through `saved` below instead, keyed on the real id from this point on.
+        savedAsNote: false,
         createdAt: new Date().toISOString(),
       }]);
+      // The reply just moved from being rendered under the "live" key (saveControl("live", ...))
+      // to being rendered under its real id -- see the render below. Without this, a reply saved
+      // WHILE STREAMING loses its "Đã lưu" the instant the stream finishes: `saved` still holds
+      // "live", nothing holds `id`, and saveControl reads `saved.has(id)`. Reported together with
+      // the reload defect (2026-08-24) -- same root cause, one turn earlier.
+      setSaved((prev) => {
+        if (!prev.has("live")) return prev;
+        const next = new Set(prev);
+        next.delete("live");
+        next.add(id);
+        return next;
+      });
       setAttached(null);
       setAnswer("");
       setCitations([]);
@@ -439,10 +490,11 @@ export function AssistantBox(
           mark("event: done");
           sawDone = true;
           const d = ev.data as { messageId?: unknown };
-          flushLiveIntoTurns(
-            typeof d.messageId === "string" && d.messageId !== "" ? d.messageId : `local-${Date.now()}`,
-            false,
-          );
+          const id = typeof d.messageId === "string" && d.messageId !== "" ? d.messageId : `local-${Date.now()}`;
+          flushLiveIntoTurns(id, false);
+          // See `offer`'s declaration: this is the first point a real id exists for the offer
+          // (if any) to carry. A no-op when there is no offer on screen.
+          setOffer((o) => (o ? { ...o, messageId: id } : o));
         }
       }
 
@@ -465,8 +517,17 @@ export function AssistantBox(
   // Cleared immediately -- optimistic, same as the rest of this box's saves. A failed write
   // here costs the user one skipped note, not their answer or their transcript, so there is
   // nothing worth rolling the UI back to.
-  async function acceptOffer(o: Offer) {
+  async function acceptOffer(o: Offer & { messageId?: string }) {
     setOffer(null);
+    // Marked the same way confirmSave marks a manual save: optimistically, before the write.
+    // Without this, accepting an offer left the SAME reply's own "Lưu câu trả lời" control
+    // still offering the identical save -- the offer row disappeared, but the button under the
+    // reply it was about did not know anything had happened (reported 2026-08-24, alongside the
+    // reload defect this shares a root cause with). No-op when `messageId` never arrived --
+    // see `offer`'s declaration for when that happens.
+    if (o.messageId !== undefined) {
+      setSaved((prev) => new Set(prev).add(o.messageId!));
+    }
     try {
       await fetch(`${process.env.NEXT_PUBLIC_API_URL}/notes/save-answer`, {
         method: "POST",
@@ -474,6 +535,7 @@ export function AssistantBox(
         body: JSON.stringify({
           statement: o.statement,
           ...(o.sourceUrl !== undefined ? { sourceUrl: o.sourceUrl } : {}),
+          ...(o.messageId !== undefined ? { forMessageId: o.messageId } : {}),
         }),
       });
     } catch {
@@ -558,6 +620,10 @@ export function AssistantBox(
         body: JSON.stringify({
           statement: p.statement,
           ...(p.sourceUrl !== undefined ? { sourceUrl: p.sourceUrl } : {}),
+          // Only when `forId` is a real chat_messages id -- see isRealMessageId's doc. "live" (a
+          // reply saved while still streaming) has none yet; the save still succeeds, it just
+          // cannot be marked durably until a reply exists to mark.
+          ...(isRealMessageId(p.forId) ? { forMessageId: p.forId } : {}),
         }),
       });
     } catch {
