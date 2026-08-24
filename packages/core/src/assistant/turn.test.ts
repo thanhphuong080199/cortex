@@ -47,6 +47,8 @@ function dbs(
     failInsertOn?: string;
     mediaItem?: { id: string; title: string; kind: string };
     lastMessage?: { session_id: string; created_at: string };
+    /** Simulates the backfill's own `.is()` filters legitimately matching zero rows. */
+    backfillRejected?: boolean;
   } = {},
 ) {
   const inserted: Record<string, Record<string, unknown>[]> = {};
@@ -171,6 +173,17 @@ function dbs(
       // never carry domain: "media", so this branch is otherwise unreached) falls through to the
       // generic case below rather than crashing on `.id`.
       if (name === "notes" && "media_item_id" in row) {
+        // Task 6's backfill write carries `media_item_id` ALONE; resolveNoteMediaLink's write
+        // carries `domain_meta` too. That key is the only signal this double has for telling
+        // the two calls apart, since both target "notes" with an update() naming
+        // `media_item_id` -- and it's what lets `opts.backfillRejected` simulate the backfill's
+        // own filters (.is("deleted_at", null), .is("media_item_id", null)) legitimately
+        // matching zero rows, independently of whether the CURRENT note's own link write
+        // (resolveNoteMediaLink) succeeds.
+        const isBackfill = !("domain_meta" in row);
+        if (isBackfill && opts.backfillRejected) {
+          return chain(() => ({ data: null, error: null }), sink);
+        }
         const noteRow = opts.note === undefined ? NOTE : opts.note;
         return chain(() => (
           noteRow ? { data: { id: noteRow.id }, error: null } : { data: null, error: null }
@@ -1381,6 +1394,19 @@ describe("runTurn", () => {
       { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
 
     expect(assistantRow(inserted)?.retrieval_meta).toMatchObject({ answeredAsk: true });
+  });
+
+  // The exact race the two `.is()` filters exist to protect: the write is legitimately
+  // rejected (the note was trashed mid-conversation, or a concurrent request already linked
+  // it) and PostgREST returns `error: null` regardless -- a zero-row match is not an error.
+  // `answeredAsk` must track whether a row actually moved, not merely whether the call threw.
+  it("does not record answeredAsk when the backfill write matches zero rows", async () => {
+    const { client, inserted } = dbs({ ...answeringHistory(), backfillRejected: true });
+    const { client: fake } = askingAi(MEDIA_WITH_TITLE, "Hay đấy!");
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("answeredAsk");
   });
 
   // No question outstanding means no backfill, however media-ish the note is. Only n1 is linked.

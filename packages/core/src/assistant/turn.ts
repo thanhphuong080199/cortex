@@ -246,14 +246,21 @@ export async function* runTurn(
   // saved; a failed link must not retroactively fail a turn that succeeded.
   let backfilled = false;
   if (pendingAsk !== null && mediaItemId !== undefined && pendingAsk.noteId !== args.noteId) {
-    const { error } = await userDb.from("notes")
+    // `.select("id").maybeSingle()`, matching resolveNoteMediaLink's own update+select
+    // (media/service.ts): PostgREST returns `error: null` even when the two `.is()` filters
+    // above correctly reject the write -- the note was trashed mid-conversation, or a
+    // concurrent request already linked it. `error` alone cannot tell "linked" from
+    // "correctly refused"; only a returned row proves the UPDATE touched something, which is
+    // what `answeredAsk` must be conditioned on to stay an honest measurement.
+    const { data, error } = await userDb.from("notes")
       .update({ media_item_id: mediaItemId })
       .eq("id", pendingAsk.noteId)
       .is("deleted_at", null)      // a note trashed mid-conversation must not be linked
-      .is("media_item_id", null);  // and an existing link is never overwritten
+      .is("media_item_id", null)   // and an existing link is never overwritten
+      .select("id").maybeSingle();
     if (error) {
       console.error(`[assistant] follow-up backfill failed (request ${requestId}): ${error.message}`);
-    } else {
+    } else if (data !== null) {
       backfilled = true;
     }
     mark("follow-up backfilled");
