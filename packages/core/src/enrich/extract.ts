@@ -153,7 +153,7 @@ export function buildPrompt(
     "- alsoWantsAnswer is also TRUE when you asked a question in the exchange shown at the end",
     "  and this note is replying to it, even when the reply itself asks nothing -- \"Bạn định",
     "  tự tập hay đăng ký khóa học?\" followed by \"Tôi đang định tự tập\" still wants a reply,",
-    "  because the conversation you started is still going. Keep intent \"statement\" unless",
+    "  because they are still answering something you asked. Keep intent \"statement\" unless",
     "  this note is also, itself, a question.",
     "- checkable_claim is TRUE only when the note asserts something factual about the world",
     "  that you have real reason to DOUBT — \"omega-3 chữa được cận thị\", \"uống nước đá gây",
