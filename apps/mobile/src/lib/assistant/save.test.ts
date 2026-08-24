@@ -51,6 +51,25 @@ describe("saveStatement", () => {
       apiUrl: "http://api", token: "t", statement: "s", fetchFn: fetchFn as unknown as typeof fetch,
     })).resolves.toBeUndefined();
   });
+
+  // S1.5 §4's durable half (reported 2026-08-24): the caller sends the chat_messages id this
+  // save came from, so the server can mark that message saved and the control survives an app
+  // restart -- see save-answer.ts's markMessageSaved.
+  it("posts forMessageId when the caller has a real one", async () => {
+    const fetchFn = ok({ id: "n1" });
+    await saveStatement({
+      apiUrl: "http://api", token: "t", statement: "s", forMessageId: "m1", fetchFn,
+    });
+    expect(JSON.parse((fetchFn.mock.calls[0]![1] as RequestInit).body as string))
+      .toEqual({ statement: "s", forMessageId: "m1" });
+  });
+
+  it("omits forMessageId entirely when the caller has none", async () => {
+    const fetchFn = ok({ id: "n1" });
+    await saveStatement({ apiUrl: "http://api", token: "t", statement: "s", fetchFn });
+    expect(JSON.parse((fetchFn.mock.calls[0]![1] as RequestInit).body as string))
+      .toEqual({ statement: "s" });
+  });
 });
 
 describe("declineStatement", () => {

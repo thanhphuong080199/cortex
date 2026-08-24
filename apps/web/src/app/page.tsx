@@ -41,7 +41,9 @@ export default async function Home() {
   const turns: TranscriptTurn[] = [...rows].reverse().map((m) => {
     const row = m as {
       id: string; role: string; content: string;
-      citations: unknown; retrieval_meta: { incomplete?: boolean } | null; created_at: string;
+      citations: unknown;
+      retrieval_meta: { incomplete?: boolean; savedAnswerNoteId?: string } | null;
+      created_at: string;
     };
     return {
       id: row.id,
@@ -55,6 +57,9 @@ export default async function Home() {
         .map(readCitation)
         .filter((c): c is AnyCitation => c !== null),
       incomplete: row.retrieval_meta?.incomplete === true,
+      // Seeds `saved` in AssistantBox so a reply already kept does not offer "Lưu câu trả lời"
+      // again after a reload -- reported 2026-08-24, see save-answer.ts's markMessageSaved.
+      savedAsNote: row.retrieval_meta?.savedAnswerNoteId !== undefined,
     };
   });
 

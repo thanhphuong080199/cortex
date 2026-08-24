@@ -167,6 +167,25 @@ describe("buildTranscript", () => {
     expect(items.filter((i) => i.kind === "message").every((m) => m.incomplete === false)).toBe(true);
   });
 
+  // Reported 2026-08-24: the manual save control forgot it had already been used, on every app
+  // restart -- `saved` in chat.tsx was `useState` alone, same defect web had. Once the server
+  // marks the source message (save-answer.ts's markMessageSaved), PowerSync replicates the write
+  // down like any other, so a row read here can already carry the answer.
+  it("marks a message saved from retrieval_meta", () => {
+    const items = buildTranscript([
+      row({ id: "a", created_at: "2026-08-22T02:00:00.000Z", role: "assistant",
+            content: "Cá hồi.", retrieval_meta: '{"savedAnswerNoteId":"n9"}' }),
+    ], null, now, tz);
+    expect(items.find((i) => i.kind === "message")).toMatchObject({ savedAsNote: true });
+  });
+
+  it("does not mark a message saved when nothing was saved from it", () => {
+    const items = buildTranscript([
+      row({ id: "a", created_at: "2026-08-22T02:00:00.000Z", retrieval_meta: null }),
+    ], null, now, tz);
+    expect(items.find((i) => i.kind === "message")).toMatchObject({ savedAsNote: false });
+  });
+
   // Every FlatList key comes from here. Two identical keys is a silent render bug in React.
   it("gives every item a unique id", () => {
     const items = buildTranscript([

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assistantInput, distillInput, readCitation } from "./assistant.js";
+import { assistantInput, distillInput, readCitation, saveAnswerInput } from "./assistant.js";
 
 describe("assistantInput", () => {
   it("accepts a note id alone", () => {
@@ -116,6 +116,26 @@ describe("readCitation", () => {
       type: "note", noteId: "n1", title: null, snippet: "s", score: 1, matchedBy: "fts",
       createdAt: 1_754_000_000,
     })).toMatchObject({ createdAt: null });
+  });
+});
+
+describe("saveAnswerInput", () => {
+  it("accepts a statement alone", () => {
+    expect(saveAnswerInput.safeParse({ statement: "s" }).success).toBe(true);
+  });
+
+  // S1.5's save controls both send the id of the chat_messages row the save came from, so the
+  // server can mark that message saved and the button survives a reload -- see save-answer.ts.
+  it("accepts an optional forMessageId, which must be a uuid", () => {
+    const id = crypto.randomUUID();
+    expect(saveAnswerInput.safeParse({ statement: "s", forMessageId: id }))
+      .toMatchObject({ success: true, data: { forMessageId: id } });
+    expect(saveAnswerInput.safeParse({ statement: "s", forMessageId: "not-a-uuid" }).success)
+      .toBe(false);
+  });
+
+  it("rejects an unknown key", () => {
+    expect(saveAnswerInput.safeParse({ statement: "s", userId: "u" }).success).toBe(false);
   });
 });
 

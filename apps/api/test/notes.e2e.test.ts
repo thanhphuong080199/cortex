@@ -101,4 +101,59 @@ describe("POST /notes/save-answer", () => {
       .send({ statement: "x", userId: "00000000-0000-4000-8000-000000000000" })
       .expect(400);
   });
+
+  // The durable half of the save controls (S1.5 §4, reported 2026-08-24: the "already saved"
+  // indicator forgot itself on every reload). Real Postgres, real RLS, real jsonb merge -- the
+  // unit test's fake db proves the JS logic, this proves the actual read-modify-write survives
+  // PostgREST.
+  it("marks the source chat_messages row when forMessageId is given, merging into its retrieval_meta", async () => {
+    const { data: session } = await admin
+      .from("chat_sessions").insert({ user_id: alice.id }).select("id").single();
+    const { data: message } = await admin
+      .from("chat_messages")
+      .insert({
+        user_id: alice.id, session_id: (session as { id: string }).id,
+        role: "assistant", content: "Cá hồi giàu omega-3.",
+        retrieval_meta: { requestId: "r1" },
+      })
+      .select("id").single();
+
+    const res = await request(app.getHttpServer())
+      .post("/notes/save-answer")
+      .set(auth(alice.token))
+      .send({ statement: "Omega-3 có trong cá hồi.", forMessageId: (message as { id: string }).id })
+      .expect(201);
+
+    const { data: marked } = await admin
+      .from("chat_messages").select("retrieval_meta")
+      .eq("id", (message as { id: string }).id).single();
+    expect((marked as { retrieval_meta: unknown }).retrieval_meta)
+      .toEqual({ requestId: "r1", savedAnswerNoteId: res.body.id });
+  });
+
+  // Someone else's message id must not be markable through this endpoint -- RLS on
+  // chat_messages, exercised through the caller's own client, is what proves that, not a body
+  // check the server would have to remember to add.
+  it("does not mark another user's message, and still saves the note", async () => {
+    const { data: session } = await admin
+      .from("chat_sessions").insert({ user_id: bob.id }).select("id").single();
+    const { data: message } = await admin
+      .from("chat_messages")
+      .insert({
+        user_id: bob.id, session_id: (session as { id: string }).id,
+        role: "assistant", content: "Của Bob.", retrieval_meta: { requestId: "r2" },
+      })
+      .select("id").single();
+
+    await request(app.getHttpServer())
+      .post("/notes/save-answer")
+      .set(auth(alice.token))
+      .send({ statement: "Alice cố lưu vào tin nhắn của Bob.", forMessageId: (message as { id: string }).id })
+      .expect(201);
+
+    const { data: untouched } = await admin
+      .from("chat_messages").select("retrieval_meta")
+      .eq("id", (message as { id: string }).id).single();
+    expect((untouched as { retrieval_meta: unknown }).retrieval_meta).toEqual({ requestId: "r2" });
+  });
 });

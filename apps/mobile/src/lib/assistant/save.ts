@@ -48,7 +48,14 @@ export async function proposeStatement(a: {
  * came from the network in the first place.
  */
 export async function saveStatement(a: {
-  apiUrl: string; token: string; statement: string; sourceUrl?: string; fetchFn?: typeof fetch;
+  apiUrl: string; token: string; statement: string; sourceUrl?: string;
+  /**
+   * The `chat_messages` row this save came from, when the caller has a real one -- lets the
+   * server mark that message saved (save-answer.ts's markMessageSaved) so the control survives
+   * an app restart. See chat.tsx's `isRealMessageId` for what counts as "real".
+   */
+  forMessageId?: string;
+  fetchFn?: typeof fetch;
 }): Promise<void> {
   const f = a.fetchFn ?? fetch;
   try {
@@ -58,6 +65,7 @@ export async function saveStatement(a: {
       body: JSON.stringify({
         statement: a.statement,
         ...(a.sourceUrl !== undefined ? { sourceUrl: a.sourceUrl } : {}),
+        ...(a.forMessageId !== undefined ? { forMessageId: a.forMessageId } : {}),
       }),
     });
   } catch {

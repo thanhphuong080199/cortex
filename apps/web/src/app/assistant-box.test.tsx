@@ -375,11 +375,39 @@ describe("AssistantBox", () => {
     const saveCall = calls.find((c) => c.url.endsWith("/notes/save-answer"));
     expect(saveCall).toBeDefined();
     expect(saveCall?.init?.method).toBe("POST");
+    // `forMessageId: "m1"` is the `done` event's messageId, patched onto the offer the moment
+    // that event arrived (see `offer`'s state doc) -- without it the server has no row to mark
+    // and the reply's own "Lưu câu trả lời" control never learns the offer was accepted.
     expect(JSON.parse(String(saveCall?.init?.body))).toEqual({
-      statement: "Cá hồi giàu omega-3.", sourceUrl: "https://e.com/a",
+      statement: "Cá hồi giàu omega-3.", sourceUrl: "https://e.com/a", forMessageId: "m1",
     });
     // Accepting clears the row -- it is a one-shot prompt, not a standing widget.
     expect(screen.queryByRole("button", { name: "Lưu" })).toBeNull();
+  });
+
+  // FEEDBACK, the offer's half: until 2026-08-24 the offer row disappeared on accept but the
+  // SAME reply's own "Lưu câu trả lời" control (rendered once the turn lands in `turns`) had no
+  // idea anything had been saved, and went on offering the identical save.
+  it("marks the reply's own save control once its offer is accepted", async () => {
+    globalThis.fetch = (async (url: string) =>
+      String(url).endsWith("/notes")
+        ? new Response(JSON.stringify({ id: "n1" }), { status: 201 })
+        : String(url).endsWith("/notes/save-answer")
+          ? new Response(JSON.stringify({ id: "m1" }), { status: 201 })
+          : sse([
+              ["token", { text: "Cá hồi giàu omega-3." }],
+              ["offer", { statement: "Cá hồi giàu omega-3.", sourceUrl: "https://e.com/a" }],
+              ["done", { messageId: "m1", sessionId: "s1" }],
+            ])) as typeof fetch;
+
+    render(<AssistantBox token="t" userId="u1" />);
+    await userEvent.type(screen.getByLabelText(/what are you thinking/i), "omega-3 ở đâu");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Lưu" }));
+
+    await waitFor(() => expect(screen.getByText(/đã lưu vào notes/i)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /lưu câu trả lời/i })).toBeNull();
   });
 
   // "Costs nothing" is a claim about LATENCY as much as about writes. The offer must be gone
@@ -472,7 +500,7 @@ afterEach(() => {
 describe("going offline", () => {
   const stored = (
     { id: "a", role: "user", content: "câu cũ của tôi", createdAt: "2026-08-20T02:00:00.000Z",
-      citations: [], incomplete: false } as TranscriptTurn
+      citations: [], incomplete: false, savedAsNote: false } as TranscriptTurn
   );
 
   function goOffline() {
@@ -502,7 +530,7 @@ describe("going offline", () => {
 
 const turn = (over: Partial<TranscriptTurn> = {}): TranscriptTurn => ({
   id: "t1", role: "assistant", content: "Đã lưu.", citations: [], incomplete: false,
-  createdAt: "2026-08-22T00:00:00.000Z", ...over,
+  savedAsNote: false, createdAt: "2026-08-22T00:00:00.000Z", ...over,
 });
 
 describe("the transcript", () => {
@@ -798,6 +826,7 @@ describe("the loading phases", () => {
 
 const turnT = (id: string, createdAt: string): TranscriptTurn => ({
   id, role: "user", content: `msg ${id}`, createdAt, citations: [], incomplete: false,
+  savedAsNote: false,
 });
 
 /**
@@ -952,7 +981,7 @@ describe("saving an answer on purpose", () => {
   function renderWithTurns(turns: Partial<TranscriptTurn>[]) {
     const full = turns.map((t) => ({
       id: "t", role: "assistant" as const, content: "", citations: [], incomplete: false,
-      createdAt: ISO, ...t,
+      savedAsNote: false, createdAt: ISO, ...t,
     }));
     return render(<AssistantBox token="t" userId="u1" initialTurns={full} />);
   }
@@ -1054,6 +1083,48 @@ describe("saving an answer on purpose", () => {
       expect.objectContaining({
         body: JSON.stringify({ statement: "S.", sourceUrl: "https://example.com/a" }),
       }),
+    );
+  });
+
+  // THE POINT OF THIS WHOLE CHANGE (reported 2026-08-24): a reload used to forget every save and
+  // show "Lưu câu trả lời" again, even for a reply the server already has
+  // retrieval_meta.savedAnswerNoteId on. Seeded straight from `initialTurns`, no fetch needed to
+  // prove it.
+  it("shows a reply as already saved on load, from the server's own record", () => {
+    renderWithTurns([{
+      id: "550e8400-e29b-41d4-a716-446655440000", content: "Cá hồi.", createdAt: ISO,
+      savedAsNote: true,
+    }]);
+    expect(screen.getByText(/đã lưu vào notes/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Lưu câu trả lời" })).toBeNull();
+  });
+
+  // The other half of the durable fix: the client tells the server WHICH message this save came
+  // from, so a later reload can find it again.
+  it("sends the message id so the server can mark the reply saved durably", async () => {
+    const fetchMock = mockFetch({ "/assistant/distill": { statement: "S." } });
+    const id = "550e8400-e29b-41d4-a716-446655440001";
+    renderWithTurns([{ id, content: "Cá hồi.", createdAt: ISO }]);
+    await userEvent.click(screen.getByRole("button", { name: "Lưu câu trả lời" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Lưu câu này" }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/notes/save-answer"),
+      expect.objectContaining({ body: JSON.stringify({ statement: "S.", forMessageId: id }) }),
+    );
+  });
+
+  // The guard on the line above: a turn whose id is one of this file's own placeholders (here,
+  // settleWithoutDone's `local-...` flush of an interrupted stream) must not send it as
+  // forMessageId -- the server has no such row to mark, and sending it anyway is not merely
+  // useless, it is the exact shape a bad actor's guess would take.
+  it("sends no forMessageId when the turn has no real chat_messages id", async () => {
+    const fetchMock = mockFetch({ "/assistant/distill": { statement: "S." } });
+    renderWithTurns([{ id: "local-1755999999999", content: "Cá hồi.", createdAt: ISO }]);
+    await userEvent.click(screen.getByRole("button", { name: "Lưu câu trả lời" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Lưu câu này" }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/notes/save-answer"),
+      expect.objectContaining({ body: JSON.stringify({ statement: "S." }) }),
     );
   });
 });

@@ -38,6 +38,14 @@ export type Item =
   | {
       kind: "message"; id: string; role: "user" | "assistant"; content: string; incomplete: boolean;
       citations: string | null;
+      /**
+       * retrieval_meta.savedAnswerNoteId is set (save-answer.ts's markMessageSaved). Read by
+       * chat.tsx to show a reply as already kept without waiting on the client-only `saved` Set
+       * -- reported 2026-08-24: that Set forgot every save on app restart, the same defect web
+       * had, because nothing seeded it from what the server (and PowerSync, for this device)
+       * already knows.
+       */
+      savedAsNote: boolean;
     };
 
 /** Malformed or absent both mean "not interrupted". A parse error must not cost the transcript. */
@@ -45,6 +53,16 @@ function isIncomplete(meta: string | null): boolean {
   if (!meta) return false;
   try {
     return (JSON.parse(meta) as { incomplete?: unknown }).incomplete === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Same contract as `isIncomplete`: malformed or absent both mean "not saved". */
+function isSavedAsNote(meta: string | null): boolean {
+  if (!meta) return false;
+  try {
+    return (JSON.parse(meta) as { savedAnswerNoteId?: unknown }).savedAnswerNoteId !== undefined;
   } catch {
     return false;
   }
@@ -146,6 +164,7 @@ export function buildTranscript(
       content: row.content,
       incomplete: isIncomplete(row.retrieval_meta),
       citations: row.citations,
+      savedAsNote: isSavedAsNote(row.retrieval_meta),
     });
   }
 
@@ -173,7 +192,7 @@ export function buildTranscript(
     if (!userReplicated) {
       items.push({
         kind: "message", id: `live-${live.noteId}`, role: "user", content: live.text, incomplete: false,
-        citations: null,
+        citations: null, savedAsNote: false,
       });
     }
     // Only once a token has arrived. An empty assistant row is a blank gap held open for the
@@ -181,7 +200,7 @@ export function buildTranscript(
     if (showAnswer) {
       items.push({
         kind: "message", id: `live-answer-${live.noteId}`, role: "assistant", content: live.answer, incomplete: false,
-        citations: null,
+        citations: null, savedAsNote: false,
       });
     }
   }

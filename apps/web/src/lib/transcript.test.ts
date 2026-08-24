@@ -67,4 +67,23 @@ describe("fetchOlderTurns", () => {
     expect(turns).toHaveLength(1);
     expect(turns[0]!.citations).toEqual([]);
   });
+
+  // Reported 2026-08-24: the save button forgot it had already been used the moment the page
+  // reloaded, because `saved` was `useState` alone with nothing to seed it from. A page loaded
+  // further back in the thread has to carry the same evidence pagination brought in, or scrolling
+  // up would un-save every reply on screen.
+  it("marks a turn saved when its message carries a saved note id", async () => {
+    const saved = {
+      ...row("a", "2026-08-20T08:00:00.000Z"), role: "assistant",
+      retrieval_meta: { savedAnswerNoteId: "n9" },
+    };
+    const { turns } = await fetchOlderTurns(stubClient([saved]), USER, "2026-08-20T11:00:00.000Z");
+    expect(turns[0]!.savedAsNote).toBe(true);
+  });
+
+  it("does not mark a turn saved when nothing was saved from it", async () => {
+    const { turns } = await fetchOlderTurns(
+      stubClient([row("a", "2026-08-20T08:00:00.000Z")]), USER, "2026-08-20T11:00:00.000Z");
+    expect(turns[0]!.savedAsNote).toBe(false);
+  });
 });

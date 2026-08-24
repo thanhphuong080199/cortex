@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { mapPostgrestError } from "../errors.js";
+import { errorMessage, mapPostgrestError } from "../errors.js";
 
 export interface SaveAnswerArgs {
   userId: string;
@@ -7,6 +7,12 @@ export interface SaveAnswerArgs {
   statement: string;
   /** The web source it came from, when grounding produced one. Absent means general knowledge. */
   sourceUrl?: string;
+  /**
+   * The `chat_messages` row this save came from, when the caller has a real one. Used only to
+   * mark that message saved (see `markMessageSaved`) -- never written onto the note row itself,
+   * which stays exactly `buildSavedAnswerRow`'s five columns.
+   */
+  forMessageId?: string;
 }
 
 /**
@@ -43,8 +49,42 @@ export function buildSavedAnswerRow(a: SaveAnswerArgs): Record<string, unknown> 
 }
 
 /**
+ * The "already saved" indicator's durable half (reported 2026-08-24: it forgot on every
+ * refresh, because `saved` on both clients was `useState` alone -- see assistant-box.tsx). Marks
+ * the source message rather than the note: `buildSavedAnswerRow`'s own test pins the note's
+ * column set exactly, on purpose, so a link back has to live on the OTHER side.
+ *
+ * Read-modify-write, not a single `update`: PostgREST replaces a jsonb column wholesale rather
+ * than merging into it, and `retrieval_meta` already carries `requestId`/`asked`/`answeredAsk`
+ * that a bare `update({ retrieval_meta: { savedAnswerNoteId } })` would erase. No migration adds
+ * a merge RPC for this -- it is a low-frequency, latency-insensitive write.
+ *
+ * Best-effort: the note above is already written and IS the deliverable. A failed link must not
+ * turn a successful save into a failed one -- the same trade turn.ts's S2 backfill makes for the
+ * same reason.
+ */
+async function markMessageSaved(
+  db: SupabaseClient,
+  a: { messageId: string; noteId: string },
+): Promise<void> {
+  try {
+    const { data } = await db
+      .from("chat_messages").select("retrieval_meta").eq("id", a.messageId).maybeSingle();
+    const current = (data as { retrieval_meta: Record<string, unknown> | null } | null)
+      ?.retrieval_meta ?? {};
+    await db.from("chat_messages")
+      .update({ retrieval_meta: { ...current, savedAnswerNoteId: a.noteId } })
+      .eq("id", a.messageId);
+  } catch (err) {
+    console.error(`[notes] could not mark message ${a.messageId} saved: ${errorMessage(err)}`);
+  }
+}
+
+/**
  * Writes it. Takes the USER's client, so RLS is what proves ownership -- this is a note in the
- * user's own corpus and there is no reason for it to go through the service role.
+ * user's own corpus and there is no reason for it to go through the service role. The same client
+ * is what scopes `markMessageSaved`'s read and write to this user's own messages, with no
+ * redundant `user_id` filter needed alongside it.
  */
 export async function saveAnswer(
   db: SupabaseClient,
@@ -55,5 +95,11 @@ export async function saveAnswer(
   // Mapped, not rethrown raw: this runs on the HTTP path, and a raw PostgrestError has no
   // `status` and logs as "[object Object]" through CoreErrorFilter (errors.ts:9-13).
   if (error) throw mapPostgrestError(error);
-  return { id: (data as { id: string }).id };
+  const noteId = (data as { id: string }).id;
+
+  if (a.forMessageId !== undefined) {
+    await markMessageSaved(db, { messageId: a.forMessageId, noteId });
+  }
+
+  return { id: noteId };
 }
