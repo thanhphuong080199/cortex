@@ -1,6 +1,13 @@
 # Stage S2: the assistant asks a follow-up
 
-Status: designed 2026-08-24, not yet implemented.
+Status: implemented 2026-08-24 (packages/core only, all 6 tasks reviewed and merged to this
+branch). **Not yet verified against the local stack** — the local Supabase stack was unreachable
+for the remainder of this session (a Windows Hyper-V TCP port-exclusion range covering Supabase's
+default ports, unrelated to this change; see PR for detail). `pnpm turbo run lint typecheck`
+passes repo-wide and every DB-independent test in `@cortex/core` passes (`follow-up.test.ts`,
+`prompts.test.ts`, `turn.test.ts` in full, plus `extract.test.ts`'s prompt-only tests); the two new
+`extract.test.ts` end-to-end tests and the manual chat-box walkthrough in §10 below are still
+outstanding and should be run before this stage is considered verified.
 
 The second of the three stages `2026-08-22-chat-only-shell-design.md` §10 left as decisions. The
 order agreed there was S3 → S2 → S4. S3 is merged; this is S2.
