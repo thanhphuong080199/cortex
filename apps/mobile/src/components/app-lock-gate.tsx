@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AppState, Pressable, Text, View, type AppStateStatus } from "react-native";
+import { AppState, Pressable, Text, useColorScheme, View, type AppStateStatus } from "react-native";
 
+import { RADIUS, SPACE, TYPE } from "../fonts";
 import { authenticate, shouldRelock } from "../lib/app-lock";
+import { themeFor } from "../theme";
 
 /**
  * Renders nothing but an unlock prompt until the user authenticates. Wraps the whole app
  * so no screen -- and no local database read -- happens before unlock (spec §7.7).
  */
 export function AppLockGate({ children }: { children: React.ReactNode }) {
+  const theme = themeFor(useColorScheme());
   const [unlocked, setUnlocked] = useState(false);
   const [failed, setFailed] = useState(false);
   const backgroundedAt = useRef<number | null>(null);
@@ -56,23 +59,34 @@ export function AppLockGate({ children }: { children: React.ReactNode }) {
 
   if (unlocked) return <>{children}</>;
 
+  // Deliberately the quietest screen in the app: a locked door should not look like an error.
+  // The copy is Vietnamese like everything else the user reads -- .maestro/01 asserts the closed
+  // state's exact string, and was updated with this change rather than left asserting English
+  // that no longer appears anywhere.
   return (
-    <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24, gap: 16 }}>
-      <Text style={{ fontSize: 18 }}>Cortex is locked</Text>
-      {failed ? <Text style={{ opacity: 0.7 }}>Unlock to continue.</Text> : null}
+    <View
+      style={{
+        flex: 1, alignItems: "center", justifyContent: "center",
+        padding: SPACE.xxl, gap: SPACE.md, backgroundColor: theme.bg,
+      }}
+    >
+      <Text style={{ ...TYPE.wordmark, fontSize: 26, color: theme.text }}>Cortex đang khoá</Text>
+      <Text style={{ ...TYPE.small, color: theme.muted, textAlign: "center" }}>
+        {failed ? "Mở khoá để tiếp tục." : "Dùng vân tay hoặc khuôn mặt để mở."}
+      </Text>
       <Pressable
         onPress={() => {
           void unlock();
         }}
         accessibilityRole="button"
-        style={{
-          paddingVertical: 12,
-          paddingHorizontal: 24,
-          borderRadius: 8,
-          backgroundColor: "#222",
-        }}
+        style={({ pressed }) => ({
+          marginTop: SPACE.sm,
+          paddingVertical: SPACE.md, paddingHorizontal: SPACE.xxl,
+          borderRadius: RADIUS.pill, backgroundColor: theme.accent,
+          opacity: pressed ? 0.85 : 1,
+        })}
       >
-        <Text style={{ color: "white" }}>Unlock</Text>
+        <Text style={{ ...TYPE.bodyMedium, color: theme.accentInk }}>Mở khoá</Text>
       </Pressable>
     </View>
   );

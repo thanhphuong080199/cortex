@@ -1,9 +1,11 @@
 import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
-import { Text, View } from "react-native";
+import { Text, useColorScheme, View } from "react-native";
 
+import { SPACE, TYPE } from "@/fonts";
 import { IS_E2E_BUILD } from "@/lib/e2e";
 import { supabase } from "@/lib/supabase";
+import { themeFor } from "@/theme";
 
 /**
  * Installs a Supabase session handed over a deep link, so a Maestro flow can reach the signed-in
@@ -26,6 +28,7 @@ import { supabase } from "@/lib/supabase";
  * token at test time and passing it in is the only version of this that survives the cache.
  */
 export default function E2ESession() {
+  const theme = themeFor(useColorScheme());
   const params = useLocalSearchParams<{ access_token?: string; refresh_token?: string }>();
   const [state, setState] = useState<"working" | "ready" | "failed">("working");
   const [detail, setDetail] = useState<string>("");
@@ -59,24 +62,35 @@ export default function E2ESession() {
     })();
   }, [params.access_token, params.refresh_token]);
 
+  // Styled only so it does not flash a white screen mid-flow. The STRINGS are load-bearing test
+  // scaffolding and stay in English, verbatim: this route is never seen by a user.
+  const centre = {
+    flex: 1, alignItems: "center", justifyContent: "center",
+    padding: SPACE.xxl, gap: SPACE.sm, backgroundColor: theme.bg,
+  } as const;
+
   if (!IS_E2E_BUILD) {
     return (
-      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
-        <Text>This route is disabled in this build.</Text>
+      <View style={centre}>
+        <Text style={{ ...TYPE.body, color: theme.text }}>
+          This route is disabled in this build.
+        </Text>
       </View>
     );
   }
 
   return (
-    <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24, gap: 8 }}>
-      <Text>
+    <View style={centre}>
+      <Text style={{ ...TYPE.body, color: theme.text }}>
         {state === "working"
           ? "E2E session installing"
           : state === "ready"
             ? "E2E session ready"
             : "E2E session failed"}
       </Text>
-      {detail ? <Text style={{ opacity: 0.7 }}>{detail}</Text> : null}
+      {detail ? (
+        <Text style={{ ...TYPE.small, color: theme.muted }}>{detail}</Text>
+      ) : null}
     </View>
   );
 }
