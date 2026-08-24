@@ -1,8 +1,10 @@
 import { PowerSyncContext } from "@powersync/react-native";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, Text, useColorScheme, View } from "react-native";
 
+import { RADIUS, SPACE, TYPE } from "../fonts";
 import { initPowerSync } from "../lib/powersync";
+import { themeFor } from "../theme";
 import type { PowerSyncDatabase } from "@powersync/react-native";
 
 /**
@@ -14,6 +16,7 @@ import type { PowerSyncDatabase } from "@powersync/react-native";
  * stop exactly that (§7.7).
  */
 export function PowerSyncProvider({ children }: { children: React.ReactNode }) {
+  const theme = themeFor(useColorScheme());
   const [db, setDb] = useState<PowerSyncDatabase | null>(null);
   const [wiped, setWiped] = useState(false);
   const [dismissed, setDismissed] = useState(false);
@@ -43,17 +46,24 @@ export function PowerSyncProvider({ children }: { children: React.ReactNode }) {
     // again -- so offer that rather than a dead end. `initPowerSync` clears its in-flight
     // promise on failure, so a retry genuinely re-runs.
     return (
-      <View style={styles.centre}>
-        <Text style={{ fontSize: 18 }}>Cortex could not open its offline copy</Text>
-        <Text style={{ opacity: 0.7, textAlign: "center" }}>
-          Unlocking was not completed. Try again to continue.
+      <View style={[styles.centre, { backgroundColor: theme.bg }]}>
+        <Text style={{ ...TYPE.title, color: theme.text, textAlign: "center" }}>
+          Không mở được bản sao ngoại tuyến
+        </Text>
+        <Text style={{ ...TYPE.small, color: theme.muted, textAlign: "center" }}>
+          Việc mở khoá chưa hoàn tất. Thử lại để tiếp tục.
         </Text>
         <Pressable
           onPress={() => setAttempt((n) => n + 1)}
           accessibilityRole="button"
-          style={styles.button}
+          style={({ pressed }) => ({
+            marginTop: SPACE.sm,
+            paddingVertical: SPACE.md, paddingHorizontal: SPACE.xxl,
+            borderRadius: RADIUS.pill, backgroundColor: theme.accent,
+            opacity: pressed ? 0.85 : 1,
+          })}
         >
-          <Text style={{ color: "white" }}>Try again</Text>
+          <Text style={{ ...TYPE.bodyMedium, color: theme.accentInk }}>Thử lại</Text>
         </Pressable>
       </View>
     );
@@ -61,8 +71,8 @@ export function PowerSyncProvider({ children }: { children: React.ReactNode }) {
 
   if (!db) {
     return (
-      <View style={styles.centre}>
-        <ActivityIndicator />
+      <View style={[styles.centre, { backgroundColor: theme.bg }]}>
+        <ActivityIndicator color={theme.accent} />
       </View>
     );
   }
@@ -70,13 +80,32 @@ export function PowerSyncProvider({ children }: { children: React.ReactNode }) {
   return (
     <PowerSyncContext.Provider value={db}>
       {wiped && !dismissed ? (
-        <View style={styles.banner}>
-          <Text style={{ flex: 1 }}>
-            This device&apos;s offline copy was reset because the screen lock changed. Notes saved
-            on the server are safe; anything captured offline and not yet uploaded was lost.
+        // An amber wash on the panel tone, not the hardcoded #fdf0d5 this used to be -- that
+        // colour was a light-mode cream that stayed cream on the dark scheme, under default
+        // near-white text. This is the only place `warm` is used outside the mood streak, and it
+        // earns it: the message is a loss report, and `danger` would overstate it (the server's
+        // copy is fine).
+        <View
+          style={{
+            flexDirection: "row", alignItems: "flex-start", gap: SPACE.md,
+            margin: SPACE.md, padding: SPACE.md,
+            borderRadius: RADIUS.lg, backgroundColor: theme.panel,
+            borderLeftWidth: 3, borderLeftColor: theme.warm,
+            boxShadow: theme.shadow,
+          }}
+        >
+          <Text style={{ ...TYPE.small, color: theme.text, flex: 1 }}>
+            Bản sao trên máy đã được đặt lại vì khoá màn hình thay đổi. Ghi chú đã lên máy chủ
+            vẫn an toàn; những gì ghi khi ngoại tuyến mà chưa kịp tải lên thì đã mất.
           </Text>
-          <Pressable onPress={() => setDismissed(true)} accessibilityRole="button">
-            <Text style={{ fontWeight: "600" }}>Dismiss</Text>
+          <Pressable
+            onPress={() => setDismissed(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Đóng thông báo"
+            hitSlop={SPACE.sm}
+            style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
+          >
+            <Text style={{ ...TYPE.micro, color: theme.muted }}>ĐÓNG</Text>
           </Pressable>
         </View>
       ) : null}
@@ -90,20 +119,7 @@ const styles = {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    padding: 24,
-    gap: 16,
-  },
-  button: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 8,
-    backgroundColor: "#222",
-  },
-  banner: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    padding: 12,
-    backgroundColor: "#fdf0d5",
+    padding: SPACE.xxl,
+    gap: SPACE.md,
   },
 } as const;

@@ -22,10 +22,14 @@ appId: ${APP_ID}
     file: subflows/dismiss-dev-launcher.yaml
 
 # Signed out, and the lock is gone because this APK was built with EXPO_PUBLIC_E2E=1. If the
-# flag failed to reach the build, the app sits on "Cortex is locked" and this line fails --
+# flag failed to reach the build, the app sits on "Cortex đang khoá" and this line fails --
 # which is the failure we want, rather than a confusing timeout twelve steps later.
+#
+# THIS STRING MUST TRACK components/app-lock-gate.tsx. It was "Cortex is locked" until the app's
+# chrome was translated on 2026-08-24; an assertNotVisible left pointing at deleted copy passes
+# unconditionally, which is the one way this check can rot without anything going red.
 - assertVisible: "Sign in with Google"
-- assertNotVisible: "Cortex is locked"
+- assertNotVisible: "Cortex đang khoá"
 
 - runFlow: subflows/install-session.yaml
 - runFlow: subflows/wait-for-download.yaml
