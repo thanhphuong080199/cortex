@@ -221,15 +221,42 @@ export async function* runTurn(
   // A throw is logged and swallowed. The note and its tags are already the deliverable, and
   // media_unresolved exists for the sync path, not for this one.
   let mediaTitle: string | undefined;
+  // The ITEM, not just its title: S2's backfill needs the id, and re-resolving it for the
+  // original note would be a second findOrCreate that could race into a duplicate row.
+  let mediaItemId: string | undefined;
   if (extracted?.domain === "media") {
     try {
       const item = await new MediaService(userDb, args.userId)
         .resolveNoteMediaLink(args.noteId, extracted.domainMeta);
-      if (item) mediaTitle = item.title;
+      if (item) { mediaTitle = item.title; mediaItemId = item.id; }
     } catch (err) {
       console.error(`[assistant] media link failed (request ${requestId}): ${errorMessage(err)}`);
     }
     mark("media link resolved");
+  }
+
+  // S2 §6. THE BACKFILL. The note the question was about gets the entity link the answer just
+  // produced -- and nothing else. Not `domain_meta`, not `content_text`: the original note said
+  // nothing about a rating, and writing one into it would be putting words in the user's mouth.
+  //
+  // `userDb`, so RLS is what proves ownership: `pendingAsk.noteId` comes out of a jsonb column
+  // and is validated nowhere else.
+  //
+  // Failure is logged and swallowed. The answer has already streamed and both notes are already
+  // saved; a failed link must not retroactively fail a turn that succeeded.
+  let backfilled = false;
+  if (pendingAsk !== null && mediaItemId !== undefined && pendingAsk.noteId !== args.noteId) {
+    const { error } = await userDb.from("notes")
+      .update({ media_item_id: mediaItemId })
+      .eq("id", pendingAsk.noteId)
+      .is("deleted_at", null)      // a note trashed mid-conversation must not be linked
+      .is("media_item_id", null);  // and an existing link is never overwritten
+    if (error) {
+      console.error(`[assistant] follow-up backfill failed (request ${requestId}): ${error.message}`);
+    } else {
+      backfilled = true;
+    }
+    mark("follow-up backfilled");
   }
 
   yield extracted
@@ -531,6 +558,11 @@ export async function* runTurn(
       ...(gap !== null && !incomplete && answer.includes("?")
         ? { asked: { noteId: args.noteId, field: gap.field } }
         : {}),
+      // S2 §8. The other half of the pair, and mutually exclusive with `asked`: a turn either
+      // asks a question or answers one. One boolean is what turns "how often does a question get
+      // answered" into a query instead of a guess -- the thing S1.5 found it had no way to know
+      // about offers.
+      ...(backfilled ? { answeredAsk: true } : {}),
     },
   }).select("id").single();
   mark("assistant message written");
