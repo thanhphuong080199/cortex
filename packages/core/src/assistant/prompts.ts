@@ -112,6 +112,27 @@ const VERIFY_RULE =
   "confirmed them.";
 
 /**
+ * Stage S2 §4. Rendered only when `detectEntityGap` found a gap whose answer would create an
+ * entity -- never on a merely incomplete note.
+ *
+ * Three constraints, all load-bearing. ONE question, because an assistant that asks two has
+ * started an interview. At the END, because a question in the middle of an acknowledgement
+ * interrupts the filing confirmation it was supposed to deliver. And no promise to follow up,
+ * because the code guarantees it will never be raised again -- a reply ending "nhớ nói cho mình
+ * biết nhé" would be writing a cheque turn.ts refuses to honour.
+ *
+ * MUTUALLY EXCLUSIVE with VERIFY_RULE above, which forbids follow-ups outright. The guard is in
+ * buildAcknowledgePrompt below; turn.ts also refuses to compute a gap on a verifying turn, so the
+ * two agree by saying the same thing rather than by one trusting the other.
+ */
+const followUpRule = (wants: string) =>
+  `One thing is missing from what they just told you: ${wants}. Ask for it -- ONE short, ` +
+  "natural question at the very end, the way a friend would ask. Do not ask about anything " +
+  "else, do not ask two things, and do not explain why you are asking. If they do not answer " +
+  "it, it will never be raised again -- so do not promise to follow up and do not tell them to " +
+  "let you know later.";
+
+/**
  * The temporal anchor, on both prompts that read the user's own material.
  *
  * Two facts and one rule, and the rule is the part that fixes the observed defect: the date
@@ -239,6 +260,11 @@ export function buildAcknowledgePrompt(a: {
    * exactly like a classifier that stopped setting the flag.
    */
   verify: boolean;
+  /**
+   * What to ask for, from `detectEntityGap().wants`. Absent means there is nothing worth asking,
+   * which is the ordinary case for almost every note.
+   */
+  askAbout?: string;
 }): string {
   return [
     "The user just saved a note. Acknowledge it briefly -- this is an acknowledgement, not an " +
@@ -261,6 +287,9 @@ export function buildAcknowledgePrompt(a: {
     // Spread-in rather than an empty string: an ordinary acknowledgement must carry no
     // instruction about verification at all, not a blank line where one used to be.
     ...(a.verify ? [VERIFY_RULE] : []),
+    // `!a.verify` is the exclusion, not an oversight: see followUpRule's header. A turn that is
+    // correcting a false factual claim never also asks a question.
+    ...(a.askAbout !== undefined && !a.verify ? [followUpRule(a.askAbout)] : []),
     renderCitations(a.related, a.timeZone),
     renderHistory(a.history, a.timeZone),
     `\n\nTheir note: ${a.note}`,
