@@ -125,6 +125,20 @@ const VERIFY_RULE =
  * buildAcknowledgePrompt below; turn.ts also refuses to compute a gap on a verifying turn, so the
  * two agree by saying the same thing rather than by one trusting the other.
  */
+/**
+ * Reported 2026-08-24: an ordinary statement got back a flat "filed under X" and nothing else --
+ * an inbox, not a conversation partner. This is the GENERAL case and stays out of the way of the
+ * two more specific rules above: VERIFY_RULE already forbids a follow-up outright when correcting
+ * a claim, and followUpRule already asks its own one entity-gap question. Rendering this
+ * alongside either would give the model two or three follow-up instructions to reconcile in one
+ * acknowledgement, so buildAcknowledgePrompt below renders it only when neither applies.
+ */
+const ENGAGE_RULE =
+  "After that, add ONE brief, natural line that responds to what they actually wrote -- ask " +
+  "something specific about it, react to it, or suggest something small and concrete that fits " +
+  "it. Tie it to their note, never a generic \"cố lên nhé\". One line, then stop -- do not turn " +
+  "it into an interview.";
+
 const followUpRule = (wants: string) =>
   `One thing is missing from what they just told you: ${wants}. Ask for it -- ONE short, ` +
   "natural question at the very end, the way a friend would ask. Do not ask about anything " +
@@ -308,6 +322,9 @@ export function buildAcknowledgePrompt(a: {
     // `!a.verify` is the exclusion, not an oversight: see followUpRule's header. A turn that is
     // correcting a false factual claim never also asks a question.
     ...(a.askAbout !== undefined && !a.verify ? [followUpRule(a.askAbout)] : []),
+    // The general case, rendered only when neither of the two more specific rules above already
+    // claimed this turn's one follow-up line. See ENGAGE_RULE's header for why they exclude it.
+    ...(!a.verify && a.askAbout === undefined ? [ENGAGE_RULE] : []),
     renderCitations(a.related, a.timeZone),
     renderHistory(a.history, a.timeZone),
     `\n\nTheir note: ${a.note}`,
