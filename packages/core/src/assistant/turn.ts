@@ -11,6 +11,7 @@ import { CheckinService } from "../checkins/service.js";
 import { MediaService } from "../media/service.js";
 import { NoteService } from "../notes/service.js";
 import { resolveCurrentSession, selectContext, type ThreadTurn } from "./context.js";
+import { detectEntityGap } from "./follow-up.js";
 import { proposeOffer } from "./offer.js";
 import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
 import { retrieve, type Citation } from "./retrieve.js";
@@ -138,6 +139,22 @@ export async function* runTurn(
     .eq("session_id", sessionId).order("created_at", { ascending: false }).limit(40);
   mark("session+history resolved");
 
+  // S2 §6/§7. `[0]`, NEVER `find()`. The query is `created_at desc` and it runs before this
+  // turn's own message is written, so [0] is the message immediately before this one. Restricting
+  // an answer to the very next turn is what makes "ask once, never nag" STRUCTURAL: a user who
+  // says something else has ended it, with no counter to decrement and no timeout to expire.
+  //
+  // It is also the entire ceiling. One condition covers both halves of what the design asks for
+  // -- never while a question is outstanding, and never two turns running -- with no invented
+  // number in it.
+  const previousMessage = ((historyRows ?? []) as {
+    role: string;
+    retrieval_meta: { asked?: { noteId: string; field: string } } | null;
+  }[])[0];
+  const pendingAsk = previousMessage?.role === "assistant"
+    ? previousMessage.retrieval_meta?.asked ?? null
+    : null;
+
   await userDb.from("chat_messages")
     .insert({ user_id: args.userId, session_id: sessionId, role: "user", content: text });
   mark("user message written");
@@ -204,15 +221,49 @@ export async function* runTurn(
   // A throw is logged and swallowed. The note and its tags are already the deliverable, and
   // media_unresolved exists for the sync path, not for this one.
   let mediaTitle: string | undefined;
+  // The ITEM, not just its title: S2's backfill needs the id, and re-resolving it for the
+  // original note would be a second findOrCreate that could race into a duplicate row.
+  let mediaItemId: string | undefined;
   if (extracted?.domain === "media") {
     try {
       const item = await new MediaService(userDb, args.userId)
         .resolveNoteMediaLink(args.noteId, extracted.domainMeta);
-      if (item) mediaTitle = item.title;
+      if (item) { mediaTitle = item.title; mediaItemId = item.id; }
     } catch (err) {
       console.error(`[assistant] media link failed (request ${requestId}): ${errorMessage(err)}`);
     }
     mark("media link resolved");
+  }
+
+  // S2 §6. THE BACKFILL. The note the question was about gets the entity link the answer just
+  // produced -- and nothing else. Not `domain_meta`, not `content_text`: the original note said
+  // nothing about a rating, and writing one into it would be putting words in the user's mouth.
+  //
+  // `userDb`, so RLS is what proves ownership: `pendingAsk.noteId` comes out of a jsonb column
+  // and is validated nowhere else.
+  //
+  // Failure is logged and swallowed. The answer has already streamed and both notes are already
+  // saved; a failed link must not retroactively fail a turn that succeeded.
+  let backfilled = false;
+  if (pendingAsk !== null && mediaItemId !== undefined && pendingAsk.noteId !== args.noteId) {
+    // `.select("id").maybeSingle()`, matching resolveNoteMediaLink's own update+select
+    // (media/service.ts): PostgREST returns `error: null` even when the two `.is()` filters
+    // above correctly reject the write -- the note was trashed mid-conversation, or a
+    // concurrent request already linked it. `error` alone cannot tell "linked" from
+    // "correctly refused"; only a returned row proves the UPDATE touched something, which is
+    // what `answeredAsk` must be conditioned on to stay an honest measurement.
+    const { data, error } = await userDb.from("notes")
+      .update({ media_item_id: mediaItemId })
+      .eq("id", pendingAsk.noteId)
+      .is("deleted_at", null)      // a note trashed mid-conversation must not be linked
+      .is("media_item_id", null)   // and an existing link is never overwritten
+      .select("id").maybeSingle();
+    if (error) {
+      console.error(`[assistant] follow-up backfill failed (request ${requestId}): ${error.message}`);
+    } else if (data !== null) {
+      backfilled = true;
+    }
+    mark("follow-up backfilled");
   }
 
   yield extracted
@@ -285,6 +336,21 @@ export async function* runTurn(
   // are read in different places is exactly how this collision was created.
   const verifies = !wantsAnswer && !isChitchat && extracted?.checkableClaim === true;
 
+  // S2 §2/§4. THE FOURTH LINK in the same ordered chain, and derived ONCE: this value both puts
+  // the rule in the prompt and decides what gets recorded as asked, so the two can never describe
+  // different questions.
+  //
+  // Every conjunct is an exclusion the design names. `!wantsAnswer` -- they asked something, so
+  // answer it. `!isChitchat` -- small talk files nothing. `!verifies` -- VERIFY_RULE forbids
+  // follow-ups outright (prompts.ts), and correcting a false claim outranks curiosity.
+  // `extracted &&` -- a degraded or timed-out extraction knows of no domain and no gap.
+  //
+  // `pendingAsk === null` is the ceiling (§7): the turn after a question never asks another,
+  // whether this turn answered it or ignored it.
+  const gap = extracted && !wantsAnswer && !isChitchat && !verifies && pendingAsk === null
+    ? detectEntityGap(extracted.domain, extracted.domainMeta)
+    : null;
+
   // A note that already exists, restamped after classification -- the shape 'chat' has used
   // since C1. An ordinary statement is the default branch and writes nothing: every plain
   // capture keeps the 'quick' the row was created with.
@@ -321,6 +387,7 @@ export async function* runTurn(
           // derivation, three uses -- a second condition here could disagree with the model
           // choice and produce a verification prompt running on flash-lite.
           verify: verifies,
+          ...(gap !== null ? { askAbout: gap.wants } : {}),
         });
   // Two ways onto the reasoning model and no third. `verifies` is capped by the classifier's
   // own threshold ("only when you have real reason to doubt"), so an ordinary capture is
@@ -484,7 +551,26 @@ export async function* runTurn(
     // Spread-if, so a turn that completed carries no `error` key at all rather than an explicit
     // null. A row with an `error` field on it is read by a human as evidence something went
     // wrong, and "went wrong: nothing" is a worse thing to write down than silence.
-    retrieval_meta: { requestId, incomplete, ...(streamError !== null ? { error: streamError } : {}) },
+    retrieval_meta: {
+      requestId, incomplete,
+      ...(streamError !== null ? { error: streamError } : {}),
+      // S2 §5. `asked` records an INSTRUCTION, not an observation: we told the model to ask, and
+      // whether it did is only knowable from the text. The `?` test is the honest approximation,
+      // and both of its failure directions are harmless -- a rhetorical `?` records a question
+      // nobody was asked (the next turn simply finds nothing to backfill), and a question with no
+      // `?` goes unrecorded (no backfill, nothing broken).
+      //
+      // `!incomplete`: an answer that was cut off mid-sentence may have been cut off before the
+      // question, so it must not leave one outstanding.
+      ...(gap !== null && !incomplete && answer.includes("?")
+        ? { asked: { noteId: args.noteId, field: gap.field } }
+        : {}),
+      // S2 §8. The other half of the pair, and mutually exclusive with `asked`: a turn either
+      // asks a question or answers one. One boolean is what turns "how often does a question get
+      // answered" into a query instead of a guess -- the thing S1.5 found it had no way to know
+      // about offers.
+      ...(backfilled ? { answeredAsk: true } : {}),
+    },
   }).select("id").single();
   mark("assistant message written");
 

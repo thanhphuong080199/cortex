@@ -17,7 +17,10 @@ interface HistoryRow {
   role: string;
   content: string;
   created_at: string;
-  retrieval_meta: { incomplete?: boolean } | null;
+  retrieval_meta: {
+    incomplete?: boolean;
+    asked?: { noteId: string; field: string };
+  } | null;
 }
 
 /**
@@ -44,15 +47,20 @@ function dbs(
     failInsertOn?: string;
     mediaItem?: { id: string; title: string; kind: string };
     lastMessage?: { session_id: string; created_at: string };
+    /** Simulates the backfill's own `.is()` filters legitimately matching zero rows. */
+    backfillRejected?: boolean;
   } = {},
 ) {
   const inserted: Record<string, Record<string, unknown>[]> = {};
   const updated: Record<string, Record<string, unknown>[]> = {};
 
-  function chain(resolve: () => { data: unknown; error: unknown }) {
+  function chain(
+    resolve: () => { data: unknown; error: unknown },
+    onFilter?: (column: string, value: unknown) => void,
+  ) {
     const self: Record<string, unknown> = {
-      eq: () => self,
-      is: () => self,
+      eq: (column: string, value: unknown) => { onFilter?.(column, value); return self; },
+      is: (column: string, value: unknown) => { onFilter?.(column, value); return self; },
       ilike: () => self,
       filter: () => self,
       order: () => self,
@@ -89,6 +97,14 @@ function dbs(
       if (name === "notes" && cols === "domain") {
         return chain(() => ({ data: { domain: null }, error: null }));
       }
+      // The client-supplied sessionId ownership check (runTurn, before session resolution).
+      // Always "not found": this double's `eq()` does not record its arguments, so it cannot
+      // tell a genuinely-owned id from a guessed one. Returning null here is safe because it
+      // only pushes resolution onto the "last message" probe below, which is what every test
+      // that cares about which session a turn lands in already supplies via `opts.lastMessage`.
+      if (name === "chat_sessions" && cols === "id") {
+        return chain(() => ({ data: null, error: null }));
+      }
       // The "last message" probe (session resolution). Empty by default, so a turn with no
       // `lastMessage` starts a fresh session -- which is what every test written before C4
       // assumed. `lastMessage` is what lets a test say "this user was mid-conversation".
@@ -109,7 +125,14 @@ function dbs(
             created_at: new Date().toISOString(),
             retrieval_meta: (r.retrieval_meta as HistoryRow["retrieval_meta"]) ?? null,
           }));
-          return { data: [...(opts.history ?? []), ...already], error: null };
+          // Newest first, matching the real query's `order("created_at", { ascending: false })`.
+          // runTurn now reads history[0] as "the message immediately before this turn", so a
+          // double that answered in insertion order would silently invert that.
+          return {
+            data: [...(opts.history ?? []), ...already]
+              .sort((a, b) => b.created_at.localeCompare(a.created_at)),
+            error: null,
+          };
         });
       }
       if (name === "tags" && cols?.includes("id, name")) {
@@ -130,10 +153,12 @@ function dbs(
     },
     insert: (row: Record<string, unknown>) => insertChain(name, row),
     update: (row: Record<string, unknown> = {}) => {
-      // Recorded for EVERY table before the branches below answer the call: an update whose
-      // response shape a test does not care about is still an update a test may need to assert.
-      // The 'chitchat' stamp is exactly that -- runTurn ignores what it resolves to.
-      (updated[name] ??= []).push(row);
+      // `__where` captures the .eq()/.is() chain that scoped this update. Without it a test can
+      // see that SOME note was linked but not WHICH -- and S2's backfill is defined entirely by
+      // which note it targets.
+      const where: Record<string, unknown> = {};
+      (updated[name] ??= []).push({ ...row, __where: where });
+      const sink = (column: string, value: unknown) => { where[column] = value; };
       // MediaService.reconcileYear's backfill (`.update({ year }).eq().eq().select().single()`)
       // when the fixture item is missing the year `pending_item` supplies. Spread the row back,
       // same trick insertChain uses above -- the caller reads the UPDATED item off this, not a
@@ -141,19 +166,30 @@ function dbs(
       if (name === "media_items") {
         return chain(() => (
           opts.mediaItem ? { data: { ...mediaItemRow(), ...row }, error: null } : { data: null, error: null }
-        ));
+        ), sink);
       }
       // resolveNoteMediaLink's link write (`.update({ media_item_id, domain_meta })...
       // .select("id").maybeSingle()`). A null noteId row (this suite's "note not found" fixtures
       // never carry domain: "media", so this branch is otherwise unreached) falls through to the
       // generic case below rather than crashing on `.id`.
       if (name === "notes" && "media_item_id" in row) {
+        // Task 6's backfill write carries `media_item_id` ALONE; resolveNoteMediaLink's write
+        // carries `domain_meta` too. That key is the only signal this double has for telling
+        // the two calls apart, since both target "notes" with an update() naming
+        // `media_item_id` -- and it's what lets `opts.backfillRejected` simulate the backfill's
+        // own filters (.is("deleted_at", null), .is("media_item_id", null)) legitimately
+        // matching zero rows, independently of whether the CURRENT note's own link write
+        // (resolveNoteMediaLink) succeeds.
+        const isBackfill = !("domain_meta" in row);
+        if (isBackfill && opts.backfillRejected) {
+          return chain(() => ({ data: null, error: null }), sink);
+        }
         const noteRow = opts.note === undefined ? NOTE : opts.note;
         return chain(() => (
           noteRow ? { data: { id: noteRow.id }, error: null } : { data: null, error: null }
-        ));
+        ), sink);
       }
-      return chain(() => ({ data: null, error: null }));
+      return chain(() => ({ data: null, error: null }), sink);
     },
     upsert: () => chain(() => ({ data: null, error: null })),
   });
@@ -1158,6 +1194,242 @@ describe("runTurn", () => {
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
     expect(events.some((e) => e.type === "offer")).toBe(false);
     expect(jsonCalls, "extraction only -- proposeOffer's classify call must not run").toBe(1);
+  });
+
+  /** Like `ai()`, but the reply is a question and the prompt it was built from is captured. */
+  const askingAi = (value: Record<string, unknown>, reply = "Phim gì vậy?") => {
+    const seen: string[] = [];
+    return {
+      seen,
+      client: createFakeAi({
+        generateJson: async () => ({
+          value: { intent: "statement", complexity: "simple", domain: null,
+                   domain_meta: {}, tags: [], mood: null, ...value },
+          inputTokens: 10, outputTokens: 5, model: "fake-classify",
+        }),
+        generateStream: async ({ prompt }) => {
+          seen.push(prompt);
+          return {
+            chunks: (async function* () { yield { text: reply }; })(),
+            usage: () => ({ inputTokens: 20, outputTokens: 4, model: "fake-answer" }),
+          };
+        },
+      }),
+    };
+  };
+
+  const assistantRow = (inserted: Record<string, Record<string, unknown>[]>) =>
+    (inserted.chat_messages ?? []).find((r) => r.role === "assistant");
+
+  const MEDIA_NO_TITLE = { domain: "media", domain_meta: {} };
+
+  it("asks one question when a media note names no work", async () => {
+    const { client, inserted } = dbs();
+    const { seen, client: fake } = askingAi(MEDIA_NO_TITLE);
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(seen[0]).toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta)
+      .toMatchObject({ asked: { noteId: "n1", field: "pending_item.title" } });
+  });
+
+  // We know we told the model to ask. We do not know that it did. Recording `asked` anyway would
+  // leave the next turn hunting for an answer to a question nobody was given.
+  it("records nothing when the reply contains no question at all", async () => {
+    const { client, inserted } = dbs();
+    const { client: fake } = askingAi(MEDIA_NO_TITLE, "Đã lưu.");
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  it("never asks on a turn that is correcting a false claim", async () => {
+    const { client, inserted } = dbs();
+    const { seen, client: fake } = askingAi({ ...MEDIA_NO_TITLE, checkable_claim: true });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(seen[0]).not.toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  it("never asks on a turn that answered a question", async () => {
+    const { client, inserted } = dbs();
+    const { seen, client: fake } = askingAi({ ...MEDIA_NO_TITLE, intent: "question" });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(seen[0]).not.toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  // Reachable, and not covered by the prompt builder: buildChitchatPrompt has no askAbout to
+  // pass, so the RULE could never leak there -- but the RECORD would still be written, leaving a
+  // question outstanding that nobody was asked. The guard has to be in the gap derivation.
+  it("never asks on small talk, even if the classifier called it media", async () => {
+    const { client, inserted } = dbs();
+    const { client: fake } = askingAi({ ...MEDIA_NO_TITLE, intent: "chitchat" });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  // A degraded extraction knows of no domain and therefore of no gap. Asking anyway would be the
+  // assistant inventing curiosity about a note it failed to read.
+  it("never asks when the extraction failed", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { client, inserted } = dbs();
+      const broken = createFakeAi({
+        generateJson: async () => { throw new Error("classify exploded"); },
+        generateStream: async () => ({
+          chunks: (async function* () { yield { text: "Phim gì vậy?" }; })(),
+          usage: () => null,
+        }),
+      });
+      await collect(runTurn({ userDb: client, serviceDb: client, ai: broken },
+        { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+      expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // S2 §7. The whole ceiling, and there is no number in it: if the message immediately before
+  // this turn asked something, this turn does not ask -- whether or not it was answered.
+  it("does not ask again on the turn right after a question", async () => {
+    const { client, inserted } = dbs({
+      history: [{
+        role: "assistant", content: "Phim gì vậy?", created_at: "2026-08-24T10:00:00.000Z",
+        retrieval_meta: { asked: { noteId: "n0", field: "pending_item.title" } },
+      }],
+      lastMessage: { session_id: "s1", created_at: "2026-08-24T10:00:00.000Z" },
+    });
+    const { seen, client: fake } = askingAi(MEDIA_NO_TITLE);
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    expect(seen[0]).not.toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+  });
+
+  // The other side of the same condition: an ordinary prior exchange does not suppress a question.
+  it("still asks when the previous turn asked nothing", async () => {
+    const { client, inserted } = dbs({
+      history: [{
+        role: "assistant", content: "Đã lưu.", created_at: "2026-08-24T10:00:00.000Z",
+        retrieval_meta: { incomplete: false },
+      }],
+      lastMessage: { session_id: "s1", created_at: "2026-08-24T10:00:00.000Z" },
+    });
+    const { seen, client: fake } = askingAi(MEDIA_NO_TITLE);
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    expect(seen[0]).toContain("which film, series or book it was");
+    expect(assistantRow(inserted)?.retrieval_meta).toHaveProperty("asked");
+  });
+
+  const MEDIA_WITH_TITLE = {
+    domain: "media",
+    domain_meta: { pending_item: { kind: "movie", title: "Interstellar" } },
+  };
+
+  const answeringHistory = () => ({
+    history: [{
+      role: "assistant", content: "Phim gì vậy?", created_at: "2026-08-24T10:00:00.000Z",
+      retrieval_meta: { asked: { noteId: "n0", field: "pending_item.title" } },
+    }],
+    lastMessage: { session_id: "s1", created_at: "2026-08-24T10:00:00.000Z" },
+  });
+
+  /** Every notes update that carried a media link, as `{ noteId, itemId }`. */
+  const links = (updated: Record<string, Record<string, unknown>[]>) =>
+    (updated.notes ?? [])
+      .filter((r) => "media_item_id" in r && r.media_item_id !== null)
+      .map((r) => ({
+        noteId: (r.__where as Record<string, unknown>).id,
+        itemId: r.media_item_id,
+        where: r.__where as Record<string, unknown>,
+      }));
+
+  // THE DELIVERABLE. Both notes must point at the SAME media_items row -- asserting only that
+  // note n0 became non-null passes even when the backfill created a second, duplicate item,
+  // which is the bug actually worth catching.
+  it("links the answered note and the original note to one and the same media item", async () => {
+    const { client, updated } = dbs(answeringHistory());
+    const { client: fake } = askingAi(MEDIA_WITH_TITLE, "Hay đấy!");
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    const linked = links(updated);
+    expect(linked.map((l) => l.noteId).sort()).toEqual(["n0", "n1"]);
+    expect(new Set(linked.map((l) => l.itemId)).size).toBe(1);
+  });
+
+  // The backfill writes the LINK and nothing else. Note n0 said nothing about a rating, and
+  // writing one into it would be putting words in the user's mouth.
+  it("backfills the link alone, never the original note's meta or text", async () => {
+    const { client, updated } = dbs(answeringHistory());
+    const { client: fake } = askingAi(MEDIA_WITH_TITLE, "Hay đấy!");
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    const backfill = links(updated).find((l) => l.noteId === "n0")!;
+    const row = (updated.notes ?? []).find((r) => r.__where === backfill.where)!;
+    expect(Object.keys(row).filter((k) => k !== "__where")).toEqual(["media_item_id"]);
+    // And it must refuse to touch a trashed note or overwrite an existing link.
+    expect(backfill.where).toMatchObject({ deleted_at: null, media_item_id: null });
+  });
+
+  // §8: the measurement signal. One boolean is what makes "how often was a question answered"
+  // a query rather than a guess.
+  it("records that the question was answered", async () => {
+    const { client, inserted } = dbs(answeringHistory());
+    const { client: fake } = askingAi(MEDIA_WITH_TITLE, "Hay đấy!");
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    expect(assistantRow(inserted)?.retrieval_meta).toMatchObject({ answeredAsk: true });
+  });
+
+  // The exact race the two `.is()` filters exist to protect: the write is legitimately
+  // rejected (the note was trashed mid-conversation, or a concurrent request already linked
+  // it) and PostgREST returns `error: null` regardless -- a zero-row match is not an error.
+  // `answeredAsk` must track whether a row actually moved, not merely whether the call threw.
+  it("does not record answeredAsk when the backfill write matches zero rows", async () => {
+    const { client, inserted } = dbs({ ...answeringHistory(), backfillRejected: true });
+    const { client: fake } = askingAi(MEDIA_WITH_TITLE, "Hay đấy!");
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("answeredAsk");
+  });
+
+  // No question outstanding means no backfill, however media-ish the note is. Only n1 is linked.
+  it("does not backfill anything when no question was pending", async () => {
+    const { client, updated, inserted } = dbs();
+    const { client: fake } = askingAi(MEDIA_WITH_TITLE, "Hay đấy!");
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 }));
+
+    expect(links(updated).map((l) => l.noteId)).toEqual(["n1"]);
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("answeredAsk");
+  });
+
+  // The user was asked which film, and changed the subject. Nothing resolves, nothing backfills,
+  // and the question lapses with no special case.
+  it("backfills nothing when the answer turn produced no media item", async () => {
+    const { client, updated, inserted } = dbs(answeringHistory());
+    const { client: fake } = askingAi({ domain: "health", domain_meta: {} }, "Ừ.");
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
+      { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
+
+    expect(links(updated)).toEqual([]);
+    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("answeredAsk");
   });
 });
 

@@ -495,6 +495,34 @@ describe("extractNote", () => {
     const { data } = await db.from("note_enrichment").select("extracted_hash").eq("note_id", note.noteId).maybeSingle();
     expect(data).toBeNull();
   });
+
+  // The state Task 2's detector keys off must be reachable end to end, not just permitted by the
+  // prompt: `media` survives with an EMPTY meta, rather than being rejected or coerced.
+  it("keeps domain \"media\" when the model omits pending_item", async () => {
+    const note = await seedNote("hôm nay tôi mới đi xem phim");
+    const result = await extractNote(
+      { db, ai: aiReturning({ intent: "statement", complexity: "simple", domain: "media",
+                              domain_meta: {}, tags: [], mood: null }) },
+      note,
+    );
+    expect(result.domain).toBe("media");
+    expect(result.domainMeta).toEqual({});
+  });
+
+  // Characterisation, and the reason Step 3's last clause is in the prompt: a half-filled
+  // pending_item does not merely lose itself, it loses every sibling key. If this test ever goes
+  // red because `rating` survived, extract.ts started salvaging valid keys -- read the S2 spec §3
+  // before deleting the test, because the prompt rule was written against this behaviour.
+  it("drops the WHOLE meta when pending_item has no title, rating included", async () => {
+    const note = await seedNote("xem phim, 8 điểm");
+    const result = await extractNote(
+      { db, ai: aiReturning({ intent: "statement", complexity: "simple", domain: "media",
+                              domain_meta: { pending_item: { kind: "movie" }, rating: 4 },
+                              tags: [], mood: null }) },
+      note,
+    );
+    expect(result.domainMeta).toEqual({});
+  });
 });
 
 describe("extractNote — intent, complexity and language", () => {
@@ -643,6 +671,22 @@ describe("the media prompt and the mediaKind enum", () => {
     const offered = [...line!.matchAll(/"([a-z_]+)"(?=\s*[|,])/g)].map((m) => m[1]!);
     expect(offered.length, "no quoted kinds parsed out of the prompt line").toBeGreaterThan(0);
     expect(new Set(offered)).toEqual(new Set(mediaKind.options));
+  });
+
+  // S2 §3. The old wording ("pending_item is REQUIRED") left the model no way to say "they did
+  // not name the work", which is the exact state the follow-up question exists to resolve.
+  it("permits a media note that names no work, instead of requiring a title", () => {
+    const p = buildPrompt("hôm nay tôi mới đi xem phim", []);
+    expect(p).not.toMatch(/pending_item is REQUIRED/i);
+    expect(p).toMatch(/OMIT pending_item/i);
+    expect(p).toMatch(/never invent a title/i);
+  });
+
+  // The mirror of the existing "a short follow-up counts as a question" rule: here the assistant
+  // asked and the user answered.
+  it("tells the classifier to read an answer together with the question it answers", () => {
+    const p = buildPrompt("Interstellar, hay lắm", []);
+    expect(p).toMatch(/ANSWERS a question you asked/i);
   });
 });
 

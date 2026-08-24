@@ -572,3 +572,39 @@ describe("the verification exception", () => {
     expect(plain()).not.toMatch(/đúng rồi/);
   });
 });
+
+describe("Stage S2 follow-up rule", () => {
+  it("asks for the missing thing, once, when given something to ask about", () => {
+    const p = buildAcknowledgePrompt({
+      note: "hôm nay tôi mới đi xem phim", domain: "media", tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW, verify: false, askAbout: "which film, series or book it was",
+    });
+    expect(p).toContain("which film, series or book it was");
+    expect(p).toMatch(/ONE short/);
+    expect(p).toMatch(/do not ask two things/i);
+  });
+
+  it("carries no follow-up rule at all when there is nothing to ask about", () => {
+    const p = buildAcknowledgePrompt({
+      note: "n", domain: null, tags: [], related: [], history: [], timeZone: TZ, now: NOW,
+      verify: false,
+    });
+    expect(p).not.toMatch(/ONE short/);
+  });
+
+  // THE EXCLUSION. VERIFY_RULE says "do not ask a follow-up"; the S2 rule says to ask one.
+  // Rendering both puts two contradictory instructions in one prompt and the model will
+  // sometimes obey the wrong one -- so correcting a false claim wins and the question is dropped.
+  //
+  // This test MUST pass both flags. Asserting on a verify-only call would pass for the wrong
+  // reason: there is no askAbout in that call, so of course no rule appears.
+  it("drops the follow-up when it would collide with the verification rule", () => {
+    const p = buildAcknowledgePrompt({
+      note: "omega-3 chữa được cận thị", domain: "media", tags: [], related: [], history: [],
+      timeZone: TZ, now: NOW, verify: true, askAbout: "which film, series or book it was",
+    });
+    expect(p).toMatch(/do not ask a follow-up/i);   // VERIFY_RULE is present
+    expect(p).not.toMatch(/ONE short/);              // and the S2 rule is not
+    expect(p).not.toContain("which film, series or book it was");
+  });
+});
