@@ -3,11 +3,6 @@ import { AppSchema } from "@cortex/sync";
 import { PowerSyncDatabase } from "@powersync/react-native";
 import { File } from "expo-file-system";
 
-// Extensionless, NOT the `./x.js` form the rest of the monorepo uses. Those packages compile
-// to dist/ under NodeNext, where the suffix is required; apps/mobile is bundled by Metro, which
-// resolves `./app-lock.js` against a file that does not exist and fails the build outright.
-// `expo/tsconfig.base` uses bundler resolution, so extensionless is the correct idiom here.
-import { hasStrongBiometrics } from "./app-lock";
 import { ApiConnector } from "./connector";
 import { getOrCreateDatabaseKey } from "./db-key";
 import { setupNotesFts } from "./fts";
@@ -79,12 +74,11 @@ export async function initPowerSync(): Promise<{ db: PowerSyncDatabase; wiped: b
   if (opening) return opening;
 
   opening = (async () => {
-    // Required, and it must come from app-lock's `hasStrongBiometrics()`. Hardcoding `true`
-    // rejects every PIN-only device; hardcoding `false` drops the auth binding on devices that
-    // could have had it. See Task 10's AS SHIPPED note.
-    const outcome = await getOrCreateDatabaseKey({
-      strongBiometrics: await hasStrongBiometrics(),
-    });
+    // Always ungated: the app no longer requires a biometric to unlock (dropped 2026-08-25,
+    // it added friction with no threat model this single-user app still needs). An ungated key
+    // is still Keystore-backed and the database still encrypted -- it is only unbound from a
+    // user-auth event, which also means `getOrCreateDatabaseKey` can never report `lost` here.
+    const outcome = await getOrCreateDatabaseKey({ strongBiometrics: false });
     const wiped = outcome.status === "lost";
 
     // The old file must be GONE BEFORE the database is constructed, not cleared afterwards.

@@ -21,9 +21,6 @@ import { themeFor } from "../theme";
  * While loading it paints the page colour rather than `null`. `null` renders as the system's own
  * window background, which is pure white -- a white flash before a silk-coloured app, and a much
  * worse one before the dark scheme.
- *
- * Mounted OUTSIDE `AppLockGate`, unlike PowerSyncProvider: loading a .ttf touches no user data,
- * and the lock screen has type on it that should already be in the right face.
  */
 export function FontGate({ children }: { children: React.ReactNode }) {
   const theme = themeFor(useColorScheme());

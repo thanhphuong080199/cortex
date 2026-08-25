@@ -8,12 +8,8 @@ import { themeFor } from "../theme";
 import type { PowerSyncDatabase } from "@powersync/react-native";
 
 /**
- * Opens the encrypted local replica once and hands it to the tree (spec §7.4).
- *
- * Mounted INSIDE `AppLockGate`, never outside it: opening the database prompts for the
- * biometric that guards its key, and doing that before the app lock has run would authenticate
- * the user twice for one entry -- and would touch local data ahead of the gate that exists to
- * stop exactly that (§7.7).
+ * Opens the encrypted local replica once and hands it to the tree (spec §7.4). The key is no
+ * longer biometric-gated (dropped 2026-08-25), so opening here prompts for nothing.
  */
 export function PowerSyncProvider({ children }: { children: React.ReactNode }) {
   const theme = themeFor(useColorScheme());

@@ -62,9 +62,6 @@ const setupNotesFts = vi.fn(async () => {
 vi.mock("./fts.js", () => ({ setupNotesFts }));
 vi.mock("./connector.js", () => ({ ApiConnector: class {} }));
 
-const hasStrongBiometrics = vi.fn(async () => true);
-vi.mock("./app-lock.js", () => ({ hasStrongBiometrics }));
-
 let outcome: KeyOutcome = { status: "loaded", key: "aa" };
 const getOrCreateDatabaseKey = vi.fn(async () => outcome);
 vi.mock("./db-key.js", () => ({ getOrCreateDatabaseKey }));
@@ -77,7 +74,6 @@ beforeEach(() => {
   deleted.length = 0;
   existing = new Set(["/data/db/cortex.db", "/data/db/cortex.db-wal", "/data/db/cortex.db-shm"]);
   outcome = { status: "loaded", key: "aa" };
-  hasStrongBiometrics.mockClear();
   setupNotesFts.mockClear();
   getOrCreateDatabaseKey.mockClear();
   connect.mockClear();
@@ -181,14 +177,11 @@ describe("initPowerSync", () => {
     expect(options.database.dbFilename).toBe("cortex.db");
   });
 
-  it("asks the device what it can enforce rather than assuming", async () => {
+  it("always opens the key ungated, since the app dropped the biometric requirement", async () => {
     const mod = await freshModule();
-    hasStrongBiometrics.mockResolvedValueOnce(false);
 
     await mod.initPowerSync();
 
-    // Hardcoding `true` locks every PIN-only device out of its own database; hardcoding
-    // `false` drops the auth binding on devices that could have had it.
     expect(getOrCreateDatabaseKey).toHaveBeenCalledWith({ strongBiometrics: false });
   });
 

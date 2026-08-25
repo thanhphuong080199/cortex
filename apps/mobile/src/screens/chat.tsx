@@ -59,7 +59,14 @@ const PAGE = 50;
  * `keyboardWillShow` on iOS, so the composer moves WITH the keyboard rather than after it;
  * `keyboardDidShow` on Android, which has no `will` events.
  */
-function useComposerInset(): number {
+/**
+ * TEMPORARY (2026-08-25): the return type is widened to carry a debug string alongside the
+ * real inset, so the one-line banner below can show what this hook actually computed. The
+ * install the report came from is a plain release APK with no attached debugger and no Metro
+ * connection, so `console.log`/adb are not reachable -- this has to be readable ON THE SCREEN.
+ * Revert to returning just `number` once the real cause is confirmed or ruled out.
+ */
+function useComposerInset(): { inset: number; debug: string } {
   const insets = useSafeAreaInsets();
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
@@ -71,7 +78,11 @@ function useComposerInset(): number {
     return () => { shown.remove(); hidden.remove(); };
   }, []);
 
-  return composerInset({ keyboardHeight, safeAreaBottom: insets.bottom });
+  const inset = composerInset({ keyboardHeight, safeAreaBottom: insets.bottom });
+  return {
+    inset,
+    debug: `kb=${keyboardHeight} safeArea=${insets.bottom} inset=${inset} os=${Platform.OS} ver=${Platform.Version}`,
+  };
 }
 
 /**
@@ -137,7 +148,7 @@ export function Chat({ onSignOut, signingOut }: { onSignOut: () => void; signing
   // (reported 2026-08-24, same defect web had) -- this Set now only needs to cover the gap
   // between "saved" and "PowerSync has synced that write back down".
   const [saved, setSaved] = useState<ReadonlySet<string>>(new Set());
-  const bottomInset = useComposerInset();
+  const { inset: bottomInset, debug: composerInsetDebug } = useComposerInset();
 
   async function onSave(id: string, answer: string, question: string | undefined, sourceUrl: string | undefined) {
     setProposal(null);
@@ -187,6 +198,16 @@ export function Chat({ onSignOut, signingOut }: { onSignOut: () => void; signing
     // the keyboard frame directly rather than fixing the behavior prop.
     <View style={{ flex: 1, backgroundColor: theme.bg, paddingBottom: bottomInset }}>
       <ChatHeader onSignOut={onSignOut} busy={signingOut} />
+      {/* TEMPORARY (2026-08-25): visible diagnostic for the keyboard-overlap report -- the
+          install it was reported from has no Metro connection and no adb, so this has to be
+          readable on the screen itself. Sits right under the header, which stays above the
+          keyboard, so it is legible with the keyboard open. Remove once resolved. */}
+      <Text
+        testID="composer-inset-debug"
+        style={{ ...TYPE.micro, color: theme.muted, paddingHorizontal: SPACE.lg, paddingBottom: SPACE.xs }}
+      >
+        {composerInsetDebug}
+      </Text>
       <FlatList
         inverted
         data={inverted}

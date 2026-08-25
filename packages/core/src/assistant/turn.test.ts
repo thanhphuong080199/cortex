@@ -342,6 +342,57 @@ describe("runTurn", () => {
     expect(events.map((e) => e.type)).toContain("token");
   });
 
+  // Reported 2026-08-24: "Cung điện ký ức là gì?" got back an acknowledgement of a filed note
+  // instead of an answer. `extracted` was null (the classifier call failed or missed
+  // EXTRACT_DEADLINE_MS -- either looks identical from here), and `wantsAnswer` used to have no
+  // branch for that case at all, so an unmistakable question fell into buildAcknowledgePrompt.
+  it("still answers an unmistakable question when classification fails entirely", async () => {
+    const { client } = dbs({ note: { ...NOTE, content_text: "Cung điện ký ức là gì?" } });
+    let seen = "";
+    const brokenAi = createFakeAi({
+      generateJson: async () => { throw new Error("classify exploded"); },
+      generateStream: async ({ prompt }) => {
+        seen = prompt;
+        return {
+          chunks: (async function* () { yield { text: "ok" }; })(),
+          usage: () => null,
+        };
+      },
+    });
+    const events = await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: brokenAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+    // buildAnswerPrompt's own signature line, not buildAcknowledgePrompt's -- see prompts.ts.
+    expect(seen).toMatch(/Their question:/);
+    expect(seen).not.toMatch(/The user did not ask a question/);
+    expect(events.map((e) => e.type)).toContain("token");
+  });
+
+  // The other side of the same fallback: a degraded extraction must not start ANSWERING plain
+  // statements just because it can no longer tell them apart from questions. `looksLikeQuestion`
+  // is a narrow "?" / interrogative-phrase check, not a guess -- an ordinary capture with neither
+  // still falls into the acknowledge branch exactly as it did before this fallback existed.
+  it("still acknowledges an ordinary statement when classification fails", async () => {
+    const { client } = dbs({ note: { ...NOTE, content_text: "hôm nay tôi chạy bộ ở công viên" } });
+    let seen = "";
+    const brokenAi = createFakeAi({
+      generateJson: async () => { throw new Error("classify exploded"); },
+      generateStream: async ({ prompt }) => {
+        seen = prompt;
+        return {
+          chunks: (async function* () { yield { text: "ok" }; })(),
+          usage: () => null,
+        };
+      },
+    });
+    await collect(runTurn(
+      { userDb: client, serviceDb: client, ai: brokenAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 100 },
+    ));
+    expect(seen).toMatch(/The user did not ask a question/);
+  });
+
   // This scripts `usage()` returning a value AFTER the chunk iterator throws -- something the
   // real Gemini client (packages/core/src/ai/gemini.ts's openStream) cannot do: usageMetadata
   // only ever arrives on the FINAL SSE event, so a socket death before that event means `usage`
