@@ -139,7 +139,7 @@ export default function Home() {
         </Pressable>
 
         <Text style={{ ...TYPE.small, color: theme.muted, textAlign: "center" }}>
-          Ghi chú của bạn nằm trên máy, đã mã hoá, và mở bằng vân tay.
+          Ghi chú của bạn nằm trên máy, đã mã hoá.
         </Text>
 
         {error ? (
