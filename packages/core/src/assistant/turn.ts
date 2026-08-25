@@ -51,6 +51,26 @@ const withDeadline = <T>(p: Promise<T>, ms: number): Promise<T | null> => {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 };
 
+/**
+ * A deterministic backstop for the one case the classifier cannot cover: it never ran at all.
+ * `wantsAnswer` below normally comes entirely from `extracted.intent`, which is right the rest
+ * of the time -- a model call can weigh "is this really a question" far better than a regex can.
+ * But when extraction THROWS or hits `EXTRACT_DEADLINE_MS` (a real, occasional event: it is one
+ * Gemini call racing a 4-second clock), `extracted` is `null`, and `null?.intent === "question"`
+ * is `false` -- so an unambiguous question silently fell into the acknowledge branch and got
+ * filed as a note instead of answered. Reported 2026-08-24: "Cung điện ký ức là gì?" got back an
+ * acknowledgement of a filed note. Only reached when `extracted` is `null` (see `wantsAnswer`
+ * below) -- it never overrides a classification that actually ran.
+ */
+const QUESTION_PHRASES = [
+  "là gì", "cái gì", "làm sao", "vì sao", "tại sao", "thế nào", "như thế nào",
+  "bao nhiêu", "bao lâu", "ở đâu", "khi nào", "ai là", "có phải", "phải không", "đúng không",
+];
+const looksLikeQuestion = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase();
+  return normalized.endsWith("?") || QUESTION_PHRASES.some((p) => normalized.includes(p));
+};
+
 export async function* runTurn(
   deps: { userDb: SupabaseClient; serviceDb: SupabaseClient; ai: AiClient },
   args: {
@@ -326,8 +346,15 @@ export async function* runTurn(
   // Chitchat is checked SECOND and can never be reached by the flag: grounding "haha ok"
   // against Google is the most wasteful thing this system can be told to do, and
   // `alsoWantsAnswer` is a value a model produced, not trusted input.
-  const wantsAnswer = extracted?.intent === "question"
-    || (extracted?.intent === "statement" && extracted?.alsoWantsAnswer === true);
+  //
+  // `extracted === null` (extraction threw or hit EXTRACT_DEADLINE_MS) falls back to
+  // `looksLikeQuestion` rather than straight to `false`. See that function's header -- without
+  // this branch, a classifier hiccup on an unambiguous question ("Cung điện ký ức là gì?") used
+  // to silently file it as a note instead of answering it.
+  const wantsAnswer = extracted
+    ? extracted.intent === "question"
+      || (extracted.intent === "statement" && extracted.alsoWantsAnswer === true)
+    : looksLikeQuestion(text);
   const isChitchat = extracted?.intent === "chitchat";
   // THE THIRD LINK, and its position in the chain is the decision (design doc §1.1). Read only
   // when `wantsAnswer` is already false: a turn that asks a question gets ANSWERED, and the
