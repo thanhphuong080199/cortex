@@ -1,7 +1,8 @@
 import { useQuery } from "@powersync/react-native";
 import { useColorScheme } from "react-native";
 import { useEffect, useMemo, useState } from "react";
-import { FlatList, Keyboard, Platform, Pressable, Text, View } from "react-native";
+import { FlatList, Pressable, Text, View } from "react-native";
+import { useKeyboardState } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AssistantBox } from "./assistant-box";
@@ -53,36 +54,23 @@ const PAGE = 50;
  * header plus the top inset -- and that is only readable through `@react-navigation/elements`,
  * which is not a direct dependency of this app; importing it would be a phantom dependency
  * pnpm's strict layout can drop at any install. The keyboard's own frame needs no such
- * correction: `endCoordinates.height` is measured from the bottom of the window, which is the
- * edge being padded.
+ * correction.
  *
- * `keyboardWillShow` on iOS, so the composer moves WITH the keyboard rather than after it;
- * `keyboardDidShow` on Android, which has no `will` events.
+ * NOT react-native core's `Keyboard.addListener` either (2026-08-25 diagnostic build, reported
+ * back still overlapping): its Android height comes from `ReactRootView`'s `onGlobalLayout`,
+ * which fires when the window resizes but NOT when Gboard swaps in its own toolbar strip (the
+ * magic/emoji/translate/settings/clipboard row) on top of the key rows -- that row changes the
+ * keyboard's occupied height without changing the window, so no layout pass -- and therefore no
+ * `keyboardDidShow` -- ever fires for it. The reserved padding came up short by exactly that
+ * strip's height, which is why the composer sat right where it drew. Open and unresolved
+ * upstream: facebook/react-native#51015. `react-native-keyboard-controller`'s `useKeyboardState`
+ * instead tracks the focused input's keyboard via the OS's own focus/type callbacks, which do
+ * see the toolbar.
  */
-/**
- * TEMPORARY (2026-08-25): the return type is widened to carry a debug string alongside the
- * real inset, so the one-line banner below can show what this hook actually computed. The
- * install the report came from is a plain release APK with no attached debugger and no Metro
- * connection, so `console.log`/adb are not reachable -- this has to be readable ON THE SCREEN.
- * Revert to returning just `number` once the real cause is confirmed or ruled out.
- */
-function useComposerInset(): { inset: number; debug: string } {
+function useComposerInset(): number {
   const insets = useSafeAreaInsets();
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
-
-  useEffect(() => {
-    const show = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
-    const hide = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
-    const shown = Keyboard.addListener(show, (e) => setKeyboardHeight(e.endCoordinates.height));
-    const hidden = Keyboard.addListener(hide, () => setKeyboardHeight(0));
-    return () => { shown.remove(); hidden.remove(); };
-  }, []);
-
-  const inset = composerInset({ keyboardHeight, safeAreaBottom: insets.bottom });
-  return {
-    inset,
-    debug: `kb=${keyboardHeight} safeArea=${insets.bottom} inset=${inset} os=${Platform.OS} ver=${Platform.Version}`,
-  };
+  const { isVisible, height } = useKeyboardState();
+  return composerInset({ keyboardHeight: isVisible ? height : 0, safeAreaBottom: insets.bottom });
 }
 
 /**
@@ -148,7 +136,7 @@ export function Chat({ onSignOut, signingOut }: { onSignOut: () => void; signing
   // (reported 2026-08-24, same defect web had) -- this Set now only needs to cover the gap
   // between "saved" and "PowerSync has synced that write back down".
   const [saved, setSaved] = useState<ReadonlySet<string>>(new Set());
-  const { inset: bottomInset, debug: composerInsetDebug } = useComposerInset();
+  const bottomInset = useComposerInset();
 
   async function onSave(id: string, answer: string, question: string | undefined, sourceUrl: string | undefined) {
     setProposal(null);
@@ -198,16 +186,6 @@ export function Chat({ onSignOut, signingOut }: { onSignOut: () => void; signing
     // the keyboard frame directly rather than fixing the behavior prop.
     <View style={{ flex: 1, backgroundColor: theme.bg, paddingBottom: bottomInset }}>
       <ChatHeader onSignOut={onSignOut} busy={signingOut} />
-      {/* TEMPORARY (2026-08-25): visible diagnostic for the keyboard-overlap report -- the
-          install it was reported from has no Metro connection and no adb, so this has to be
-          readable on the screen itself. Sits right under the header, which stays above the
-          keyboard, so it is legible with the keyboard open. Remove once resolved. */}
-      <Text
-        testID="composer-inset-debug"
-        style={{ ...TYPE.micro, color: theme.muted, paddingHorizontal: SPACE.lg, paddingBottom: SPACE.xs }}
-      >
-        {composerInsetDebug}
-      </Text>
       <FlatList
         inverted
         data={inverted}
