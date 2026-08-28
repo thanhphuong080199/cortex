@@ -50,41 +50,9 @@ const RECALL_RULE =
   "recall one of those as something they thought or wrote -- say it came from an answer you " +
   "gave them before.";
 
-/**
- * How long a reply should be and what shape it takes. On buildAnswerPrompt ONLY.
- *
- * Observed: a casual "mỏi mắt ăn gì" came back as a multi-section writeup with bolded category
- * headers -- the same shape as a question that had explicitly asked to list things out. The
- * prompt carried no shape guidance at all, so that was the model's default, not a template.
- *
- * BOTH halves are load-bearing and they are now INDEPENDENT, which they were not before
- * 2026-08-22. The rule used to read "a short, casual question gets a short, conversational
- * answer -- two or three sentences of prose, no headings and no list", which tied length to
- * structure and left no cell for LONG PROSE: a substantive question that deserves depth and is
- * not a list. Such a question fell into the casual branch and came back capped. The user's
- * verdict was that replies were too short; the fix is to let depth follow the question while
- * keeping structure as the exception it already was.
- *
- * The exception clause is still the half a later edit will drop, and prompts.test.ts still
- * asserts each half separately for exactly that reason.
- *
- * It says nothing about markdown syntax. Both clients render markdown as of 2026-08-18, so
- * `**bold**` is no longer literal punctuation on screen -- and a rule phrased around syntax
- * would have to be rewritten the next time a client's rendering changes. The rule is about the
- * SHAPE of the answer, which is stable.
- *
- * Not on buildAcknowledgePrompt ("one or two sentences") or buildChitchatPrompt ("one short,
- * natural line"): both already cap themselves, and a second differently-worded length rule
- * gives the model two constraints to reconcile where it has one.
- */
-const FORMAT_RULE =
-  "Match the shape and the depth of the reply to the weight of the question. A short, casual " +
-  "question gets a short, conversational answer. A question that genuinely asks for something " +
-  "gets as much as it actually needs -- several paragraphs is fine, and prose is still the " +
-  "default shape at any length. Reach for headings or a numbered list only when the user " +
-  "actually asked to enumerate or compare (\"liệt kê\", \"các bước\", \"so sánh\", \"list " +
-  "out\"), or when the answer genuinely is a set of parallel items that prose would obscure. " +
-  "Structure is the exception, not the default shape of an answer.";
+// FORMAT_RULE lived here -- "match reply shape/depth to the question's weight", exclusive to
+// buildAnswerPrompt. Removed 2026-08-28 with that prompt's whole rule stack (see
+// buildAnswerPrompt's doc comment); recoverable from git history.
 
 /**
  * Stage C5 §9.3. Added to buildAcknowledgePrompt only when the classifier flagged the note as
@@ -166,22 +134,10 @@ const temporalRule = (now: Date, timeZone: string) =>
   "về nó như việc sắp xảy ra. Note không có ngày thì đừng đoán ngày cho nó. Riêng note hoặc " +
   "câu hỏi ở cuối cùng — cái người dùng vừa viết — là của HÔM NAY.";
 
-/**
- * Reported 2026-08-24: a web-grounded reply defaulted to US context (prices, availability, "in
- * the US") for a user who never said they were in the US -- because nothing in the prompt gave
- * the model any location signal at all. `timeZone` was already resolved for the temporal rule
- * (and defaults to Asia/Ho_Chi_Minh, this corpus's actual users), so this is what turns that
- * value into a location signal too, rather than leaving grounding to answer around a blank.
- *
- * On buildAnswerPrompt only: it is the only prompt that tells the model it may search the web at
- * all, in words. buildAcknowledgePrompt's verify branch can also ground (turn.ts's `grounds =
- * wantsAnswer || verifies`), but carries no such permission sentence today either -- a pre-
- * existing gap this task does not touch.
- */
-const locationRule = (timeZone: string) =>
-  `Múi giờ của người dùng là ${timeZone}. Suy ra khu vực hoặc quốc gia của họ từ đó (và từ ngôn ` +
-  "ngữ họ dùng), và dùng nó khi câu trả lời phụ thuộc vào vị trí -- giá cả, đơn vị tiền tệ, thời " +
-  "tiết, giờ mở cửa, luật lệ, tin tức địa phương. Đừng mặc định họ đang ở Mỹ.";
+// locationRule lived here -- infer the user's region from their time zone/language so a
+// web-grounded answer stops defaulting to US context. Exclusive to buildAnswerPrompt. Removed
+// 2026-08-28 with that prompt's whole rule stack (see buildAnswerPrompt's doc comment);
+// recoverable from git history.
 
 // `timeZone` is optional here (not on the two answer/acknowledge builders) solely so
 // buildChitchatPrompt -- which has no clock at all -- can keep calling this with one argument.
@@ -240,11 +196,27 @@ const renderCitations = (citations: Citation[] | "failed", timeZone: string) =>
         "their notes.";
 
 /**
- * Stage C3 is life-domains spec §6: Gemini `google_search` grounding, with dual "from your
- * notes / from the web" citations. The model may fill a gap in the user's notes from the web or
- * from its own general knowledge -- either way it must say plainly that the material is not
- * from their notes, never blend it into "their own notes" the way a citation does. Web sources
- * are additionally carried as `WebCitation`s (turn.ts) so the UI can show the notes/web split.
+ * TEMPORARY (2026-08-28): stripped down to raw history + question, no rules and no citations,
+ * while the reported "user gets no answer at all" bug is chased. The suspicion driving this is
+ * that the full instruction stack below (language/format/temporal/location/recall + a rendered
+ * notes block) is itself implicated -- unconfirmed; the closest prior incident of this shape
+ * (docs/superpowers/specs/2026-08-23-post-merge-bugfix-design.md §7, "Hello hello" got no
+ * reply) turned out to be an aborted response stream, nothing to do with prompt content. If
+ * that turns out to be true again here, this change will not have fixed it.
+ *
+ * `citations` and `timeZone` stay in the signature (turn.ts passes them unconditionally, same
+ * call site as before) but are UNUSED below -- deliberately not renamed to `_citations` etc.,
+ * because the point of keeping the signature stable is that reverting is a one-function diff.
+ * `google_search` grounding is still requested by turn.ts's `grounds` flag regardless of what
+ * this prompt says, so the model may still ground -- it is just never told it may in words.
+ *
+ * The full version -- LANGUAGE_RULE, temporalRule, RECALL_RULE, renderCitations, the "may
+ * search the web" / "never present web content as the user's own" lines, all with their own
+ * regression tests and reported-bug provenance in the comments above -- is one `git log` away,
+ * not deleted from history, just from this function. `FORMAT_RULE` and `locationRule` were
+ * exclusive to this prompt (see their own doc comments) and are removed below rather than left
+ * as dead consts an unused-vars lint rule would flag; they come back from history the same way.
+ * See prompts.test.ts for which of the now-inapplicable tests are `it.skip`'d for the same reason.
  */
 export function buildAnswerPrompt(a: {
   question: string;
@@ -253,24 +225,7 @@ export function buildAnswerPrompt(a: {
   timeZone: string;
   now: Date;
 }): string {
-  return [
-    "You are the user's second brain and conversational assistant. Answer their question using " +
-      "their own notes first.",
-    LANGUAGE_RULE,
-    FORMAT_RULE,
-    temporalRule(a.now, a.timeZone),
-    locationRule(a.timeZone),
-    RECALL_RULE,
-    // Life-domains spec §6.1. Grounding replaced the narrower rule this line used to carry: the
-    // gap-filler is no longer only the model's own memory, so the disclosure rule has to name
-    // the web explicitly rather than "outside knowledge" in general.
-    "You may search the web when their notes cannot answer the question, or when the question " +
-      "is time-sensitive. Answer from their notes first.",
-    "Never present web content as the user's own thinking. Say where something came from.",
-    renderCitations(a.citations, a.timeZone),
-    renderHistory(a.history, a.timeZone),
-    `\n\nTheir question: ${a.question}`,
-  ].join("\n");
+  return [renderHistory(a.history), `\n\nTheir question: ${a.question}`].join("\n");
 }
 
 /**
