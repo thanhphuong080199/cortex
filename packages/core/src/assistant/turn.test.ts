@@ -5,7 +5,7 @@ import {
 } from "@cortex/shared";
 import type { GroundingResult } from "../ai/client.js";
 import { createFakeAi } from "../ai/fake.js";
-import { runTurn, type AssistantEvent } from "./turn.js";
+import { EXTRACT_DEADLINE_MS, runTurn, type AssistantEvent } from "./turn.js";
 
 const NOTE = {
   id: "n1", user_id: "u1",
@@ -1611,8 +1611,19 @@ describe("runTurn", () => {
   // list, and "Bơi lội có giúp phát triển cơ bắp không" came back as an acknowledgement of a filed
   // note.
   //
-  // Red when: an `await` on the classification is reintroduced anywhere above the generateStream
-  // call.
+  // Red when: the first token is delayed toward EXTRACT_DEADLINE_MS. That is what a regression
+  // re-sequencing classification ahead of the prompt (`Promise.allSettled([withDeadline(extractNote,
+  // ...), retrieve])` before `generateStream`, i.e. Task 3's shape) would do to this fixture --
+  // `withDeadline` still bounds it, so it would still complete this test's answer, tag count and
+  // `degraded: true` checks inside the 20s budget, JUST ~EXTRACT_DEADLINE_MS late. Those four
+  // content checks alone do not time anything and would stay green under that regression; the
+  // timing assertion below is what actually forces this test red on it. (An earlier version of
+  // this test claimed those content checks alone were sufficient -- they are not, at the deadline
+  // values this file ships. See turn.test.ts's git history / task-4 fix-round-1 for how this was
+  // found.) Test B below ("opens the model stream before classification has settled") is the other,
+  // independent discriminator, and is not weakened by any of this -- its gate lives inside the fake
+  // `generateStream` itself, so a sequential-await implementation deadlocks on it until
+  // `withDeadline`'s internal timer fires.
   it("answers in full while classification is still hanging", async () => {
     const { client } = dbs();
     const seen: { prompt?: string }[] = [];
@@ -1628,8 +1639,24 @@ describe("runTurn", () => {
         };
       },
     });
-    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: hanging },
-      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+
+    const startedAt = Date.now();
+    let firstTokenMs: number | null = null;
+    const events: AssistantEvent[] = [];
+    for await (const e of runTurn({ userDb: client, serviceDb: client, ai: hanging },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 })) {
+      if (e.type === "token" && firstTokenMs === null) firstTokenMs = Date.now() - startedAt;
+      events.push(e);
+    }
+
+    // THE discriminator: the first token must land almost immediately, not after classification's
+    // own deadline has burned down. A regression that awaits classification before the prompt would
+    // push this well past EXTRACT_DEADLINE_MS / 2 (it would land near EXTRACT_DEADLINE_MS itself);
+    // a correct decoupled turn lands in low milliseconds, since nothing before the first token
+    // depends on the hung `generateJson` call at all.
+    expect(firstTokenMs, "a token must have arrived").not.toBeNull();
+    expect(firstTokenMs, "the first token must not wait on classification")
+      .toBeLessThan(EXTRACT_DEADLINE_MS / 2);
 
     const answer = events.filter((e) => e.type === "token").map((e) => (e as { text: string }).text).join("");
     expect(answer).toBe("Bơi lội có.");
