@@ -47,56 +47,7 @@ describe("IS_E2E_BUILD", () => {
   });
 });
 
-describe("authenticate", () => {
-  /**
-   * Mocked with the package's real SecurityLevel numbering, matching app-lock.test.ts -- a mock
-   * that invented its own would let an implementation comparing the wrong level pass.
-   */
-  function mockLocalAuth(success: boolean) {
-    const authenticateAsync = vi.fn(async () => ({ success }));
-    vi.doMock("expo-local-authentication", () => ({
-      authenticateAsync,
-      hasHardwareAsync: vi.fn(async () => true),
-      isEnrolledAsync: vi.fn(async () => true),
-      getEnrolledLevelAsync: vi.fn(async () => 3),
-      SecurityLevel: { NONE: 0, SECRET: 1, BIOMETRIC_WEAK: 2, BIOMETRIC_STRONG: 3 },
-    }));
-    return authenticateAsync;
-  }
-
-  it("does not prompt at all in an E2E build", async () => {
-    vi.resetModules();
-    process.env.EXPO_PUBLIC_E2E = "1";
-    const authenticateAsync = mockLocalAuth(false);
-    const { authenticate } = await import("./app-lock.js");
-
-    // `true` even though the mocked prompt would have failed: the point is that the prompt is
-    // never reached, which is what makes the gate passable on an emulator with no enrolled
-    // biometric.
-    await expect(authenticate()).resolves.toBe(true);
-    expect(authenticateAsync).not.toHaveBeenCalled();
-  });
-
-  it("prompts for a Class 3 biometric when the flag is off", async () => {
-    vi.resetModules();
-    delete process.env.EXPO_PUBLIC_E2E;
-    const authenticateAsync = mockLocalAuth(true);
-    const { authenticate } = await import("./app-lock.js");
-
-    await expect(authenticate()).resolves.toBe(true);
-    expect(authenticateAsync).toHaveBeenCalledWith(
-      expect.objectContaining({
-        biometricsSecurityLevel: "strong",
-        disableDeviceFallback: false,
-      }),
-    );
-  });
-
-  it("still reports a refused prompt as a failure when the flag is off", async () => {
-    vi.resetModules();
-    delete process.env.EXPO_PUBLIC_E2E;
-    mockLocalAuth(false);
-    const { authenticate } = await import("./app-lock.js");
-    await expect(authenticate()).resolves.toBe(false);
-  });
-});
+// There was a second block here covering `authenticate()`'s E2E bypass -- the biometric app
+// lock's. The lock was dropped on 2026-08-25 (68b618c) and app-lock.ts with it on 2026-08-29,
+// so the only bypass this flag still opens is the deep-link session route, and that one is
+// exercised for real by .maestro/subflows/install-session.yaml on every E2E run.

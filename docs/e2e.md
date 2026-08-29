@@ -300,16 +300,14 @@ nothing else; Google's consent screen is not automatable. The E2E user is create
 Supabase admin API, and the session is injected — as cookies on web (`e2e/global-setup.ts`),
 over a `cortex://e2e-session` deep link on mobile. Everything behind sign-in is covered.
 
-**The three app-lock behaviours** (prompt on cold start, no prompt inside the 60s grace, prompt
-after it). The APK under test is built with `EXPO_PUBLIC_E2E=1`, which makes `authenticate()`
-return `true` without prompting — an emulator has no enrolled Class 3 biometric, so the gate
-would otherwise never open. Covering these needs a second APK without the flag plus
-`adb shell locksettings set-pin` and `adb emu finger touch 1`. `shouldRelock` is unit-tested;
-the `AppState` wiring in `AppLockGate` is a manual check on a real device.
-
 **Re-enrolling a biometric → the "offline copy was reset" banner.** Driving the Settings UI to
 add a second fingerprint and waiting for KeyStore invalidation is too flaky to be worth it.
-`db-key.test.ts` covers the `lost` transition.
+`db-key.test.ts` covers the `lost` transition. Note that `lost` cannot fire in the shipped app
+at all any more: `powersync.ts` stores the database key ungated, so nothing can invalidate it.
+
+~~**The three app-lock behaviours.**~~ There is no app lock. It was dropped on 2026-08-25
+(`68b618c`) and `app-lock.ts` followed on 2026-08-29; `EXPO_PUBLIC_E2E` now opens exactly one
+bypass, the deep-link session above.
 
 ### The limit of a green mobile run
 

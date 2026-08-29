@@ -13,9 +13,34 @@ APK=apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
 APP_ID=app.cortex.mobile
 SEED=${SEED_FILE:-/tmp/seed.json}
 
+# PINNED, because the installer takes whatever is newest and CI was silently riding it: 2.8.0 on
+# 2026-08-25, 2.9.0 on 2026-08-28, three days apart, on the same commit range. A suite that is
+# hard enough to debug without the test runner being a moving part -- when a flow starts failing,
+# "did Maestro change" must not be one of the open questions.
+#
+# To move it: bump here, and read the release notes for selector and `tapOn` behaviour, which is
+# where this suite is sensitive.
+MAESTRO_VERSION=2.9.0
+export MAESTRO_VERSION
+# Off in CI on principle, and load-bearing here: with analytics on, the FIRST `maestro` call
+# prints an "Anonymous analytics enabled" banner ahead of its own output, which the version
+# comparison below would read as the version.
+export MAESTRO_CLI_NO_ANALYTICS=1
+# Honoured by get.maestro.mobile.dev: unset it downloads releases/latest, set it downloads
+# releases/download/cli-$MAESTRO_VERSION. A version that does not exist fails the download
+# rather than falling back, and the check below is what turns that into a named failure.
 curl -Ls "https://get.maestro.mobile.dev" | bash
 export PATH="$PATH:$HOME/.maestro/bin"
-maestro --version
+
+# `|| true` so that a maestro that did not install at all reaches the message below rather than
+# dying on `set -e` at the assignment, which would name nothing.
+installed=$(maestro --version | tr -d '\r' | tail -n 1 || true)
+if [ "$installed" != "$MAESTRO_VERSION" ]; then
+  echo "::error::asked for Maestro $MAESTRO_VERSION, got '$installed'. Either the install failed"
+  echo "::error::or MAESTRO_VERSION was ignored -- either way this run is not on the pinned CLI."
+  exit 1
+fi
+echo "maestro $installed (pinned)"
 
 adb install -r "$APK"
 

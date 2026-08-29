@@ -25,7 +25,8 @@
           "android": {
             "embeddedBundle": true,
             "skipOnboarding": true,
-            "showMenuAtLaunch": false
+            "showMenuAtLaunch": false,
+            "toolsButton": false
           }
         }
       ]

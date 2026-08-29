@@ -167,6 +167,17 @@ jobs:
       - name: Seed the E2E user and corpus
         run: node e2e/scripts/seed.mjs --reset > /tmp/seed.json
 
+      # BUMP THE SUFFIX to throw the snapshot away. This is the only control there is: the key
+      # names an API level and an ABI, but the thing that actually loads the snapshot is whatever
+      # `sdkmanager --install emulator --channel=0` pulled today, and that floats. A snapshot is
+      # only guaranteed loadable by the emulator that wrote it.
+      #
+      # v1 -> v2 on 2026-08-29 after run 33245580789 died at the first `launchApp` with
+      # `device offline`: the emulator logged "Successfully loaded snapshot 'default_boot'",
+      # answered `sys.boot_completed`, took an `adb install`, and then dropped off adb for good
+      # about forty seconds later. The snapshot dated from 2026-08-07; the emulator loading it
+      # was 37.1.11. That pairing is the suspect and this is a HYPOTHESIS, not a diagnosis --
+      # one occurrence, and the two runs before it booted the same cached snapshot fine.
       - name: Cache AVD snapshot
         uses: actions/cache@v4
         id: avd-cache
@@ -174,7 +185,7 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-33-x86_64-v1
+          key: avd-33-x86_64-v2
 
       # A separate app-free boot. Folded into the test step, the first cold boot's cost would be
       # charged to a flow timeout instead of to booting, which is a confusing way to learn that
