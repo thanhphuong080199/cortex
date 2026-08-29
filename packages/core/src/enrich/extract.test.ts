@@ -775,9 +775,9 @@ describe("checkableClaim", () => {
       .toBe(true);
   });
 
-  // THE COST CEILING, defaulted the same way and for the same reason as intent and
-  // alsoWantsAnswer: false is the branch that never spends ANSWER_MODEL. One schema miss must
-  // not silently promote every capture in the corpus onto the reasoning model.
+  // Defaulted the same way and for the same reason as intent and alsoWantsAnswer: a schema miss
+  // must read as "nothing flagged", not as an unrelated true. RECORDED, NOT ACTED ON since
+  // 2026-08-29 -- every turn reaches ANSWER_MODEL regardless of this flag (extract.ts).
   it("defaults a missing checkable_claim to false", async () => {
     expect((await runExtract({ intent: "statement" })).checkableClaim).toBe(false);
   });

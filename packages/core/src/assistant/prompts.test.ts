@@ -72,6 +72,9 @@ describe("buildTurnPrompt", () => {
     expect(p).toMatch(/Trong các ghi chú của bạn/);
     expect(p).toMatch(/hôm 18\/8 bạn có nhắc/);
     expect(p).toMatch(/Never use a bracketed number/i);
+    // The third disjunct in RECALL_RULE's "never" clause, distinct from the two Vietnamese
+    // phrasings above -- a rewrite that drops only this one would pass the other two asserts.
+    expect(p).toMatch(/never state that a match was found/i);
   });
 
   // RECALL_RULE's second load-bearing clause, independent of the database-match framing above:
