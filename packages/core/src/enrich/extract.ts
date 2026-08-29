@@ -8,9 +8,13 @@ import { recordUsage } from "./budget.js";
 /**
  * The three kinds of turn. `chitchat` is stage C4: "hello", "haha ok", "1111" -- input with
  * nothing to file and no question in it. Before it existed, those were forced into one of the
- * other two, and both reply templates are wrong for them (prompts.ts's acknowledge branch
- * explicitly refuses to converse; the answer branch searches the corpus for an answer to
- * "what?").
+ * other two, and both reply templates were wrong for them (the old acknowledge prompt explicitly
+ * refused to converse; the old answer prompt searched the corpus for an answer to "what?"). Since
+ * 2026-08-29 (one-prompt-turn) there is a single prompt, `buildTurnPrompt` (prompts.ts), and
+ * `intent` no longer selects between prompts or models -- it is recorded as an annotation and
+ * read by turn.ts only to decide what the note is stamped as and whether to offer to save an
+ * answer. WEIGHT_RULE is what now carries the chitchat distinction the deleted acknowledge branch
+ * used to.
  *
  * Exported and reused in buildPrompt below so the schema and the prompt cannot name different
  * sets -- the same drift `mediaKind` already cost this file once.
@@ -39,9 +43,12 @@ const RESPONSE_SCHEMA = {
     // to record and a question. Not a fourth intent -- `intent` still drives tagging, domain,
     // filing tone and chitchat exclusion, and all three are correct at "statement" here.
     alsoWantsAnswer: { type: "boolean" },
-    // Stage C5 §9.2. A couple of output tokens on a call that is already happening, and unlike
-    // `complexity` this one is acted on: a flagged statement is the only statement that reaches
-    // ANSWER_MODEL. Not in `required`, for the reason the defaults below document.
+    // Stage C5 §9.2. RECORDED, NOT ACTED ON since 2026-08-29 -- it joins `complexity`. It used to
+    // be the only thing that promoted a statement to the reasoning model; every turn reaches that
+    // model now, and the correction rule carries its own scope in words instead (prompts.ts's
+    // CORRECTION_RULE). Kept because it costs a couple of output tokens on a call that is already
+    // happening and it keeps the flag RATE measurable, which is the only route to answering C5
+    // §15's open question of whether the flagging was ever useful.
     checkable_claim: { type: "boolean" },
     // RECORDED, NOT ACTED ON. It costs a couple of output tokens and produces the dataset a
     // future model-routing decision needs: complexity x real cost x model. Nothing reads it.
@@ -357,7 +364,9 @@ export async function extractNote(
 
   // intent and complexity are DEFAULTED rather than trusted. `required` in a responseSchema is a
   // request, not a guarantee, and an absent intent must not throw away an otherwise good
-  // extraction: "statement" is the safe branch, because it never spends the reasoning model.
+  // extraction: "statement" is the safe branch, because it never misreads a plain capture as a
+  // question that needs an offer or a `chat`-source stamp -- not because of what model runs, since
+  // every intent reaches ANSWER_MODEL the same way now.
   return {
     tags: accepted.length,
     tagNames: accepted,
@@ -371,13 +380,16 @@ export async function extractNote(
     // compiles and lets an unrecognised string through to turn.ts's branch.
     intent: value.intent === "question" || value.intent === "chitchat" ? value.intent : "statement",
     // A COMPARISON, not a cast, and `=== true` rather than a truthiness check: the model can
-    // return the STRING "true", or "no", and both are truthy. The false branch is the one that
-    // keeps this turn on CLASSIFY_MODEL and off Google Search, so it is where an unreadable
-    // value must land. See extract.test.ts's two default cases.
+    // return the STRING "true", or "no", and both are truthy. Since 2026-08-29 this gates only
+    // the save-as-note OFFER (turn.ts's `answersAQuestion`), never a model or a prompt -- every
+    // turn already reaches the same model and the same prompt. The false branch is still where
+    // an unreadable value must land, because the safe direction is no offer, not a spurious one.
+    // See extract.test.ts's two default cases.
     alsoWantsAnswer: value.alsoWantsAnswer === true,
-    // Defaulted like every other flag: `false` is the branch that never spends ANSWER_MODEL.
-    // See extract.test.ts -- `as boolean` compiles and lets the string "false" through, which
-    // is truthy and would promote the turn it was meant to keep cheap.
+    // Defaulted like every other flag. RECORDED, NOT ACTED ON since 2026-08-29, same as
+    // `checkable_claim` above and for the same reason -- nothing routes on it anymore. See
+    // extract.test.ts -- `as boolean` compiles and lets the string "false" through, which is
+    // truthy and would misreport the flag rate the field exists to measure.
     checkableClaim: value.checkable_claim === true,
     complexity: value.complexity === "complex" ? "complex" : "simple",
   };

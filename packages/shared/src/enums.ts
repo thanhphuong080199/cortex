@@ -98,24 +98,27 @@ export const CLASSIFY_MODEL = "gemini-3.5-flash-lite";
 // The flash-lite figures the brief drafted ($0.10/$0.40) are stale -- they match the
 // deprecated gemini-2.5-flash-lite tier. Current standard (non-batch) pricing: embedding is
 // input-only (no output charge); flash-lite is $0.30 input / $2.50 output per 1M tokens.
-// Reasoning: answering a question from the user's notes. Life-domains spec §1 says "Gemini 3
-// Pro", which is a model FAMILY, not an API id -- verified against
-// ai.google.dev/gemini-api/docs/models on 2026-08-15. The family has moved on since
-// CLASSIFY_MODEL was pinned (2026-08-10): the current Pro-tier id is a 3.1 preview release,
-// not a bare "gemini-3-pro" -- so treat any older doc in this repo spelling the id as
-// "gemini-3-pro" the same way CLASSIFY_MODEL's header already treats "Gemini 3 Flash": a
-// family name, never something to call the API with.
-export const ANSWER_MODEL = "gemini-3.1-pro-preview";
-// Reverified directly against ai.google.dev/gemini-api/docs/pricing on 2026-08-15, standard
-// (non-batch) tier, prompts <= 200k tokens (Cortex notes and chat context never approach that):
-// $2.00 input / $12.00 output per 1M tokens. The docs also list a > 200k-token tier ($4.00 /
-// $18.00) that does not apply here and is deliberately not encoded -- MODEL_PRICES_USD_PER_MTOK
-// has no room for a size-conditional rate, and adding one would be guessing at usage this
-// codebase never sends.
+// Reasoning: answering anything the user types into the box. Moved off the Pro tier on
+// 2026-08-29 after a live 4-case benchmark against real prompt shapes from prompts.ts (health
+// Q&A, a grounded current-events question, a wrong-claim correction, chitchat): 3.5-flash was
+// faster than gemini-3.1-pro-preview on all four, cheaper on three, and read as comparable in
+// quality. One caveat recorded rather than hidden -- it produced a garbled term ("cơ bắp tay
+// trinit") in the health answer, a single occurrence, which is why health-domain replies are a
+// named manual check in this stage's plan.
+//
+// gemini-3.7-flash is cheaper still on paper ($0.75/$3.75 promo) and was NOT taken: it 503'd on
+// two of four calls and its two successes were the slowest of every model tested. Revisit when it
+// leaves capacity-constrained preview.
+export const ANSWER_MODEL = "gemini-3.5-flash";
 export const MODEL_PRICES_USD_PER_MTOK: Record<string, { input: number; output: number }> = {
   "gemini-embedding-001": { input: 0.15, output: 0 },
   "gemini-3.5-flash-lite": { input: 0.3, output: 2.5 },
+  // Verified against ai.google.dev/gemini-api/docs/pricing on 2026-08-29, standard (non-batch)
+  // tier. gemini-3.1-pro-preview's entry ($2.00/$12.00) is deliberately KEPT: usage_ledger rows
+  // written before the swap carry that model id, and monthToDateUsd prices from this map at read
+  // time -- deleting the entry would retroactively rewrite historical spend to zero.
   "gemini-3.1-pro-preview": { input: 2.0, output: 12.0 },
+  "gemini-3.5-flash": { input: 1.5, output: 9.0 },
 };
 
 /**

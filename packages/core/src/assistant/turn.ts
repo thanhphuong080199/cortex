@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  ANSWER_MODEL, CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, resolveTimeZone, type WebCitation,
+  ANSWER_MODEL, GROUNDING_USD_PER_QUERY, resolveTimeZone, type WebCitation,
 } from "@cortex/shared";
 import type { AiClient, GroundingResult } from "../ai/client.js";
 import { isOverBudget, recordUsage } from "../enrich/budget.js";
@@ -13,7 +13,7 @@ import { NoteService } from "../notes/service.js";
 import { resolveCurrentSession, selectContext, type ThreadTurn } from "./context.js";
 import { detectEntityGap } from "./follow-up.js";
 import { proposeOffer } from "./offer.js";
-import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
+import { buildTurnPrompt } from "./prompts.js";
 import { retrieve, type Citation } from "./retrieve.js";
 
 export type AssistantEvent =
@@ -29,12 +29,30 @@ export type AssistantEvent =
   | { type: "error"; message: string };
 
 /**
- * Keeping extraction synchronous is right -- its result is on screen. Without a deadline a
- * hung Flash call holds the SSE connection open indefinitely, so the turn gives up on it and
- * proceeds degraded; the 60-second sweep enriches the note later through the path that always
- * existed.
+ * How long the turn will wait for classification before giving up on it and going degraded.
+ *
+ * 4000 until 2026-08-29, when the deadline sat IN FRONT of the reply: a hung Flash call would
+ * otherwise have held the SSE connection open with nothing on screen at all. That is no longer
+ * where it sits. Classification now runs beside the answer, so this bounds only how long the turn
+ * holds `done` open AFTER the answer has already streamed -- and the answer's own duration
+ * (3-15s) dominates it. At 4000 the deadline would routinely fire mid-answer and mark `attached`
+ * degraded for no benefit whatsoever, because the connection was staying open regardless.
+ *
+ * 15000 is chosen so the deadline effectively never extends a turn -- the answer stream overtakes
+ * it -- while making `degraded: true` rare instead of routine. Fewer degraded turns also means
+ * fewer notes deferred to the 60-second sweep for enrichment that could have been instant. It is
+ * an invented number and the stage spec §3 says so; it is not tuned against data.
+ *
+ * One path has no answer to be overtaken by: the over-budget circuit breaker (below, `if (await
+ * isOverBudget(...))`) awaits `classification` directly before yielding `declined`, with nothing
+ * else running concurrently. There, this deadline is not a ceiling on top of an answer's own
+ * duration -- it IS the turn's duration, and a client showing a "thinking" indicator can sit on it
+ * for up to the full 15s with nothing happening, where before this branch that path was bounded at
+ * 4s. Narrowing the deadline for this one path was ruled out (S2's guarantee that a declined turn
+ * still emits `attached` and any mood check-in first requires awaiting classification here); this
+ * is a known, accepted exposure, not an oversight.
  */
-export const EXTRACT_DEADLINE_MS = 4000;
+export const EXTRACT_DEADLINE_MS = 15000;
 
 /**
  * `Promise.race` alone leaks: the loser is never cancelled, so when `p` wins, the timer set to
@@ -51,25 +69,19 @@ const withDeadline = <T>(p: Promise<T>, ms: number): Promise<T | null> => {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 };
 
-/**
- * A deterministic backstop for the one case the classifier cannot cover: it never ran at all.
- * `wantsAnswer` below normally comes entirely from `extracted.intent`, which is right the rest
- * of the time -- a model call can weigh "is this really a question" far better than a regex can.
- * But when extraction THROWS or hits `EXTRACT_DEADLINE_MS` (a real, occasional event: it is one
- * Gemini call racing a 4-second clock), `extracted` is `null`, and `null?.intent === "question"`
- * is `false` -- so an unambiguous question silently fell into the acknowledge branch and got
- * filed as a note instead of answered. Reported 2026-08-24: "Cung điện ký ức là gì?" got back an
- * acknowledgement of a filed note. Only reached when `extracted` is `null` (see `wantsAnswer`
- * below) -- it never overrides a classification that actually ran.
- */
-const QUESTION_PHRASES = [
-  "là gì", "cái gì", "làm sao", "vì sao", "tại sao", "thế nào", "như thế nào",
-  "bao nhiêu", "bao lâu", "ở đâu", "khi nào", "ai là", "có phải", "phải không", "đúng không",
-];
-const looksLikeQuestion = (text: string): boolean => {
-  const normalized = text.trim().toLowerCase();
-  return normalized.endsWith("?") || QUESTION_PHRASES.some((p) => normalized.includes(p));
-};
+/** What `extractNote` returns, named so the annotation chain in `runTurn` can be typed without
+ *  exporting extract.ts's internal interface. */
+type Classification = Awaited<ReturnType<typeof extractNote>>;
+/** A classification plus what resolving its media entity produced, which `attached` carries. */
+type Annotation = Classification & { mediaTitle?: string; mediaItemId?: string };
+
+/** The `attached` event's shape, in one place: it is emitted from two call sites (mid-stream and
+ *  after the stream) and a degraded turn must produce the same event type as a successful one. */
+const attachedEvent = (a: Annotation | null): AssistantEvent =>
+  a
+    ? { type: "attached", domain: a.domain, domainMeta: a.domainMeta, tags: a.tagNames,
+        ...(a.mediaTitle !== undefined ? { mediaTitle: a.mediaTitle } : {}) }
+    : { type: "attached", domain: null, domainMeta: {}, tags: [], degraded: true };
 
 export async function* runTurn(
   deps: { userDb: SupabaseClient; serviceDb: SupabaseClient; ai: AiClient },
@@ -190,238 +202,154 @@ export async function* runTurn(
       .map((r) => ({ role: r.role as ThreadTurn["role"], content: r.content, createdAt: r.created_at })),
   );
 
-  // CONCURRENT, and this is the latency win: retrieval needs only the note text, not the
-  // classification. `attached` and `citations` may therefore be emitted in either order, which
-  // is why the SSE contract says so.
-  const classifyStarted = Date.now();
+  // NOT AWAITED. This is the change: classification is started here and read after the answer has
+  // streamed (below), so a slow or hung extraction costs the user their tags and nothing else.
+  // Until 2026-08-29 the turn awaited it before choosing a prompt, and a timeout therefore
+  // misrouted a real question into "note filed" -- twice.
+  const turnStarted = Date.now();
   // The REAL content hash, not a placeholder. extractNote stamps note_enrichment.extracted_hash
-  // with whatever it is given; an empty string would never equal md5(content_text), so the
-  // sweep would re-extract this note 60 seconds later and pay for the same call twice. This is
-  // the two-hash design working (spec §4.2) only if the hash is honest.
+  // with whatever it is given; an empty string would never equal md5(content_text), so the sweep
+  // would re-extract this note 60 seconds later and pay for the same call twice.
   const contentHash = createHash("md5").update(text, "utf8").digest("hex");
-  // Individually timed, not just the pair via `mark` after the await below: the two race each
-  // other, so knowing only their combined finish time hides which one is actually the long pole
-  // (classification vs. retrieval's own embedding call and search_notes round trip).
   const timed = <T,>(label: string, p: Promise<T>): Promise<T> =>
     p.finally(() => mark(`${label} settled`));
-  const [extraction, citationsResult] = await Promise.allSettled([
-    timed("classify", withDeadline(
-      extractNote({ db: serviceDb, ai }, {
-        noteId: args.noteId, userId: args.userId, contentText: text, contentHash,
-        // This call is the assistant's own classification spend, not the 60-second sweep's --
-        // filing it under "sweep" (extractNote's default) would make a live turn's cost
-        // indistinguishable from real sweep activity and unjoinable to this turn's requestId.
-        source: "assistant", requestId,
-        // Handed over whole; buildPrompt takes the last CLASSIFIER_HISTORY_TURNS. Without this
-        // the classifier sees "ok còn gì khác không" as an isolated sentence, returns
-        // `statement`, and the acknowledge prompt then refuses to answer -- observed
-        // 2026-08-16 and the reason this field exists.
-        history,
-      }),
-      EXTRACT_DEADLINE_MS,
-    )),
-    timed("retrieve", retrieve({ db: serviceDb, ai }, { userId: args.userId, text, requestId })),
-  ]);
-  mark("classify+retrieve both settled");
 
-  // `withDeadline` resolves to null on timeout, so a fulfilled-but-null result is a timeout
-  // and must be treated exactly like a thrown one. Both are logged (rejection and timeout give
-  // different diagnostics) so a run of degraded "attached" events is traceable instead of silent.
-  if (extraction.status === "rejected") {
-    console.error(`[assistant] extraction failed (request ${requestId}): ${errorMessage(extraction.reason)}`);
-  } else if (extraction.value === null) {
-    console.error(`[assistant] extraction timed out after ${EXTRACT_DEADLINE_MS}ms (request ${requestId})`);
-  }
-  const extracted = extraction.status === "fulfilled" ? extraction.value : null;
-
-  // Resolution runs AFTER extractNote returns, deliberately NOT inside it: in this file that
-  // call is wrapped in withDeadline(..., EXTRACT_DEADLINE_MS), and a slow findOrCreate would
-  // turn into `attached: degraded` -- trading the classification for a link.
-  //
-  // A throw is logged and swallowed. The note and its tags are already the deliverable, and
-  // media_unresolved exists for the sync path, not for this one.
-  let mediaTitle: string | undefined;
-  // The ITEM, not just its title: S2's backfill needs the id, and re-resolving it for the
-  // original note would be a second findOrCreate that could race into a duplicate row.
-  let mediaItemId: string | undefined;
-  if (extracted?.domain === "media") {
+  // Set by the chain below the instant it settles. `undefined` means still running, `null` means
+  // it failed or timed out, an object means it worked -- three states, because the token loop has
+  // to tell "not yet" from "never" without awaiting anything.
+  let annotation: Annotation | null | undefined;
+  // Both failure branches are logged, and they are logged DIFFERENTLY on purpose: a rejection and
+  // a timeout give different diagnostics, and a run of degraded `attached` events has to be
+  // traceable rather than silent.
+  const classifyOnce = async (): Promise<Classification | null> => {
     try {
-      const item = await new MediaService(userDb, args.userId)
-        .resolveNoteMediaLink(args.noteId, extracted.domainMeta);
-      if (item) { mediaTitle = item.title; mediaItemId = item.id; }
+      const e = await withDeadline(
+        extractNote({ db: serviceDb, ai }, {
+          noteId: args.noteId, userId: args.userId, contentText: text, contentHash,
+          // This call is the assistant's own classification spend, not the 60-second sweep's.
+          source: "assistant", requestId,
+          // buildPrompt takes the last CLASSIFIER_HISTORY_TURNS. Without this the classifier sees
+          // "ok còn gì khác không" as an isolated sentence.
+          history,
+        }),
+        EXTRACT_DEADLINE_MS,
+      );
+      if (e === null) {
+        console.error(`[assistant] extraction timed out after ${EXTRACT_DEADLINE_MS}ms (request ${requestId})`);
+      }
+      return e;
     } catch (err) {
-      console.error(`[assistant] media link failed (request ${requestId}): ${errorMessage(err)}`);
+      console.error(`[assistant] extraction failed (request ${requestId}): ${errorMessage(err)}`);
+      return null;
     }
-    mark("media link resolved");
-  }
+  };
 
-  // S2 §6. THE BACKFILL. The note the question was about gets the entity link the answer just
-  // produced -- and nothing else. Not `domain_meta`, not `content_text`: the original note said
-  // nothing about a rating, and writing one into it would be putting words in the user's mouth.
+  // The media resolve is chained here rather than awaited later so that `attached` can carry
+  // `mediaTitle` in ONE event -- a second, later event for the title would be a new wire concept
+  // for a receipt that already works. It is deliberately OUTSIDE withDeadline (which wraps only
+  // extractNote, above): a slow findOrCreate inside the deadline would trade the whole
+  // classification for a link. A throw is logged and swallowed; the note and its tags are already
+  // the deliverable, and media_unresolved exists for the sync path, not for this one.
+  const classification: Promise<Annotation | null> = timed("classify", classifyOnce())
+    .then(async (e) => {
+      if (e === null) return null;
+      let mediaTitle: string | undefined;
+      let mediaItemId: string | undefined;
+      if (e.domain === "media") {
+        try {
+          const item = await new MediaService(userDb, args.userId)
+            .resolveNoteMediaLink(args.noteId, e.domainMeta);
+          if (item) { mediaTitle = item.title; mediaItemId = item.id; }
+        } catch (err) {
+          console.error(`[assistant] media link failed (request ${requestId}): ${errorMessage(err)}`);
+        }
+        mark("media link resolved");
+      }
+      return { ...e, mediaTitle, mediaItemId };
+    })
+    .then((a) => (annotation = a));
+
+  // AWAITED, and now the only thing between the user pressing send and the model being called.
+  // Retrieval stays on the critical path because the merged prompt needs citations for RECALL_RULE
+  // to have anything to recall, and one embed call plus one RPC is not the long pole that a JSON
+  // classification call racing a clock was.
   //
-  // `userDb`, so RLS is what proves ownership: `pendingAsk.noteId` comes out of a jsonb column
-  // and is validated nowhere else.
-  //
-  // Failure is logged and swallowed. The answer has already streamed and both notes are already
-  // saved; a failed link must not retroactively fail a turn that succeeded.
-  let backfilled = false;
-  if (pendingAsk !== null && mediaItemId !== undefined && pendingAsk.noteId !== args.noteId) {
-    // `.select("id").maybeSingle()`, matching resolveNoteMediaLink's own update+select
-    // (media/service.ts): PostgREST returns `error: null` even when the two `.is()` filters
-    // above correctly reject the write -- the note was trashed mid-conversation, or a
-    // concurrent request already linked it. `error` alone cannot tell "linked" from
-    // "correctly refused"; only a returned row proves the UPDATE touched something, which is
-    // what `answeredAsk` must be conditioned on to stay an honest measurement.
-    const { data, error } = await userDb.from("notes")
-      .update({ media_item_id: mediaItemId })
-      .eq("id", pendingAsk.noteId)
-      .is("deleted_at", null)      // a note trashed mid-conversation must not be linked
-      .is("media_item_id", null)   // and an existing link is never overwritten
-      .select("id").maybeSingle();
-    if (error) {
-      console.error(`[assistant] follow-up backfill failed (request ${requestId}): ${error.message}`);
-    } else if (data !== null) {
-      backfilled = true;
-    }
-    mark("follow-up backfilled");
+  // A rejected retrieval must not be reported to the model as an empty corpus: "no notes matched"
+  // and "the search failed" are different facts, and only the first is safe to answer around.
+  let citations: Citation[] = [];
+  let citationsForPrompt: Citation[] | "failed" = [];
+  try {
+    citations = await timed("retrieve", retrieve({ db: serviceDb, ai }, {
+      userId: args.userId, text, requestId,
+    }));
+    citationsForPrompt = citations;
+    yield { type: "citations", citations };
+  } catch (err) {
+    console.error(`[assistant] retrieval failed (request ${requestId}): ${errorMessage(err)}`);
+    citationsForPrompt = "failed";
+    yield { type: "citations", citations: [], degraded: true };
   }
+  mark("retrieve settled");
 
-  yield extracted
-    ? { type: "attached", domain: extracted.domain, domainMeta: extracted.domainMeta,
-        tags: extracted.tagNames, ...(mediaTitle !== undefined ? { mediaTitle } : {}) }
-    : { type: "attached", domain: null, domainMeta: {}, tags: [], degraded: true };
-
-  // Written by the TURN, not by extractNote, and the distinction matters: the 60-second sweep
-  // runs extractNote too, and a sweep that wrote check-ins would manufacture mood history for
-  // old notes at arbitrary times, with no screen to undo it on.
-  if (extracted?.mood != null) {
-    const checkinId = randomUUID();
-    try {
-      await new CheckinService(userDb, args.userId).createWithId(checkinId, {
-        mood: extracted.mood,
-        // The note's timestamp, not now(): offline, the thought can be hours older than
-        // the turn that finally reached the server.
-        createdAt: noteCreatedAt,
-      });
-      yield { type: "mood", checkinId, mood: extracted.mood };
-    } catch (err) {
-      // A failed check-in must not cost the user their answer. Logged, not raised.
-      console.error(`[assistant] check-in write failed (request ${requestId}): ${errorMessage(err)}`);
+  // `yield*`-delegated so the normal path and the budget-declined early return emit exactly the
+  // same events from one place. The check-in write is HERE and not in extractNote, and the
+  // distinction matters: the 60-second sweep runs extractNote too, and a sweep that wrote
+  // check-ins would manufacture mood history for old notes at arbitrary times, with no screen to
+  // undo it on.
+  async function* annotationEvents(
+    a: Annotation | null,
+    alreadySentAttached = false,
+  ): AsyncGenerator<AssistantEvent> {
+    if (!alreadySentAttached) yield attachedEvent(a);
+    if (a?.mood != null) {
+      const checkinId = randomUUID();
+      try {
+        await new CheckinService(userDb, args.userId).createWithId(checkinId, {
+          mood: a.mood,
+          // The note's timestamp, not now(): offline, the thought can be hours older than the
+          // turn that finally reached the server.
+          createdAt: noteCreatedAt,
+        });
+        yield { type: "mood", checkinId, mood: a.mood };
+      } catch (err) {
+        // A failed check-in must not cost the user their answer.
+        console.error(`[assistant] check-in write failed (request ${requestId}): ${errorMessage(err)}`);
+      }
     }
   }
 
-  // A rejected retrieval must not be reported to the model as an empty corpus (see prompts.ts's
-  // renderCitations): "no notes matched" and "the search failed" are different facts, and only
-  // the first one is safe to answer around. Logged here for the same reason extraction is above
-  // -- a total search_notes outage must produce log lines, not a silent stream of confident,
-  // note-free-but-not-actually-empty answers.
-  if (citationsResult.status === "rejected") {
-    console.error(`[assistant] retrieval failed (request ${requestId}): ${errorMessage(citationsResult.reason)}`);
-  }
-  const citations = citationsResult.status === "fulfilled" ? citationsResult.value : [];
-  const citationsForPrompt: Citation[] | "failed" =
-    citationsResult.status === "fulfilled" ? citations : "failed";
-  yield citationsResult.status === "fulfilled"
-    ? { type: "citations", citations }
-    : { type: "citations", citations: [], degraded: true };
-
-  // A circuit breaker, not a budget: it bounds a runaway, and it never costs the user the
-  // note or the context around it -- both are already emitted above.
+  // A circuit breaker, not a budget: it bounds a runaway, and it never costs the user the note or
+  // the context around it. The classification's outputs are not the thing being rationed, so they
+  // are awaited and emitted here rather than skipped.
   if (await isOverBudget(serviceDb, args.userId, args.budgetUsd, "assistant")) {
+    yield* annotationEvents(await classification);
     yield { type: "declined", reason: "budget" };
     return;
   }
 
-  // AN ORDERED CHAIN, not a set of independent booleans, and the order is the decision.
+  // NO ORDERED CHAIN, and its absence is the change. `wantsAnswer`, `isChitchat` and `verifies`
+  // used to select one of three prompts and one of two models from `extracted.intent`, with a
+  // deterministic keyword fallback for when classification never ran. That gate misrouted a real
+  // question into the acknowledge branch twice -- "Cung điện ký ức là gì?" (2026-08-24) and "Bơi
+  // lội có giúp phát triển cơ bắp không" (2026-08-29) -- both times because extraction timed out,
+  // and both times on a message the live classifier reads correctly every time it actually runs.
+  // One prompt and one model remove the branch rather than widening the fallback again.
   //
-  // `wantsAnswer` covers two shapes that behave identically from here on: a pure question, and
-  // a statement the classifier flagged as also asking something (design doc §1). The second is
-  // the eye-fatigue turn -- "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi mắt" -- which
-  // was classified `statement`, routed to buildAcknowledgePrompt, and had its question dropped
-  // by that prompt's "The user did not ask a question" rule.
-  //
-  // `intent` stays "statement" for that turn on purpose: it still drives tagging, domain and
-  // the filing tone correctly. Only the reply branch was ever wrong.
-  //
-  // Chitchat is checked SECOND and can never be reached by the flag: grounding "haha ok"
-  // against Google is the most wasteful thing this system can be told to do, and
-  // `alsoWantsAnswer` is a value a model produced, not trusted input.
-  //
-  // `extracted === null` (extraction threw or hit EXTRACT_DEADLINE_MS) falls back to
-  // `looksLikeQuestion` rather than straight to `false`. See that function's header -- without
-  // this branch, a classifier hiccup on an unambiguous question ("Cung điện ký ức là gì?") used
-  // to silently file it as a note instead of answering it.
-  const wantsAnswer = extracted
-    ? extracted.intent === "question"
-      || (extracted.intent === "statement" && extracted.alsoWantsAnswer === true)
-    : looksLikeQuestion(text);
-  const isChitchat = extracted?.intent === "chitchat";
-  // THE THIRD LINK, and its position in the chain is the decision (design doc §1.1). Read only
-  // when `wantsAnswer` is already false: a turn that asks a question gets ANSWERED, and the
-  // correction rides inside that answer rather than replacing it. Written as `!wantsAnswer &&`
-  // rather than as a separate `if` further down, because two booleans that can both be true and
-  // are read in different places is exactly how this collision was created.
-  const verifies = !wantsAnswer && !isChitchat && extracted?.checkableClaim === true;
-
-  // S2 §2/§4. THE FOURTH LINK in the same ordered chain, and derived ONCE: this value both puts
-  // the rule in the prompt and decides what gets recorded as asked, so the two can never describe
-  // different questions.
-  //
-  // Every conjunct is an exclusion the design names. `!wantsAnswer` -- they asked something, so
-  // answer it. `!isChitchat` -- small talk files nothing. `!verifies` -- VERIFY_RULE forbids
-  // follow-ups outright (prompts.ts), and correcting a false claim outranks curiosity.
-  // `extracted &&` -- a degraded or timed-out extraction knows of no domain and no gap.
-  //
-  // `pendingAsk === null` is the ceiling (§7): the turn after a question never asks another,
-  // whether this turn answered it or ignored it.
-  const gap = extracted && !wantsAnswer && !isChitchat && !verifies && pendingAsk === null
-    ? detectEntityGap(extracted.domain, extracted.domainMeta)
-    : null;
-
-  // A note that already exists, restamped after classification -- the shape 'chat' has used
-  // since C1. An ordinary statement is the default branch and writes nothing: every plain
-  // capture keeps the 'quick' the row was created with.
-  //
-  // `intent === "question"`, NOT `wantsAnswer`, and the difference is a recorded thought. Both
-  // are true for a pure question, but `wantsAnswer` is ALSO true for a statement the classifier
-  // flagged as asking something -- the eye-strain turn, "Các loại thực phẩm nào tốt cho mắt, dạo
-  // này hơi mỏi mắt". That note carries a fact the user recorded, and 00039 makes 'chat'
-  // unrecallable, so stamping it here would delete the eye strain from their second brain as a
-  // side effect of the sentence also ending in a question mark. The dual-intent design already
-  // says `intent` stays "statement" for that turn on purpose and that only the reply branch was
-  // ever wrong; this line is the other place that had not been told.
-  const isPureQuestion = extracted?.intent === "question";
-  if (isPureQuestion || isChitchat) {
-    await userDb.from("notes")
-      .update({ source_type: isPureQuestion ? "chat" : "chitchat" })
-      .eq("id", args.noteId);
-  }
   // Resolved once per turn, not per prompt: two calls could not disagree today, but the point
   // of a single resolution is that they cannot start to.
   const timeZone = resolveTimeZone(args.timeZone);
   const now = new Date();
-  const prompt = wantsAnswer
-    // The FULL turn text, both shapes. "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi
-    // mắt" answers better with the eye strain still in it than with the question carved out,
-    // and carving it out would need a second model call to decide where the seam is.
-    ? buildAnswerPrompt({ question: text, citations: citationsForPrompt, history, timeZone, now })
-    : isChitchat
-      ? buildChitchatPrompt({ text, history })
-      : buildAcknowledgePrompt({
-          note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
-          related: citationsForPrompt, history, timeZone, now,
-          // The same boolean that put this turn on ANSWER_MODEL and enabled grounding. One
-          // derivation, three uses -- a second condition here could disagree with the model
-          // choice and produce a verification prompt running on flash-lite.
-          verify: verifies,
-          ...(gap !== null ? { askAbout: gap.wants } : {}),
-        });
-  // Two ways onto the reasoning model and no third. `verifies` is capped by the classifier's
-  // own threshold ("only when you have real reason to doubt"), so an ordinary capture is
-  // untouched -- see turn.test.ts's cheap-model assertion.
-  const model = wantsAnswer || verifies ? ANSWER_MODEL : CLASSIFY_MODEL;
+  const prompt = buildTurnPrompt({
+    text, citations: citationsForPrompt, history, timeZone, now,
+    // Read from chat_messages history at the top of this turn, NOT from the classification --
+    // which is what lets S2 §7's ceiling survive the gate's removal intact. See
+    // NO_SECOND_QUESTION_RULE in prompts.ts.
+    justAsked: pendingAsk !== null,
+  });
+  const model = ANSWER_MODEL;
 
   let answer = "";
+  let sentAttached = false;
   let incomplete = false;
   // The reason, kept. Until 2026-08-23 the catch below yielded this as an SSE event and let it
   // go: both clients ignore `error` by design, this file's own catch logged nothing (alone among
@@ -433,16 +361,14 @@ export async function* runTurn(
   let streamError: string | null = null;
   let streamUsage: { inputTokens: number; outputTokens: number; model: string } | null = null;
   let grounding: GroundingResult | null = null;
-  // A verification checks against a second source rather than the model's own memory alone
-  // (C5 §9.3). Where grounding is unavailable it degrades to that memory, which the prompt
-  // does not need to know about.
-  const grounds = wantsAnswer || verifies;
-  mark(`model stream requested (${model}, grounding=${grounds})`);
+  // Unconditional. The cost of that decision, and the prompt rule that is now the only thing
+  // controlling it, are both in the stage spec §7 -- grounding is billed per query at roughly
+  // four times a turn's whole token cost, so GROUNDING_RULE is doing real work here.
+  mark(`model stream requested (${model}, grounding=true)`);
   try {
     const stream = await ai.generateStream({
       prompt, model, signal: args.signal,
-      // The whole enablement decision. Never unconditional: see the acknowledge-path test.
-      grounding: grounds,
+      grounding: true,
     });
     mark("model stream opened");
     try {
@@ -453,6 +379,14 @@ export async function* runTurn(
       let sawFirstToken = false;
       for await (const chunk of stream.chunks) {
         if (!sawFirstToken) { sawFirstToken = true; mark("first token"); }
+        // §2. The receipt lands DURING the answer rather than after it, which is what keeps the
+        // instant-attachment UX at roughly the wall-clock moment it had before the decoupling.
+        // A plain flag read, never an await: awaiting here would stall the token loop.
+        if (!sentAttached && annotation !== undefined) {
+          sentAttached = true;
+          mark("attached emitted mid-stream");
+          yield attachedEvent(annotation);
+        }
         answer += chunk.text;
         yield { type: "token", text: chunk.text };
       }
@@ -474,6 +408,64 @@ export async function* runTurn(
     streamError = errorMessage(err).slice(0, 200);
     console.error(`[assistant] model stream failed (request ${requestId}): ${streamError}`);
     yield { type: "error", message: streamError };
+  }
+
+  // The classification is read HERE, and this is the only point at which this design can add
+  // latency to a turn -- bounded by EXTRACT_DEADLINE_MS, and in practice already overtaken by the
+  // answer that just finished streaming.
+  const extracted = await classification;
+  yield* annotationEvents(extracted, sentAttached);
+  mark("classification read");
+
+  // These two survive as ANNOTATION only. Neither picks a prompt or a model; they decide what the
+  // note is stamped as, which is a different question and one the classifier answers well.
+  const isPureQuestion = extracted?.intent === "question";
+  const isChitchat = extracted?.intent === "chitchat";
+
+  // A note that already exists, restamped after classification -- the shape 'chat' has used
+  // since C1. An ordinary statement is the default branch and writes nothing: every plain
+  // capture keeps the 'quick' the row was created with.
+  //
+  // `intent === "question"`, NOT a reply-routing flag -- and the difference is a recorded
+  // thought. A statement the classifier also flagged as asking something -- the eye-strain turn,
+  // "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi mắt" -- carries a fact the user recorded,
+  // and 00039 makes 'chat' unrecallable, so stamping it here would delete the eye strain from
+  // their second brain as a side effect of the sentence also ending in a question mark. `intent`
+  // stays "statement" for that turn on purpose: it still drives tagging, domain and the filing
+  // tone correctly, and only the reply used to be routed wrong.
+  if (isPureQuestion || isChitchat) {
+    await userDb.from("notes")
+      .update({ source_type: isPureQuestion ? "chat" : "chitchat" })
+      .eq("id", args.noteId);
+  }
+
+  // S2 §2/§4. Now gates only the RECORDING of `asked`, never a prompt rule -- nothing instructs
+  // the model to ask, so there is nothing to exclude. `pendingAsk === null` survives because it is
+  // the ceiling on the recording: two chained asks would let a backfill walk backwards through the
+  // thread. `extracted &&` survives because a degraded extraction knows of no domain and no gap.
+  const gap = extracted && pendingAsk === null
+    ? detectEntityGap(extracted.domain, extracted.domainMeta)
+    : null;
+
+  // S2 §6. THE BACKFILL. The note the question was about gets the entity link the answer just
+  // produced -- and nothing else. Not domain_meta, not content_text: the original note said
+  // nothing about a rating, and writing one into it would be putting words in the user's mouth.
+  // `userDb`, so RLS proves ownership: pendingAsk.noteId comes out of a jsonb column and is
+  // validated nowhere else. Failure is logged and swallowed -- the answer has already streamed.
+  let backfilled = false;
+  if (pendingAsk !== null && extracted?.mediaItemId !== undefined && pendingAsk.noteId !== args.noteId) {
+    const { data, error } = await userDb.from("notes")
+      .update({ media_item_id: extracted.mediaItemId })
+      .eq("id", pendingAsk.noteId)
+      .is("deleted_at", null)      // a note trashed mid-conversation must not be linked
+      .is("media_item_id", null)   // and an existing link is never overwritten
+      .select("id").maybeSingle();
+    if (error) {
+      console.error(`[assistant] follow-up backfill failed (request ${requestId}): ${error.message}`);
+    } else if (data !== null) {
+      backfilled = true;
+    }
+    mark("follow-up backfilled");
   }
 
   // `searched` and "has sources" are different facts and are used for different things. Google
@@ -515,7 +507,7 @@ export async function* runTurn(
         userId: args.userId, kind: "chat", model: streamUsage.model,
         inputTokens: streamUsage.inputTokens, outputTokens: streamUsage.outputTokens,
         source: "assistant", noteId: args.noteId, requestId,
-        latencyMs: Date.now() - classifyStarted, contentChars: text.length,
+        latencyMs: Date.now() - turnStarted, contentChars: text.length,
       });
     } catch (err) {
       console.error(`[assistant] usage_ledger write failed: ${errorMessage(err)}`);
@@ -533,7 +525,7 @@ export async function* runTurn(
         inputTokens: 0, outputTokens: 0,
         costUsd: GROUNDING_USD_PER_QUERY,
         source: "assistant", noteId: args.noteId, requestId,
-        latencyMs: Date.now() - classifyStarted, contentChars: text.length,
+        latencyMs: Date.now() - turnStarted, contentChars: text.length,
       });
     } catch (err) {
       console.error(`[assistant] grounding usage_ledger write failed: ${errorMessage(err)}`);
@@ -545,17 +537,14 @@ export async function* runTurn(
   // `incomplete` is checked too -- offering to save a fact out of an answer that was cut off
   // mid-sentence proposes a statement nobody, including this process, ever saw whole.
   //
-  // `wantsAnswer` too (Finding 4, final whole-branch review). `searched` alone is not "this turn
-  // answered a question" -- Task 9 widened `grounds` to `wantsAnswer || verifies`, so a
-  // `verifies`-only turn (a doubtful factual claim that was not also a question, corrected via
-  // buildAcknowledgePrompt's correction branch) also sets `searched` when the verification
-  // grounded. proposeOffer's prompt is hardcoded to open with "The assistant just answered a
-  // question using knowledge that was NOT in the user's own notes" -- which is simply false on
-  // that branch: nothing answered a question, the model filed a note with a one-line correction.
-  // Requiring `wantsAnswer` here, rather than rewording the prompt for two contexts, keeps the
-  // offer scoped to turns that actually answered -- the cost-ceiling intent Part B states
-  // throughout, not every turn that merely searched as a side effect of verification.
-  if (wantsAnswer && searched && !incomplete && answer !== "") {
+  // `answersAQuestion`, not `searched`. proposeOffer's prompt is hardcoded to "The assistant just
+  // answered a question", and Finding 4 of the whole-branch review recorded that `searched` alone
+  // is not that -- a turn can ground without having answered anything. This is the same derivation
+  // `wantsAnswer` was, read from the classification purely to gate the offer, never to pick a
+  // prompt. A degraded extraction produces no offer, which is the safe direction.
+  const answersAQuestion = extracted !== null
+    && (extracted.intent === "question" || extracted.alsoWantsAnswer === true);
+  if (answersAQuestion && searched && !incomplete && answer !== "") {
     const offer = await proposeOffer({ db: serviceDb, ai }, {
       userId: args.userId, question: text, answer,
       ...(webCitations[0]?.url !== undefined ? { sourceUrl: webCitations[0].url } : {}),

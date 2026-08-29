@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  ANSWER_MODEL, CLASSIFY_MODEL, formatToday, GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS,
+  ANSWER_MODEL, formatToday, GROUNDING_USD_PER_QUERY, SESSION_IDLE_RESET_MS,
 } from "@cortex/shared";
 import type { GroundingResult } from "../ai/client.js";
 import { createFakeAi } from "../ai/fake.js";
-import { runTurn, type AssistantEvent } from "./turn.js";
+import { EXTRACT_DEADLINE_MS, runTurn, type AssistantEvent } from "./turn.js";
 
 const NOTE = {
   id: "n1", user_id: "u1",
@@ -249,6 +249,11 @@ describe("runTurn", () => {
     expect(types).toContain("citations");
     expect(types.filter((t) => t === "token").length).toBeGreaterThan(0);
     expect(types.at(-1)).toBe("done");
+    // Spec §9: "One event, one meaning". `attached` is emitted from two call sites (mid-stream
+    // via the token loop, or after the stream via annotationEvents) and `sentAttached` is what
+    // keeps them mutually exclusive -- a count, not just presence, is what catches a regression
+    // that emits both.
+    expect(types.filter((t) => t === "attached")).toHaveLength(1);
   });
 
   // The circuit breaker bounds a runaway; it must never cost the user their note or the
@@ -343,9 +348,13 @@ describe("runTurn", () => {
   });
 
   // Reported 2026-08-24: "Cung điện ký ức là gì?" got back an acknowledgement of a filed note
-  // instead of an answer. `extracted` was null (the classifier call failed or missed
-  // EXTRACT_DEADLINE_MS -- either looks identical from here), and `wantsAnswer` used to have no
-  // branch for that case at all, so an unmistakable question fell into buildAcknowledgePrompt.
+  // instead of an answer -- `extracted` was null (the classifier call failed or missed
+  // EXTRACT_DEADLINE_MS) and `wantsAnswer` had no branch for that case, so an unmistakable
+  // question fell into buildAcknowledgePrompt. `looksLikeQuestion`'s keyword fallback patched
+  // that one case, and then itself misrouted a second question on 2026-08-29 ("Bơi lội có giúp
+  // phát triển cơ bắp không"), because a fallback is still a branch a message can fall on the
+  // wrong side of. Removing the gate on 2026-08-29 fixes it structurally instead: there is no
+  // wrong branch left for a degraded extraction to fall into, so no fallback is needed at all.
   it("still answers an unmistakable question when classification fails entirely", async () => {
     const { client } = dbs({ note: { ...NOTE, content_text: "Cung điện ký ức là gì?" } });
     let seen = "";
@@ -363,17 +372,20 @@ describe("runTurn", () => {
       { userDb: client, serviceDb: client, ai: brokenAi },
       { userId: "u1", noteId: "n1", budgetUsd: 100 },
     ));
-    // buildAnswerPrompt's own signature line, not buildAcknowledgePrompt's -- see prompts.ts.
-    expect(seen).toMatch(/Their question:/);
+    // buildTurnPrompt's own signature line -- there is no separate "Their question:" branch left
+    // to check for, and none of the old acknowledge prompt's refusal language survives either.
+    expect(seen).toMatch(/Their message:/);
+    expect(seen).not.toMatch(/Their question:/);
     expect(seen).not.toMatch(/The user did not ask a question/);
     expect(events.map((e) => e.type)).toContain("token");
   });
 
-  // The other side of the same fallback: a degraded extraction must not start ANSWERING plain
-  // statements just because it can no longer tell them apart from questions. `looksLikeQuestion`
-  // is a narrow "?" / interrogative-phrase check, not a guess -- an ordinary capture with neither
-  // still falls into the acknowledge branch exactly as it did before this fallback existed.
-  it("still acknowledges an ordinary statement when classification fails", async () => {
+  // Was "still acknowledges an ordinary statement when classification fails" until 2026-08-29.
+  // `looksLikeQuestion`'s job was telling this note apart from the question above it, so a
+  // degraded extraction would not start answering everything -- a narrow "?" / interrogative-
+  // phrase check, not a guess. With the gate gone there is nothing left to tell apart: a degraded
+  // extraction reaches the exact same prompt and model as a live one, whatever the note says.
+  it("still answers on the answer model when classification fails, for a plain statement too", async () => {
     const { client } = dbs({ note: { ...NOTE, content_text: "hôm nay tôi chạy bộ ở công viên" } });
     let seen = "";
     const brokenAi = createFakeAi({
@@ -390,7 +402,8 @@ describe("runTurn", () => {
       { userDb: client, serviceDb: client, ai: brokenAi },
       { userId: "u1", noteId: "n1", budgetUsd: 100 },
     ));
-    expect(seen).toMatch(/The user did not ask a question/);
+    expect(seen).toMatch(/Their message:/);
+    expect(seen).not.toMatch(/The user did not ask a question/);
   });
 
   // This scripts `usage()` returning a value AFTER the chunk iterator throws -- something the
@@ -496,7 +509,13 @@ describe("runTurn", () => {
   // with no exclusion the just-inserted row IS the history -- renderHistory then shows the model
   // its own current note/question a second time, mislabeled as something that already happened.
   it("does not duplicate the current turn's own message into its history", async () => {
-    const { client } = dbs();
+    // A note text of this test's OWN choosing, not the shared NOTE fixture's "hôm nay tôi chạy bộ
+    // ở công viên" -- GROUNDING_RULE (prompts.ts) uses that exact sentence, verbatim, as its own
+    // worked example of something not worth searching for, so counting NOTE.content_text's
+    // occurrences in the rendered prompt started passing for the wrong reason (2/2, not 1/1) the
+    // moment buildTurnPrompt's rules began rendering on every turn.
+    const noteText = "buổi sáng nay mình chạy 5km ở công viên gần nhà";
+    const { client } = dbs({ note: { ...NOTE, content_text: noteText } });
     let seen = "";
     const capturing = createFakeAi({
       generateJson: async () => ({
@@ -513,8 +532,14 @@ describe("runTurn", () => {
     // No real prior turns exist in this fixture (opts.history defaults to []), so a correct
     // history read is empty and renderHistory emits no section at all. The bug would have this
     // read back the note it just wrote and render one.
-    expect(seen).not.toMatch(/earlier in this conversation/i);
-    expect(seen.match(new RegExp(NOTE.content_text, "g"))?.length ?? 0).toBe(1);
+    //
+    // The exact rendered heading, WITH its colon, and case-sensitive -- not the looser
+    // case-insensitive phrase this asserted until 2026-08-29. buildTurnPrompt's CORRECTION_RULE
+    // now renders unconditionally on every turn and happens to contain the same lowercase words
+    // ("...never to something you yourself said earlier in this conversation."), which made the
+    // looser regex a false positive the moment CORRECTION_RULE started rendering here too.
+    expect(seen).not.toContain("Earlier in this conversation:");
+    expect(seen.match(new RegExp(noteText, "g"))?.length ?? 0).toBe(1);
   });
 
   it("keeps an interrupted earlier answer out of the prompt", async () => {
@@ -756,16 +781,18 @@ describe("runTurn", () => {
     expect(seenArgs[0]?.grounding).toBe(true);
   });
 
-  // The acknowledge branch runs CLASSIFY_MODEL and files a statement. Searching the web to
-  // acknowledge "hôm nay mình ngủ 5 tiếng" spends money on nothing AND sends a private sentence
-  // to Google for nothing -- two costs, neither recoverable. Turns red the moment `grounding`
-  // is passed unconditionally instead of as `isQuestion`.
-  it("does NOT declare grounding on the acknowledge path", async () => {
+  // Was "does NOT declare grounding on the acknowledge path" until 2026-08-29. There is no
+  // acknowledge branch to withhold grounding from any more: searching the web on "hôm nay mình
+  // ngủ 5 tiếng" is now discouraged by GROUNDING_RULE, an instruction in the one shared prompt,
+  // rather than prevented by a code branch. That is a real cost the stage spec accepts (§7) --
+  // an instruction can be ignored where a branch could not -- in exchange for removing the gate
+  // that misrouted real questions into this same branch.
+  it("declares grounding on the statement path too, now that there is no acknowledge branch", async () => {
     const { client } = dbs();
     seenArgs.length = 0;
     await collect(runTurn({ userDb: client, serviceDb: client, ai: groundedAi(null, "statement") },
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
-    expect(seenArgs[0]?.grounding).toBeFalsy();
+    expect(seenArgs[0]?.grounding).toBe(true);
   });
 
   // The wire event carries WebCitation[] (with `type: "web"`), not the AI client's internal
@@ -932,14 +959,17 @@ describe("runTurn", () => {
     expect((updated.notes ?? []).some((r) => "source_type" in r)).toBe(false);
   });
 
-  // Small talk does not need the reasoning model, and this is the assertion that keeps it from
-  // silently falling through into the question branch -- where it would spend ANSWER_MODEL and,
-  // since C3, ground against Google on "haha ok".
+  // Was "does not spend the answer model on chitchat" until 2026-08-29. Small talk no longer
+  // avoids the reasoning model: the classify-gate that kept it on the cheap path also misrouted
+  // real questions into "note filed" whenever it timed out (2026-08-24 and 2026-08-29), and it is
+  // gone. Whether to ground "haha ok" against Google is now controlled by GROUNDING_RULE in the
+  // prompt instead of a code branch (prompts.ts) -- an instruction, not a guarantee, which is the
+  // tradeoff the stage spec accepts in exchange for removing the gate that misrouted questions.
   //
   // A recorder ARRAY, not a nullable variable reassigned by the fake, for the reason spelled out
   // at turn.test.ts:548: an early return inside createFakeAi that TS cannot see would leave a
   // nullable `seen` undefined, and `seen?.model` then passes vacuously.
-  it("does not spend the answer model on chitchat", async () => {
+  it("answers chitchat on the answer model too, with grounding offered", async () => {
     const { client } = dbs();
     const seen: { model?: string; grounding?: boolean }[] = [];
     const recordingAi = createFakeAi({
@@ -959,8 +989,8 @@ describe("runTurn", () => {
 
     await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
-    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
-    expect(seen[0]?.grounding).toBeFalsy();
+    expect(seen[0]?.model).toBe(ANSWER_MODEL);
+    expect(seen[0]?.grounding).toBe(true);
   });
 
   // THE TURN THIS WHOLE TASK EXISTS FOR: a note to file AND a question, in one sentence. From
@@ -1005,9 +1035,10 @@ describe("runTurn", () => {
   });
 
   // Confirmed by the user: this branch must NOT announce a save. The property is bought by
-  // routing to buildAnswerPrompt, which has no filing language -- so this asserts the outcome,
-  // which stays green against a correct implementation and red against one that "helpfully"
-  // adds a filing line to the answer prompt.
+  // buildTurnPrompt itself, which never mentions filing at all (prompts.ts §5.1 -- classification
+  // hasn't settled when the prompt is built, so there is nothing to announce) -- so this asserts
+  // the outcome, which stays green against a correct implementation and red against one that
+  // "helpfully" adds a filing line back in.
   it("does not announce the filing when it answers a statement", async () => {
     const { client } = dbs();
     const seen: { prompt?: string }[] = [];
@@ -1031,11 +1062,15 @@ describe("runTurn", () => {
     expect(seen[0]?.prompt).not.toMatch(/Mention what you attached/i);
   });
 
-  // THE REGRESSION GUARD, and the one that makes the flag worth having rather than a blanket
-  // widening. An ordinary recorded note -- no question in it -- must stay on the cheap model,
-  // must not ground, and must keep the 'quick' source_type it was created with. Drop the
-  // `alsoWantsAnswer` condition and write `intent === "statement"` instead and this goes red.
-  it("leaves an ordinary statement on the cheap path", async () => {
+  // Was "leaves an ordinary statement on the cheap path" until 2026-08-29. The cheap path is
+  // gone: it existed because a classifier told turn.ts which of three prompts to use, and that
+  // gate misrouted real questions into "note filed" whenever it timed out (2026-08-24 and
+  // 2026-08-29). An ordinary recorded note now reaches the same model and the same prompt as
+  // everything else, and the cost of that is stated and accepted in the stage spec §11.2.
+  //
+  // What is still asserted is the half that was never about the model: a plain capture keeps the
+  // 'quick' source_type it was created with. Stamp it 'chat' here and 00039 makes it unrecallable.
+  it("answers an ordinary statement on the answer model and leaves its source_type alone", async () => {
     const { client, updated } = dbs();
     const seen: { model?: string; grounding?: boolean }[] = [];
     const recordingAi = createFakeAi({
@@ -1048,21 +1083,23 @@ describe("runTurn", () => {
         seen.push(a);
         return {
           chunks: (async function* () { yield { text: "Đã lưu." }; })(),
-          usage: () => ({ inputTokens: 1, outputTokens: 1, model: CLASSIFY_MODEL }),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
         };
       },
     });
     await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
-    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
-    expect(seen[0]?.grounding).toBeFalsy();
+    expect(seen[0]?.model).toBe(ANSWER_MODEL);
+    expect(seen[0]?.grounding).toBe(true);
     expect((updated.notes ?? []).some((r) => "source_type" in r)).toBe(false);
   });
 
-  // Chitchat must not be reachable through the new flag. "haha ok" with a spurious
-  // alsoWantsAnswer must stay small talk: grounding "haha ok" against Google is the single most
-  // wasteful thing this system can be made to do, and a flag the model sets is not trusted input.
-  it("never lets the flag promote chitchat", async () => {
+  // Was "never lets the flag promote chitchat" until 2026-08-29. There is no flag left to
+  // promote anything, or a cheap path left to be promoted out of -- chitchat with a spurious
+  // `alsoWantsAnswer` reaches the same model and the same prompt as every other turn, same as a
+  // plain chitchat turn does. GROUNDING_RULE, not this flag, is what now discourages searching
+  // Google for "haha ok".
+  it("answers chitchat on the answer model too even when the flag is set", async () => {
     const { client } = dbs();
     const seen: { model?: string; grounding?: boolean }[] = [];
     const recordingAi = createFakeAi({
@@ -1075,14 +1112,83 @@ describe("runTurn", () => {
         seen.push(a);
         return {
           chunks: (async function* () { yield { text: "hehe" }; })(),
-          usage: () => ({ inputTokens: 1, outputTokens: 1, model: CLASSIFY_MODEL }),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
         };
       },
     });
     await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
-    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
-    expect(seen[0]?.grounding).toBeFalsy();
+    expect(seen[0]?.model).toBe(ANSWER_MODEL);
+    expect(seen[0]?.grounding).toBe(true);
+  });
+
+  // THE POINT OF THE STAGE. All three intents reach the same model with grounding offered -- there
+  // is no branch left for a classification to pick. Three cases rather than one: a single
+  // statement case would still pass against an implementation that kept the question branch and
+  // merely widened the statement one.
+  //
+  // Red when: any `intent`-conditional model or grounding choice is reintroduced in turn.ts.
+  it.each(["question", "statement", "chitchat"] as const)(
+    "answers a %s turn on the answer model with grounding offered",
+    async (intent) => {
+      const { client } = dbs();
+      const seen: { model?: string; grounding?: boolean; prompt?: string }[] = [];
+      const recordingAi = createFakeAi({
+        generateJson: async () => ({
+          value: { intent, alsoWantsAnswer: false, complexity: "simple",
+                   domain: null, domain_meta: {}, tags: [], mood: null },
+          inputTokens: 10, outputTokens: 5, model: "fake-classify",
+        }),
+        generateStream: async (a) => {
+          seen.push(a);
+          return {
+            chunks: (async function* () { yield { text: "ok" }; })(),
+            usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+          };
+        },
+      });
+      await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+        { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+      expect(seen[0]?.model).toBe(ANSWER_MODEL);
+      expect(seen[0]?.grounding).toBe(true);
+      // One prompt, and the two sentences that identified the two branches it replaced are gone.
+      expect(seen[0]?.prompt).toMatch(/Their message:/);
+      expect(seen[0]?.prompt).not.toMatch(/did not ask a question/i);
+      expect(seen[0]?.prompt).not.toMatch(/Their question:/);
+    },
+  );
+
+  // The S2 ceiling, asserted on the PROMPT rather than on what got recorded. Asserting only that
+  // `asked` was not re-recorded passes for the wrong reason -- the model would still be nagging,
+  // and the recording would just be missing.
+  //
+  // Red when: `justAsked` stops being derived from pendingAsk in turn.ts.
+  it("tells the model not to ask again when a question is outstanding", async () => {
+    const { client } = dbs({
+      history: [{
+        role: "assistant", content: "Phim gì vậy bạn?", created_at: "2026-08-14T01:00:00.000Z",
+        retrieval_meta: { asked: { noteId: "n0", field: "pending_item.title" } },
+      }],
+      lastMessage: { session_id: "s1", created_at: "2026-08-14T01:00:00.000Z" },
+    });
+    const seen: { prompt?: string }[] = [];
+    const recordingAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", complexity: "simple", domain: null,
+                 domain_meta: {}, tags: [], mood: null },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "ok" }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        };
+      },
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: recordingAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(seen[0]?.prompt).toMatch(/Do not\s+ask another question this turn/i);
   });
 
   // Wiring, asserted on the prompt text: a zone accepted by the DTO and then dropped somewhere
@@ -1211,16 +1317,17 @@ describe("runTurn", () => {
     expect(jsonCalls, "extraction, then proposeOffer's own classify call").toBe(2);
   });
 
-  // FINDING 4 (final whole-branch review): Task 9 widened `grounds` to `wantsAnswer ||
-  // verifies`, so a `verifies`-only turn (a doubtful claim that is NOT also a question, corrected
-  // via buildAcknowledgePrompt's correction branch) can also set `searched` when the
-  // verification grounded -- `searched` alone does not mean "this turn answered a question".
-  // Before this fix the old gate (`searched && !incomplete && answer !== ""`) would still let
-  // proposeOffer run here, on a prompt hardcoded to open with "The assistant just answered a
-  // question using knowledge that was NOT in the user's own notes" -- false on this branch,
-  // since nothing answered a question. `checkable_claim: true` and no `alsoWantsAnswer` makes
-  // `wantsAnswer` false and `verifies` true, the exact collision Finding 4 describes.
-  it("makes no offer on a verification-only turn grounded via verifies, not an answer", async () => {
+  // FINDING 4 (final whole-branch review, predating this plan's classify-gate removal): a
+  // CORRECTION-only turn (a doubtful claim that is NOT also a question -- CORRECTION_RULE fires,
+  // not an answer) can still set `searched` if the model grounds while correcting it. `searched`
+  // alone does not mean "this turn answered a question", which is why turn.ts gates
+  // proposeOffer on `answersAQuestion` (`extracted.intent === "question" ||
+  // extracted.alsoWantsAnswer === true`) rather than on `searched` alone -- a prompt hardcoded to
+  // open with "The assistant just answered a question using knowledge that was NOT in the user's
+  // own notes" would be false on this branch, since nothing answered a question.
+  // `checkable_claim: true` and no `alsoWantsAnswer` makes `answersAQuestion` false here even
+  // though the turn grounds, which is the exact collision Finding 4 describes.
+  it("makes no offer on a correction-only turn that grounded, since it never answered a question", async () => {
     const { client } = dbs();
     let jsonCalls = 0;
     const scripted = createFakeAi({
@@ -1245,6 +1352,39 @@ describe("runTurn", () => {
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
     expect(events.some((e) => e.type === "offer")).toBe(false);
     expect(jsonCalls, "extraction only -- proposeOffer's classify call must not run").toBe(1);
+  });
+
+  // Spec §10, the offer half: "A degraded extraction produces no offer." The `asked` half is
+  // covered by "never asks when the extraction failed" below; this is `answersAQuestion`'s
+  // `extracted !== null` guard (turn.ts). Everything else the offer gate checks is satisfied on
+  // purpose -- the reply is question-shaped, complete, non-empty, and the turn grounds -- so the
+  // only thing standing between this turn and an offer is the degraded (null) extraction itself.
+  it("makes no offer when the extraction failed, even on a grounded, question-shaped reply", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { client } = dbs();
+      let jsonCalls = 0;
+      const broken = createFakeAi({
+        generateJson: async () => {
+          jsonCalls += 1;
+          throw new Error("classify exploded");
+        },
+        generateStream: async () => ({
+          chunks: (async function* () { yield { text: "Cá hồi giàu omega-3, bạn có muốn biết thêm không?" }; })(),
+          usage: () => ({ inputTokens: 20, outputTokens: 4, model: ANSWER_MODEL }),
+          grounding: () => ({
+            queries: ["omega 3"],
+            sources: [{ url: "https://e.com/a", title: "A" }],
+          }),
+        }),
+      });
+      const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: broken },
+        { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+      expect(events.some((e) => e.type === "offer")).toBe(false);
+      expect(jsonCalls, "extraction's own failed attempt only -- proposeOffer must not run").toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   /** Like `ai()`, but the reply is a question and the prompt it was built from is captured. */
@@ -1274,13 +1414,19 @@ describe("runTurn", () => {
 
   const MEDIA_NO_TITLE = { domain: "media", domain_meta: {} };
 
-  it("asks one question when a media note names no work", async () => {
+  // Was checked against the exact instruction handed to the model ("which film, series or book
+  // it was") until 2026-08-29. buildTurnPrompt never receives the gap at all now -- classification
+  // has not settled when the prompt is built, and ENGAGE_RULE draws a follow-up out generically
+  // instead of naming the field (follow-up.ts's header). What survives is the RECORD: `gap` still
+  // names the field a media note with no title is missing, and askingAi's scripted reply still
+  // ends in "?", so the turn still remembers what it would take to backfill if the next message
+  // answers it.
+  it("records what a media note with no title is missing, on a reply that asks", async () => {
     const { client, inserted } = dbs();
-    const { seen, client: fake } = askingAi(MEDIA_NO_TITLE);
+    const { client: fake } = askingAi(MEDIA_NO_TITLE);
     await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
       { userId: "u1", noteId: "n1", budgetUsd: 100 }));
 
-    expect(seen[0]).toContain("which film, series or book it was");
     expect(assistantRow(inserted)?.retrieval_meta)
       .toMatchObject({ asked: { noteId: "n1", field: "pending_item.title" } });
   });
@@ -1296,36 +1442,50 @@ describe("runTurn", () => {
     expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
   });
 
-  it("never asks on a turn that is correcting a false claim", async () => {
+  // Was "never asks on a turn that is correcting a false claim" until 2026-08-29. `checkable_claim`
+  // is RECORDED, NOT ACTED ON now (extract.ts) -- it no longer builds a `verifies` flag, and
+  // `verifies` is what used to exclude this turn from the gap computation. A claim-correcting turn
+  // on a media note with no title is now recorded exactly like any other: the three-way exclusion
+  // (question / chitchat / verifies) lived in `gap`'s old derivation and went with it.
+  it("still records what is missing on a claim-correcting turn", async () => {
     const { client, inserted } = dbs();
-    const { seen, client: fake } = askingAi({ ...MEDIA_NO_TITLE, checkable_claim: true });
+    const { client: fake } = askingAi({ ...MEDIA_NO_TITLE, checkable_claim: true });
     await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
       { userId: "u1", noteId: "n1", budgetUsd: 100 }));
 
-    expect(seen[0]).not.toContain("which film, series or book it was");
-    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+    expect(assistantRow(inserted)?.retrieval_meta)
+      .toMatchObject({ asked: { noteId: "n1", field: "pending_item.title" } });
   });
 
-  it("never asks on a turn that answered a question", async () => {
+  // Was "never asks on a turn that answered a question" until 2026-08-29. `wantsAnswer` used to
+  // exclude a pure question from the gap computation entirely; that exclusion went with
+  // `wantsAnswer` itself. A question about a media note with no title is recorded on the same "?"
+  // heuristic as everything else now.
+  it("also records what is missing on a turn that answered a question", async () => {
     const { client, inserted } = dbs();
-    const { seen, client: fake } = askingAi({ ...MEDIA_NO_TITLE, intent: "question" });
+    const { client: fake } = askingAi({ ...MEDIA_NO_TITLE, intent: "question" });
     await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
       { userId: "u1", noteId: "n1", budgetUsd: 100 }));
 
-    expect(seen[0]).not.toContain("which film, series or book it was");
-    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+    expect(assistantRow(inserted)?.retrieval_meta)
+      .toMatchObject({ asked: { noteId: "n1", field: "pending_item.title" } });
   });
 
-  // Reachable, and not covered by the prompt builder: buildChitchatPrompt has no askAbout to
-  // pass, so the RULE could never leak there -- but the RECORD would still be written, leaving a
-  // question outstanding that nobody was asked. The guard has to be in the gap derivation.
-  it("never asks on small talk, even if the classifier called it media", async () => {
+  // Was "never asks on small talk, even if the classifier called it media" until 2026-08-29.
+  // `isChitchat` used to exclude this from the gap computation via the same three-way check that
+  // guarded the question and verifies cases above; that exclusion is gone with the routing chain
+  // it was part of. A media-tagged "chitchat" turn is recorded the same as any other -- an edge
+  // case the classifier is unlikely to actually produce (chitchat rarely gets tagged `domain:
+  // "media"`), and the `?` heuristic's own documented tolerance for a false `asked` (turn.ts) is
+  // what makes recording it anyway harmless.
+  it("also records what is missing on a chitchat-tagged turn", async () => {
     const { client, inserted } = dbs();
     const { client: fake } = askingAi({ ...MEDIA_NO_TITLE, intent: "chitchat" });
     await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
       { userId: "u1", noteId: "n1", budgetUsd: 100 }));
 
-    expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("asked");
+    expect(assistantRow(inserted)?.retrieval_meta)
+      .toMatchObject({ asked: { noteId: "n1", field: "pending_item.title" } });
   });
 
   // A degraded extraction knows of no domain and therefore of no gap. Asking anyway would be the
@@ -1368,7 +1528,10 @@ describe("runTurn", () => {
   });
 
   // The other side of the same condition: an ordinary prior exchange does not suppress a question.
-  it("still asks when the previous turn asked nothing", async () => {
+  // The prompt-content half of this assertion ("which film, series or book it was") went with
+  // `askAbout` on 2026-08-29 -- buildTurnPrompt never receives the gap. What survives is the
+  // RECORD, on the same "?" heuristic as every case above.
+  it("still records what is missing when the previous turn asked nothing", async () => {
     const { client, inserted } = dbs({
       history: [{
         role: "assistant", content: "Đã lưu.", created_at: "2026-08-24T10:00:00.000Z",
@@ -1376,11 +1539,10 @@ describe("runTurn", () => {
       }],
       lastMessage: { session_id: "s1", created_at: "2026-08-24T10:00:00.000Z" },
     });
-    const { seen, client: fake } = askingAi(MEDIA_NO_TITLE);
+    const { client: fake } = askingAi(MEDIA_NO_TITLE);
     await collect(runTurn({ userDb: client, serviceDb: client, ai: fake },
       { userId: "u1", noteId: "n1", sessionId: "s1", budgetUsd: 100 }));
 
-    expect(seen[0]).toContain("which film, series or book it was");
     expect(assistantRow(inserted)?.retrieval_meta).toHaveProperty("asked");
   });
 
@@ -1482,6 +1644,175 @@ describe("runTurn", () => {
     expect(links(updated)).toEqual([]);
     expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("answeredAsk");
   });
+
+  // THE REGRESSION TEST FOR THE REPORTED BUG, and the most important assertion in this file. A
+  // classification that never returns must cost the user their tags, and nothing else. Before
+  // 2026-08-29 it cost them the answer: `extracted` was null, wantsAnswer fell through to a keyword
+  // list, and "Bơi lội có giúp phát triển cơ bắp không" came back as an acknowledgement of a filed
+  // note.
+  //
+  // Red when: the first token is delayed toward EXTRACT_DEADLINE_MS. That is what a regression
+  // re-sequencing classification ahead of the prompt (`Promise.allSettled([withDeadline(extractNote,
+  // ...), retrieve])` before `generateStream`, i.e. Task 3's shape) would do to this fixture --
+  // `withDeadline` still bounds it, so it would still complete this test's answer, tag count and
+  // `degraded: true` checks inside the 20s budget, JUST ~EXTRACT_DEADLINE_MS late. Those four
+  // content checks alone do not time anything and would stay green under that regression; the
+  // timing assertion below is what actually forces this test red on it. (An earlier version of
+  // this test claimed those content checks alone were sufficient -- they are not, at the deadline
+  // values this file ships. See turn.test.ts's git history / task-4 fix-round-1 for how this was
+  // found.) Test B below ("opens the model stream before classification has settled") is the other,
+  // independent discriminator, and is not weakened by any of this -- its gate lives inside the fake
+  // `generateStream` itself, so a sequential-await implementation deadlocks on it until
+  // `withDeadline`'s internal timer fires.
+  it("answers in full while classification is still hanging", async () => {
+    const { client } = dbs();
+    const seen: { prompt?: string }[] = [];
+    const hanging = createFakeAi({
+      // Never resolves. Not a rejection and not a slow resolve -- the turn must not depend on this
+      // promise settling at all before it answers.
+      generateJson: () => new Promise(() => {}),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "Bơi lội " }; yield { text: "có." }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        };
+      },
+    });
+
+    const startedAt = Date.now();
+    let firstTokenMs: number | null = null;
+    const events: AssistantEvent[] = [];
+    for await (const e of runTurn({ userDb: client, serviceDb: client, ai: hanging },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 })) {
+      if (e.type === "token" && firstTokenMs === null) firstTokenMs = Date.now() - startedAt;
+      events.push(e);
+    }
+
+    // THE discriminator: the first token must land almost immediately, not after classification's
+    // own deadline has burned down. A regression that awaits classification before the prompt would
+    // push this well past EXTRACT_DEADLINE_MS / 2 (it would land near EXTRACT_DEADLINE_MS itself);
+    // a correct decoupled turn lands in low milliseconds, since nothing before the first token
+    // depends on the hung `generateJson` call at all.
+    expect(firstTokenMs, "a token must have arrived").not.toBeNull();
+    expect(firstTokenMs, "the first token must not wait on classification")
+      .toBeLessThan(EXTRACT_DEADLINE_MS / 2);
+
+    const answer = events.filter((e) => e.type === "token").map((e) => (e as { text: string }).text).join("");
+    expect(answer).toBe("Bơi lội có.");
+    expect(seen).toHaveLength(1);
+    // The turn still completes, and still reports the classification honestly rather than silently.
+    expect(events.find((e) => e.type === "attached")).toMatchObject({ degraded: true });
+    expect(events.at(-1)?.type).toBe("done");
+  }, 20_000);
+
+  // The above passes against an implementation that awaits classification but happens to get a fast
+  // fake. This one does not: the stream is only opened once the test has PROVEN the classification
+  // is still outstanding.
+  //
+  // Red when: the classification is awaited before the prompt is built, however briefly.
+  it("opens the model stream before classification has settled", async () => {
+    const { client } = dbs();
+    let classifySettled = false;
+    let streamOpenedWhileClassifying = false;
+    let releaseClassify: () => void = () => {};
+    const gate = new Promise<void>((r) => { releaseClassify = r; });
+
+    const slow = createFakeAi({
+      generateJson: async () => {
+        await gate;
+        classifySettled = true;
+        return {
+          // { name, confidence }[], the real Extraction.tags shape (extract.ts) -- a bare string
+          // array here is silently filtered to nothing by extractNote's `typeof t.name ===
+          // "string"` check, so this fixture must match production or "tags" always comes back [].
+          value: { intent: "statement", complexity: "simple", domain: null,
+                   domain_meta: {}, tags: [{ name: "chạy-bộ", confidence: 0.9 }], mood: null },
+          inputTokens: 1, outputTokens: 1, model: "fake-classify",
+        };
+      },
+      generateStream: async () => {
+        streamOpenedWhileClassifying = !classifySettled;
+        // Let classification finish now, so the turn can complete and emit `attached`.
+        releaseClassify();
+        return {
+          chunks: (async function* () { yield { text: "ok" }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        };
+      },
+    });
+
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: slow },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(streamOpenedWhileClassifying, "the reply must not wait on classification").toBe(true);
+    // And it is still delivered, late rather than never.
+    expect(events.find((e) => e.type === "attached")).toMatchObject({ tags: ["chạy-bộ"] });
+  });
+
+  // §2. The receipt is a stated core product feature and must not slide to after the answer when it
+  // does not have to. Ordering is asserted by index, not by presence.
+  //
+  // Red when: the mid-stream emission is dropped and `attached` is only yielded after the loop.
+  it("emits attached during the stream once classification has landed", async () => {
+    const { client } = dbs();
+    const fast = createFakeAi({
+      generateJson: async () => ({
+        // Same shape fix as above -- not asserted on here, but a fixture that silently drops its
+        // own tags is worth keeping honest.
+        value: { intent: "statement", complexity: "simple", domain: "health",
+                 domain_meta: {}, tags: [{ name: "sức-khỏe", confidence: 0.9 }], mood: null },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async () => ({
+        // Several chunks with a tick between them, so classification has somewhere to land.
+        // 8 * 10ms = 80ms of budget for the fake classify call above to settle before the last
+        // token arrives -- more margin than the original 4 * 5ms = 20ms gave under CI load,
+        // without meaningfully slowing the suite.
+        chunks: (async function* () {
+          for (const t of ["a", "b", "c", "d", "e", "f", "g", "h"]) {
+            await new Promise((r) => setTimeout(r, 10));
+            yield { text: t };
+          }
+        })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+      }),
+    });
+    const types = (await collect(runTurn({ userDb: client, serviceDb: client, ai: fast },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }))).map((e) => e.type);
+    const attachedAt = types.indexOf("attached");
+    const lastTokenAt = types.lastIndexOf("token");
+    expect(attachedAt).toBeGreaterThan(-1);
+    expect(attachedAt, "attached must not wait for the answer to finish").toBeLessThan(lastTokenAt);
+  });
+
+  // §4. `asked` is now written from what the reply actually SAID, after the fact. S2 §5 already
+  // conceded the `?` test was "the honest approximation" of an instruction we could not verify;
+  // post-hoc it is an observation of text the turn is holding.
+  //
+  // Red when: `asked` is written unconditionally, which would let a backfill fire off a reply that
+  // asked nothing.
+  it.each([
+    ["Bạn xem phim gì vậy?", true],
+    ["Đã lưu nhé.", false],
+  ])("records asked only when the reply actually contains a question (%s)", async (reply, expected) => {
+    const { client, inserted } = dbs();
+    const mediaAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", complexity: "simple", domain: "media",
+                 domain_meta: {}, tags: [], mood: null },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: reply }; })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+      }),
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: mediaAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    const assistantRow = (inserted.chat_messages ?? []).find((r) => r.role === "assistant");
+    const meta = assistantRow?.retrieval_meta as { asked?: unknown } | undefined;
+    expect(meta?.asked !== undefined).toBe(expected);
+  });
 });
 
 // One recorder for the whole describe: each of these cases cares about the same three
@@ -1508,24 +1839,30 @@ const recordTurn = async (extraction: Record<string, unknown>) => {
   return { seen, updated };
 };
 
-describe("the routing chain", () => {
+describe("the answer path", () => {
   it("sends a flagged statement to the reasoning model", async () => {
     const { seen } = await recordTurn({ checkable_claim: true });
     expect(seen[0]?.model).toBe(ANSWER_MODEL);
   });
 
-  // THE CEILING. Without this the flag is indistinguishable from "route every statement to
-  // the expensive model", which is the one outcome §9.2 was written to prevent.
-  it("leaves an unflagged statement on the cheap model", async () => {
+  // Was "leaves an unflagged statement on the cheap model" until 2026-08-29 -- THE CEILING that
+  // kept the flag from being indistinguishable from "route every statement to the expensive
+  // model" (§9.2). There is no cheap model left to leave anything on: `checkable_claim` is
+  // RECORDED, NOT ACTED ON now (extract.ts), and every statement, flagged or not, reaches
+  // ANSWER_MODEL the same way.
+  it("answers an unflagged statement on the answer model too", async () => {
     const { seen } = await recordTurn({ checkable_claim: false });
-    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
+    expect(seen[0]?.model).toBe(ANSWER_MODEL);
   });
 
-  // A flagged statement is still a FILING. It keeps the acknowledge prompt -- it just runs it
-  // on a model capable of the judgment -- so the "You filed it under" line must survive.
-  it("keeps a flagged statement on the acknowledge prompt", async () => {
+  // Was "keeps a flagged statement on the acknowledge prompt" until 2026-08-29. The acknowledge
+  // prompt this asserted is gone along with the gate that chose it -- buildTurnPrompt never
+  // announces a filing at all (prompts.ts §5.1: classification has not settled when the prompt is
+  // built, so "You filed it under: X" would be a claim about data that does not exist yet). The
+  // `attached` SSE event carries that instead, on both clients, on the same turn.
+  it("does not announce a filing for a flagged statement either", async () => {
     const { seen } = await recordTurn({ checkable_claim: true });
-    expect(seen[0]?.prompt).toMatch(/You filed it under/i);
+    expect(seen[0]?.prompt).not.toMatch(/You filed it under/i);
   });
 
   // THE COLLISION, decided in design doc §1.1. Both flags fire on "Omega-3 chữa được cận thị,
@@ -1550,10 +1887,13 @@ describe("the routing chain", () => {
     expect(seen[0]?.grounding).toBe(true);
   });
 
-  // Chitchat is checked before the claim flag and is never promoted by it.
-  it("never promotes chitchat", async () => {
+  // Was "never promotes chitchat" until 2026-08-29 -- chitchat was checked before the claim flag
+  // and never promoted by it. There is no checking order left: chitchat reaches ANSWER_MODEL with
+  // grounding offered the same as a flagged statement does, whether or not `checkable_claim` is
+  // also set.
+  it("answers a chitchat turn with a flagged claim on the answer model too", async () => {
     const { seen } = await recordTurn({ intent: "chitchat", checkable_claim: true });
-    expect(seen[0]?.model).toBe(CLASSIFY_MODEL);
-    expect(seen[0]?.grounding).toBeFalsy();
+    expect(seen[0]?.model).toBe(ANSWER_MODEL);
+    expect(seen[0]?.grounding).toBe(true);
   });
 });
