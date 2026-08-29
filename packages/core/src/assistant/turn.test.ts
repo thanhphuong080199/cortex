@@ -1035,9 +1035,10 @@ describe("runTurn", () => {
   });
 
   // Confirmed by the user: this branch must NOT announce a save. The property is bought by
-  // routing to buildAnswerPrompt, which has no filing language -- so this asserts the outcome,
-  // which stays green against a correct implementation and red against one that "helpfully"
-  // adds a filing line to the answer prompt.
+  // buildTurnPrompt itself, which never mentions filing at all (prompts.ts §5.1 -- classification
+  // hasn't settled when the prompt is built, so there is nothing to announce) -- so this asserts
+  // the outcome, which stays green against a correct implementation and red against one that
+  // "helpfully" adds a filing line back in.
   it("does not announce the filing when it answers a statement", async () => {
     const { client } = dbs();
     const seen: { prompt?: string }[] = [];
