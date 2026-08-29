@@ -1604,6 +1604,142 @@ describe("runTurn", () => {
     expect(links(updated)).toEqual([]);
     expect(assistantRow(inserted)?.retrieval_meta).not.toHaveProperty("answeredAsk");
   });
+
+  // THE REGRESSION TEST FOR THE REPORTED BUG, and the most important assertion in this file. A
+  // classification that never returns must cost the user their tags, and nothing else. Before
+  // 2026-08-29 it cost them the answer: `extracted` was null, wantsAnswer fell through to a keyword
+  // list, and "Bơi lội có giúp phát triển cơ bắp không" came back as an acknowledgement of a filed
+  // note.
+  //
+  // Red when: an `await` on the classification is reintroduced anywhere above the generateStream
+  // call.
+  it("answers in full while classification is still hanging", async () => {
+    const { client } = dbs();
+    const seen: { prompt?: string }[] = [];
+    const hanging = createFakeAi({
+      // Never resolves. Not a rejection and not a slow resolve -- the turn must not depend on this
+      // promise settling at all before it answers.
+      generateJson: () => new Promise(() => {}),
+      generateStream: async (a) => {
+        seen.push(a);
+        return {
+          chunks: (async function* () { yield { text: "Bơi lội " }; yield { text: "có." }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        };
+      },
+    });
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: hanging },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+
+    const answer = events.filter((e) => e.type === "token").map((e) => (e as { text: string }).text).join("");
+    expect(answer).toBe("Bơi lội có.");
+    expect(seen).toHaveLength(1);
+    // The turn still completes, and still reports the classification honestly rather than silently.
+    expect(events.find((e) => e.type === "attached")).toMatchObject({ degraded: true });
+    expect(events.at(-1)?.type).toBe("done");
+  }, 20_000);
+
+  // The above passes against an implementation that awaits classification but happens to get a fast
+  // fake. This one does not: the stream is only opened once the test has PROVEN the classification
+  // is still outstanding.
+  //
+  // Red when: the classification is awaited before the prompt is built, however briefly.
+  it("opens the model stream before classification has settled", async () => {
+    const { client } = dbs();
+    let classifySettled = false;
+    let streamOpenedWhileClassifying = false;
+    let releaseClassify: () => void = () => {};
+    const gate = new Promise<void>((r) => { releaseClassify = r; });
+
+    const slow = createFakeAi({
+      generateJson: async () => {
+        await gate;
+        classifySettled = true;
+        return {
+          // { name, confidence }[], the real Extraction.tags shape (extract.ts) -- a bare string
+          // array here is silently filtered to nothing by extractNote's `typeof t.name ===
+          // "string"` check, so this fixture must match production or "tags" always comes back [].
+          value: { intent: "statement", complexity: "simple", domain: null,
+                   domain_meta: {}, tags: [{ name: "chạy-bộ", confidence: 0.9 }], mood: null },
+          inputTokens: 1, outputTokens: 1, model: "fake-classify",
+        };
+      },
+      generateStream: async () => {
+        streamOpenedWhileClassifying = !classifySettled;
+        // Let classification finish now, so the turn can complete and emit `attached`.
+        releaseClassify();
+        return {
+          chunks: (async function* () { yield { text: "ok" }; })(),
+          usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+        };
+      },
+    });
+
+    const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: slow },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    expect(streamOpenedWhileClassifying, "the reply must not wait on classification").toBe(true);
+    // And it is still delivered, late rather than never.
+    expect(events.find((e) => e.type === "attached")).toMatchObject({ tags: ["chạy-bộ"] });
+  });
+
+  // §2. The receipt is a stated core product feature and must not slide to after the answer when it
+  // does not have to. Ordering is asserted by index, not by presence.
+  //
+  // Red when: the mid-stream emission is dropped and `attached` is only yielded after the loop.
+  it("emits attached during the stream once classification has landed", async () => {
+    const { client } = dbs();
+    const fast = createFakeAi({
+      generateJson: async () => ({
+        // Same shape fix as above -- not asserted on here, but a fixture that silently drops its
+        // own tags is worth keeping honest.
+        value: { intent: "statement", complexity: "simple", domain: "health",
+                 domain_meta: {}, tags: [{ name: "sức-khỏe", confidence: 0.9 }], mood: null },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async () => ({
+        // Several chunks with a tick between them, so classification has somewhere to land.
+        chunks: (async function* () {
+          for (const t of ["a", "b", "c", "d"]) { await new Promise((r) => setTimeout(r, 5)); yield { text: t }; }
+        })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+      }),
+    });
+    const types = (await collect(runTurn({ userDb: client, serviceDb: client, ai: fast },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }))).map((e) => e.type);
+    const attachedAt = types.indexOf("attached");
+    const lastTokenAt = types.lastIndexOf("token");
+    expect(attachedAt).toBeGreaterThan(-1);
+    expect(attachedAt, "attached must not wait for the answer to finish").toBeLessThan(lastTokenAt);
+  });
+
+  // §4. `asked` is now written from what the reply actually SAID, after the fact. S2 §5 already
+  // conceded the `?` test was "the honest approximation" of an instruction we could not verify;
+  // post-hoc it is an observation of text the turn is holding.
+  //
+  // Red when: `asked` is written unconditionally, which would let a backfill fire off a reply that
+  // asked nothing.
+  it.each([
+    ["Bạn xem phim gì vậy?", true],
+    ["Đã lưu nhé.", false],
+  ])("records asked only when the reply actually contains a question (%s)", async (reply, expected) => {
+    const { client, inserted } = dbs();
+    const mediaAi = createFakeAi({
+      generateJson: async () => ({
+        value: { intent: "statement", complexity: "simple", domain: "media",
+                 domain_meta: {}, tags: [], mood: null },
+        inputTokens: 1, outputTokens: 1, model: "fake-classify",
+      }),
+      generateStream: async () => ({
+        chunks: (async function* () { yield { text: reply }; })(),
+        usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
+      }),
+    });
+    await collect(runTurn({ userDb: client, serviceDb: client, ai: mediaAi },
+      { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+    const assistantRow = (inserted.chat_messages ?? []).find((r) => r.role === "assistant");
+    const meta = assistantRow?.retrieval_meta as { asked?: unknown } | undefined;
+    expect(meta?.asked !== undefined).toBe(expected);
+  });
 });
 
 // One recorder for the whole describe: each of these cases cares about the same three
