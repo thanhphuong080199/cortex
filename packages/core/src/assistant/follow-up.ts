@@ -20,11 +20,10 @@ export interface EntityGap {
    * a later read can say what was asked for without re-deriving it from the note.
    */
   field: string;
-  /**
-   * What the acknowledge prompt is told to ask for. English, like every other prompt rule --
-   * LANGUAGE_RULE is what decides the language the reply comes back in.
-   */
-  wants: string;
+  // `wants` -- the English phrase handed to followUpRule -- lived here until 2026-08-29. The
+  // prompt no longer receives the gap at all: the reply is generated before classification
+  // settles, and ENGAGE_RULE draws the question out generically. This interface now records only
+  // what is written down, never what is asked for. Recoverable from git history.
 }
 
 /**
@@ -34,6 +33,10 @@ export interface EntityGap {
  * `meta` is the POST-VALIDATION meta (`extractNote`'s `domainMeta`), not the model's raw output.
  * That matters: a half-filled `pending_item` fails `domainMetaSchemas.media` and arrives here as
  * `{}`, which this function correctly reads as "no title".
+ *
+ * `detectEntityGap` no longer decides whether the assistant *asks* -- buildTurnPrompt renders no
+ * gap-specific question at all, ENGAGE_RULE draws out one generic line unconditionally instead --
+ * only whether the turn *records* that something was missing, for a later read to use.
  */
 export function detectEntityGap(
   domain: string | null,
@@ -55,8 +58,5 @@ export function detectEntityGap(
   return {
     domain: "media",
     field: "pending_item.title",
-    // Deliberately covers all three media kinds rather than naming one: the classifier may have
-    // returned no `kind` either, and "which film was it" about a book is worse than a vague ask.
-    wants: "which film, series or book it was",
   };
 }

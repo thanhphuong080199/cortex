@@ -8,7 +8,6 @@ describe("detectEntityGap", () => {
     expect(detectEntityGap("media", {})).toEqual({
       domain: "media",
       field: "pending_item.title",
-      wants: "which film, series or book it was",
     });
   });
 

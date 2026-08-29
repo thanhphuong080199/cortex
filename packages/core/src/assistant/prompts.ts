@@ -88,51 +88,10 @@ const locationRule = (timeZone: string) =>
   "tiết, giờ mở cửa, luật lệ, tin tức địa phương. Đừng mặc định họ đang ở Mỹ.";
 
 /**
- * Stage C5 §9.3. Added to buildAcknowledgePrompt only when the classifier flagged the note as
- * carrying a factual claim it has real reason to doubt, and only on the reasoning model --
- * asking flash-lite to adjudicate truth is asking the weakest model in the system to do the
- * task with the most asymmetric failure mode.
- *
- * The first sentence is a CARVE-OUT of the acknowledge prompt's standing "do not answer a
- * question" rule, not a replacement for it. That rule stays on both paths: without it, an
- * acknowledgement becomes a conversation, and this branch would become a debate.
- *
- * The second half has no exception and is the more important of the two. The model looked only
- * at the claim it flagged, and the user cannot tell which claims those were -- so "đúng rồi" on
- * a sentence nothing examined is the system asserting a verification it never performed.
- * Silence has to mean "no basis to doubt", never "checked and confirmed". A system that
- * sometimes confirms is one whose silence starts reading as confirmation too.
- */
-const VERIFY_RULE =
-  "One exception to the rule above: if something they stated is factually wrong, say so once, " +
-  "briefly, in the same breath as the acknowledgement. Name the discrepancy and stop -- do " +
-  "not ask a follow-up, do not invite a reply, and do not explain at length. " +
-  "Never do the opposite: do not say \"đúng rồi\", \"chính xác\", \"xác nhận\" or anything " +
-  "else implying you checked their note and found it correct. You looked at one claim, and " +
-  "they cannot tell which. Silence means you had no reason to doubt them, not that you " +
-  "confirmed them.";
-
-/**
- * Stage S2 §4. Rendered only when `detectEntityGap` found a gap whose answer would create an
- * entity -- never on a merely incomplete note.
- *
- * Three constraints, all load-bearing. ONE question, because an assistant that asks two has
- * started an interview. At the END, because a question in the middle of an acknowledgement
- * interrupts the filing confirmation it was supposed to deliver. And no promise to follow up,
- * because the code guarantees it will never be raised again -- a reply ending "nhớ nói cho mình
- * biết nhé" would be writing a cheque turn.ts refuses to honour.
- *
- * MUTUALLY EXCLUSIVE with VERIFY_RULE above, which forbids follow-ups outright. The guard is in
- * buildAcknowledgePrompt below; turn.ts also refuses to compute a gap on a verifying turn, so the
- * two agree by saying the same thing rather than by one trusting the other.
- */
-/**
  * Reported 2026-08-24: an ordinary statement got back a flat "filed under X" and nothing else --
- * an inbox, not a conversation partner. This is the GENERAL case and stays out of the way of the
- * two more specific rules above: VERIFY_RULE already forbids a follow-up outright when correcting
- * a claim, and followUpRule already asks its own one entity-gap question. Rendering this
- * alongside either would give the model two or three follow-up instructions to reconcile in one
- * acknowledgement, so buildAcknowledgePrompt below renders it only when neither applies.
+ * an inbox, not a conversation partner. Unconditional in `buildTurnPrompt` (stage spec §5): with
+ * no classification gate settled before the prompt is built, there is no branch left to render it
+ * only sometimes -- it always asks for one line that responds to what was actually written.
  */
 const ENGAGE_RULE =
   "When they are recording something rather than asking, add ONE brief, natural line that " +
@@ -212,13 +171,6 @@ const GROUNDING_RULE =
 const NO_SECOND_QUESTION_RULE =
   "You asked them a question in your last reply and this message is their answer to it. Do not " +
   "ask another question this turn -- take what they gave you and let the subject rest.";
-
-const followUpRule = (wants: string) =>
-  `One thing is missing from what they just told you: ${wants}. Ask for it -- ONE short, ` +
-  "natural question at the very end, the way a friend would ask. Do not ask about anything " +
-  "else, do not ask two things, and do not explain why you are asking. If they do not answer " +
-  "it, it will never be raised again -- so do not promise to follow up and do not tell them to " +
-  "let you know later.";
 
 /**
  * The temporal anchor, on both prompts that read the user's own material.
@@ -346,117 +298,9 @@ export function buildTurnPrompt(a: {
   ].join("\n");
 }
 
-/**
- * TEMPORARY (2026-08-28): stripped down to raw history + question, no rules and no citations,
- * while the reported "user gets no answer at all" bug is chased. The suspicion driving this is
- * that the full instruction stack below (language/format/temporal/location/recall + a rendered
- * notes block) is itself implicated -- unconfirmed; the closest prior incident of this shape
- * (docs/superpowers/specs/2026-08-23-post-merge-bugfix-design.md §7, "Hello hello" got no
- * reply) turned out to be an aborted response stream, nothing to do with prompt content. If
- * that turns out to be true again here, this change will not have fixed it.
- *
- * `citations` and `timeZone` stay in the signature (turn.ts passes them unconditionally, same
- * call site as before) but are UNUSED below -- deliberately not renamed to `_citations` etc.,
- * because the point of keeping the signature stable is that reverting is a one-function diff.
- * `google_search` grounding is still requested by turn.ts's `grounds` flag regardless of what
- * this prompt says, so the model may still ground -- it is just never told it may in words.
- *
- * The full version -- LANGUAGE_RULE, temporalRule, RECALL_RULE, renderCitations, the "may
- * search the web" / "never present web content as the user's own" lines, all with their own
- * regression tests and reported-bug provenance in the comments above -- is one `git log` away,
- * not deleted from history, just from this function. `FORMAT_RULE` and `locationRule` were
- * exclusive to this prompt (see their own doc comments) and are removed below rather than left
- * as dead consts an unused-vars lint rule would flag; they come back from history the same way.
- * See prompts.test.ts for which of the now-inapplicable tests are `it.skip`'d for the same reason.
- */
-export function buildAnswerPrompt(a: {
-  question: string;
-  citations: Citation[] | "failed";
-  history: ThreadTurn[];
-  timeZone: string;
-  now: Date;
-}): string {
-  return [renderHistory(a.history), `\n\nTheir question: ${a.question}`].join("\n");
-}
-
-/**
- * The statement branch. It exists because an acknowledgement built from a template reads like
- * a UI rather than something talking back -- and that acknowledgement is what makes this feel
- * like an assistant rather than an inbox (parent spec §6, obligation 3).
- */
-export function buildAcknowledgePrompt(a: {
-  note: string;
-  domain: string | null;
-  tags: string[];
-  related: Citation[] | "failed";
-  history: ThreadTurn[];
-  timeZone: string;
-  now: Date;
-  /**
-   * Required rather than optional, deliberately. An optional flag defaulting to false lets a
-   * call site forget it, and the symptom -- verification silently never happening -- looks
-   * exactly like a classifier that stopped setting the flag.
-   */
-  verify: boolean;
-  /**
-   * What to ask for, from `detectEntityGap().wants`. Absent means there is nothing worth asking,
-   * which is the ordinary case for almost every note.
-   */
-  askAbout?: string;
-}): string {
-  return [
-    "The user just saved a note. Acknowledge it briefly -- this is an acknowledgement, not an " +
-      "answer, so keep it to what is worth saying and no more.",
-    LANGUAGE_RULE,
-    temporalRule(a.now, a.timeZone),
-    // Named in words, never interpolated raw: `${a.domain}` on a null renders the string "null"
-    // into the prompt, and an empty tag list renders a dangling "You tagged it: ." -- both are
-    // things the model then has to interpret.
-    `You filed it under: ${a.domain ?? "no domain"}. You tagged it: ${
-      a.tags.length > 0 ? a.tags.join(", ") : "nothing"
-    }.`,
-    // The filing confirmation STAYS. The complaint was about phrasing, not about the
-    // acknowledgement telling the user what was attached -- that is the content this branch
-    // exists to deliver (parent spec §6, obligation 3).
-    "Mention what you attached, briefly. If any of their earlier notes below are genuinely " +
-      "related, say so and say when they wrote it.",
-    RECALL_RULE,
-    "The user did not ask a question. Do not answer one, and do not invent one to answer.",
-    // Spread-in rather than an empty string: an ordinary acknowledgement must carry no
-    // instruction about verification at all, not a blank line where one used to be.
-    ...(a.verify ? [VERIFY_RULE] : []),
-    // `!a.verify` is the exclusion, not an oversight: see followUpRule's header. A turn that is
-    // correcting a false factual claim never also asks a question.
-    ...(a.askAbout !== undefined && !a.verify ? [followUpRule(a.askAbout)] : []),
-    // The general case, rendered only when neither of the two more specific rules above already
-    // claimed this turn's one follow-up line. See ENGAGE_RULE's header for why they exclude it.
-    ...(!a.verify && a.askAbout === undefined ? [ENGAGE_RULE] : []),
-    renderCitations(a.related, a.timeZone),
-    renderHistory(a.history, a.timeZone),
-    `\n\nTheir note: ${a.note}`,
-  ].join("\n");
-}
-
-/**
- * The third branch, stage C4 §4. "hello", "haha ok", "1111" -- a turn with no question in it
- * and nothing to file.
- *
- * Deliberately shorter than the other two and deliberately missing their framing. The
- * acknowledge prompt announces a filing ("You filed it under ...") and the answer prompt asks
- * for citations; applied to small talk, the first announces bookkeeping nobody asked about and
- * the second searches the user's corpus for an answer to "what?". The note is still saved --
- * that happens in assistant-box.tsx before this prompt exists -- so nothing here needs to
- * mention it.
- *
- * History is included: "haha ok" means nothing without the turn before it.
- */
-export function buildChitchatPrompt(a: { text: string; history: ThreadTurn[] }): string {
-  return [
-    "The user said something conversational -- a greeting, a reaction, or noise. Reply " +
-      "naturally and keep it light; this is small talk, not a topic. Do not ask a follow-up " +
-      "question and do not start a topic.",
-    LANGUAGE_RULE,
-    renderHistory(a.history),
-    `\n\nThey said: ${a.text}`,
-  ].join("\n");
-}
+// buildAnswerPrompt / buildAcknowledgePrompt / buildChitchatPrompt lived here, selected by
+// turn.ts from a classification, along with VERIFY_RULE (rendered only on a classifier-flagged
+// claim) and followUpRule (rendered only when detectEntityGap named a missing field). All five
+// were removed on 2026-08-29 with the gate that chose between them -- see buildTurnPrompt above,
+// CORRECTION_RULE for what replaced VERIFY_RULE, and ENGAGE_RULE for what replaced followUpRule.
+// Recoverable from git history.
