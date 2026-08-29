@@ -3,12 +3,14 @@
  *
  * WHAT THIS WEAKENS, AND WHY IT IS SAFE
  *
- * Two things in this app cannot be driven by a test on a CI emulator: the mandatory biometric
- * lock (§7.6/§7.7 -- an emulator has no enrolled Class 3 biometric, so `authenticateAsync`
- * never succeeds and the gate renders "Cortex is locked" forever) and Google OAuth (its consent
- * screen is not automatable). When this flag is on, `authenticate()` returns true without
- * prompting and `app/e2e-session.tsx` will install a session handed to it over a deep link.
- * Both are real reductions in security and neither may EVER be on in a build a user installs.
+ * Google OAuth cannot be driven by a test on a CI emulator -- its consent screen is not
+ * automatable. When this flag is on, `app/e2e-session.tsx` will install a session handed to it
+ * over a deep link instead. That is a real reduction in security and it may NEVER be on in a
+ * build a user installs.
+ *
+ * It used to gate a second bypass as well: the mandatory biometric lock, which an emulator with
+ * no enrolled Class 3 biometric could never clear. The lock was dropped on 2026-08-25 (68b618c)
+ * and `app-lock.ts` with it on 2026-08-29, so the deep-link session is now the only thing here.
  *
  * What keeps that true:
  *

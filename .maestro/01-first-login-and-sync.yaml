@@ -21,15 +21,18 @@ appId: ${APP_ID}
       visible: "DEVELOPMENT SERVERS"
     file: subflows/dismiss-dev-launcher.yaml
 
-# Signed out, and the lock is gone because this APK was built with EXPO_PUBLIC_E2E=1. If the
-# flag failed to reach the build, the app sits on "Cortex đang khoá" and this line fails --
-# which is the failure we want, rather than a confusing timeout twelve steps later.
+# Signed out, on the door screen.
 #
-# THIS STRING MUST TRACK components/app-lock-gate.tsx. It was "Cortex is locked" until the app's
-# chrome was translated on 2026-08-24; an assertNotVisible left pointing at deleted copy passes
-# unconditionally, which is the one way this check can rot without anything going red.
+# There used to be an `assertNotVisible: "Cortex đang khoá"` here, checking that
+# EXPO_PUBLIC_E2E=1 had reached the build by proving the biometric lock was off. The lock was
+# dropped on 2026-08-25 (68b618c) and components/app-lock-gate.tsx went with it, so that line
+# had been asserting the absence of copy that exists nowhere -- passing unconditionally, which
+# is exactly the rot its own comment warned about. Removed rather than repointed.
+#
+# The flag is still checked, one step later and by something that cannot pass without it:
+# `subflows/install-session.yaml` opens `cortex://e2e-session?...`, and app/e2e-session.tsx
+# refuses the deep link unless IS_E2E_BUILD is true. A build missing the flag fails there.
 - assertVisible: "Sign in with Google"
-- assertNotVisible: "Cortex đang khoá"
 
 - runFlow: subflows/install-session.yaml
 - runFlow: subflows/wait-for-download.yaml

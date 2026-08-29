@@ -45,7 +45,14 @@ function newKey(): string {
 }
 
 /**
- * What this device can actually enforce. Pass `hasStrongBiometrics()` from `app-lock.ts`.
+ * What this device can actually enforce.
+ *
+ * The only caller passes `false` unconditionally today (`powersync.ts`, since the app lock was
+ * dropped on 2026-08-25) -- but the parameter stays, because the day someone wants the key
+ * bound to a user-auth event again, the thing they must not do is assume every device can.
+ * Reintroducing that means answering `canAuthenticate(BIOMETRIC_STRONG)` on the device, which
+ * expo-local-authentication's `getEnrolledLevelAsync()` is for; it was a dependency of this app
+ * until 2026-08-29 and its removal commit has the working version.
  *
  * Required, with no default, on purpose: defaulting to `true` would hand every PIN-only device
  * back the hard rejection this parameter exists to prevent, and it would do so silently.
@@ -159,9 +166,10 @@ export async function clearDatabaseKey(): Promise<void> {
 // `const { key } = await getOrCreateDatabaseKey()`, is a type error rather than silent
 // corruption.
 //
-// It does NOT check that you passed the RIGHT `strongBiometrics`. Pass `hasStrongBiometrics()`
-// from `app-lock.ts`; hardcoding `true` reintroduces the PIN-only lockout, and hardcoding
-// `false` silently drops the auth binding on devices that could have had it.
+// It does NOT check that you passed the RIGHT `strongBiometrics`. Hardcoding `true` reintroduces
+// the PIN-only lockout; `false` -- what `powersync.ts` passes, deliberately and with its reasons
+// written there -- drops the auth binding on every device, including the ones that could have
+// had it. Both compile. See DeviceSecurity above before changing either.
 //
 // It does NOT verify that the branch you write actually wipes. Nothing here can. On `lost`,
 // delete the database FILE before opening anything: `unusableKey` is a key for a database

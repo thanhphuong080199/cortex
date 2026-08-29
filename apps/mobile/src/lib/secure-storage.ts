@@ -8,9 +8,9 @@ import * as SecureStore from "expo-secure-store";
  * it there put full account access in a cloud backup.
  *
  * No `requireAuthentication` here, deliberately: a biometric prompt on every token refresh
- * would be unusable, and the app-lock gate (Task 10) is where user presence is checked.
- * The key that DOES use requireAuthentication is the database key (Task 9), which is why
- * only that one needs the invalidation-recovery path.
+ * would be unusable. Nothing else gates on user presence either since the app lock was dropped
+ * (2026-08-25, 68b618c) -- both this and the database key are Keystore-backed and unbound from
+ * an auth event, which is what `powersync.ts` records at the call site that decided it.
  */
 
 // SecureStore's docs give 2048 BYTES as the per-value ceiling. expo-secure-store 57.0.1
@@ -92,8 +92,8 @@ async function readValue(key: string): Promise<string | null> {
   const count = await readCount(key);
   if (count === 0) return null;
 
-  // One Keystore decrypt per chunk; Task 10's app-lock and Stage 3 call getSession() often, so
-  // issue them together rather than count+1 sequential native round-trips.
+  // One Keystore decrypt per chunk, and getSession() is called often, so issue them together
+  // rather than count+1 sequential native round-trips.
   const parts = await Promise.all(
     Array.from({ length: count }, (_, i) => SecureStore.getItemAsync(chunkKey(key, i))),
   );
