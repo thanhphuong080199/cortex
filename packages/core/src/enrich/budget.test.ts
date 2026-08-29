@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ANSWER_MODEL, GROUNDING_USD_PER_QUERY } from "@cortex/shared";
+import { ANSWER_MODEL, CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, MODEL_PRICES_USD_PER_MTOK } from "@cortex/shared";
 import { createServiceClient } from "../supabase.js";
-import { assertTierAllowsRealData, isOverBudget, monthToDateUsd, recordUsage } from "./budget.js";
+import { assertTierAllowsRealData, isOverBudget, monthToDateUsd, priceUsd, recordUsage } from "./budget.js";
 
 const db = createServiceClient();
 let userId: string;
@@ -138,6 +138,21 @@ describe("usage and budget", () => {
     await recordUsage(db, { userId, kind: "tag", model: "gemini-99-future", inputTokens: 1000, outputTokens: 1000, source: "sweep" });
     const { data } = await db.from("usage_ledger").select("cost_usd").eq("user_id", userId).single();
     expect(Number(data!.cost_usd)).toBe(0);
+  });
+
+  // priceUsd returns 0 for an unknown model deliberately -- "swapping a model id must never wedge
+  // the whole pipeline" (budget.ts:5-8). That trade is right, and it is exactly why a missing price
+  // is invisible: nothing throws, nothing logs, every chat row books free, and isOverBudget stops
+  // being a circuit breaker at all. This is the only thing standing between a one-line model swap
+  // and a silently disarmed budget.
+  it("prices every model the assistant actually calls", () => {
+    for (const model of [ANSWER_MODEL, CLASSIFY_MODEL]) {
+      expect(MODEL_PRICES_USD_PER_MTOK[model], `${model} has no price`).toBeDefined();
+    }
+  });
+
+  it("prices a real answer-model call above zero", () => {
+    expect(priceUsd(ANSWER_MODEL, 1_000_000, 1_000_000)).toBeGreaterThan(0);
   });
 
   describe("assertTierAllowsRealData", () => {
