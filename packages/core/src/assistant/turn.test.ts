@@ -1630,7 +1630,7 @@ const recordTurn = async (extraction: Record<string, unknown>) => {
   return { seen, updated };
 };
 
-describe("the routing chain", () => {
+describe("the answer path", () => {
   it("sends a flagged statement to the reasoning model", async () => {
     const { seen } = await recordTurn({ checkable_claim: true });
     expect(seen[0]?.model).toBe(ANSWER_MODEL);
