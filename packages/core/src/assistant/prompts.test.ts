@@ -20,9 +20,15 @@ const turn = (role: ThreadTurn["role"], content: string): ThreadTurn => ({
 });
 
 describe("buildTurnPrompt", () => {
+  // NOT "hôm nay tôi chạy bộ ở công viên" -- GROUNDING_RULE (prompts.ts) uses that exact
+  // sentence, verbatim, as its own worked example of something not worth searching for. A default
+  // `text` equal to it would render the string twice (once as the rule's own example, once via
+  // "Their message: ${text}" at the end of every prompt), so a test asserting on that string alone
+  // cannot tell "GROUNDING_RULE rendered" from "the message line always renders" -- the same
+  // collision turn.test.ts documents at its own NOTE fixture (search "GROUNDING_RULE" there).
   const build = (over: Partial<Parameters<typeof buildTurnPrompt>[0]> = {}) =>
     buildTurnPrompt({
-      text: "hôm nay tôi chạy bộ ở công viên",
+      text: "buổi sáng nay mình chạy 5km ở công viên gần nhà",
       citations: [], history: [], timeZone: TZ, now: NOW, justAsked: false, ...over,
     });
 
@@ -117,6 +123,11 @@ describe("buildTurnPrompt", () => {
   });
 
   // §7. This rule is the only control on grounding spend once the gate is gone.
+  //
+  // The example below is GROUNDING_RULE's OWN worked example, distinct from build()'s default
+  // `text` (which is deliberately a different sentence -- see the comment on `build` above) so
+  // this assertion can only pass because GROUNDING_RULE rendered, not because the trailing
+  // "Their message: ${text}" line happens to contain the same words.
   it("scopes when the web may be searched, and names what must never trigger one", () => {
     const p = build();
     expect(p).toMatch(/genuinely\s+need to look up/i);
@@ -152,9 +163,12 @@ describe("buildTurnPrompt", () => {
     expect(p).not.toMatch(/could not be searched/i);
   });
 
+  // Snippet is deliberately NOT a substring of build()'s default `text` ("...chạy 5km ở công
+  // viên gần nhà") -- it used to be "chạy 5km" alone, which the new default text also contains,
+  // so the assertion below would have passed even if the citation never rendered.
   it("keeps the gap-filling disclaimer when notes were found", () => {
-    const p = build({ citations: [cite({ snippet: "chạy 5km" })] });
-    expect(p).toContain("chạy 5km");
+    const p = build({ citations: [cite({ snippet: "leo núi Bà Đen cuối tuần" })] });
+    expect(p).toContain("leo núi Bà Đen cuối tuần");
     expect(p).toMatch(/say plainly which part is not from/i);
   });
 

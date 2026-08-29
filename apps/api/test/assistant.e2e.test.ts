@@ -17,15 +17,16 @@ let alice: TestUser;
 let noteId: string;
 
 // runTurn (packages/core/src/assistant/turn.ts) calls two AiClient methods on every request:
-// generateJson (via extractNote, for the intent/tags/domain classification) and generateStream
-// (for the answer or acknowledgement text). createFakeAi()'s default throws for both when
-// unscripted (packages/core/src/ai/fake.ts:66-75), so both must be scripted here or a real
-// POST /assistant request throws inside the turn instead of streaming a response. `embed` is
-// left at its default -- retrieve() uses it and the default fake is deterministic and safe.
+// generateJson (via extractNote, for the intent/tags/domain classification, read after the reply
+// streams) and generateStream (for the one prompt, buildTurnPrompt, that every turn now uses --
+// see one-prompt-turn, 2026-08-29). createFakeAi()'s default throws for both when unscripted
+// (packages/core/src/ai/fake.ts:66-75), so both must be scripted here or a real POST /assistant
+// request throws inside the turn instead of streaming a response. `embed` is left at its default
+// -- retrieve() uses it and the default fake is deterministic and safe.
 //
-// intent: "question" is scripted so the turn takes the answer-prompt branch (buildAnswerPrompt),
-// which is the branch that emits citations from real retrieval -- the acknowledge branch would
-// exercise less of the turn for the same test.
+// intent: "question" is scripted only because runTurn stamps the note's source_type from it --
+// it no longer selects a prompt or a model. Citations come from retrieve(), which runs on every
+// turn regardless of intent, so this value does not gate what the test exercises.
 const scriptedAi = createFakeAi({
   generateJson: async () => ({
     value: {

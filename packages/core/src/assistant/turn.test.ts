@@ -249,6 +249,11 @@ describe("runTurn", () => {
     expect(types).toContain("citations");
     expect(types.filter((t) => t === "token").length).toBeGreaterThan(0);
     expect(types.at(-1)).toBe("done");
+    // Spec §9: "One event, one meaning". `attached` is emitted from two call sites (mid-stream
+    // via the token loop, or after the stream via annotationEvents) and `sentAttached` is what
+    // keeps them mutually exclusive -- a count, not just presence, is what catches a regression
+    // that emits both.
+    expect(types.filter((t) => t === "attached")).toHaveLength(1);
   });
 
   // The circuit breaker bounds a runaway; it must never cost the user their note or the
@@ -1311,16 +1316,17 @@ describe("runTurn", () => {
     expect(jsonCalls, "extraction, then proposeOffer's own classify call").toBe(2);
   });
 
-  // FINDING 4 (final whole-branch review): Task 9 widened `grounds` to `wantsAnswer ||
-  // verifies`, so a `verifies`-only turn (a doubtful claim that is NOT also a question, corrected
-  // via buildAcknowledgePrompt's correction branch) can also set `searched` when the
-  // verification grounded -- `searched` alone does not mean "this turn answered a question".
-  // Before this fix the old gate (`searched && !incomplete && answer !== ""`) would still let
-  // proposeOffer run here, on a prompt hardcoded to open with "The assistant just answered a
-  // question using knowledge that was NOT in the user's own notes" -- false on this branch,
-  // since nothing answered a question. `checkable_claim: true` and no `alsoWantsAnswer` makes
-  // `wantsAnswer` false and `verifies` true, the exact collision Finding 4 describes.
-  it("makes no offer on a verification-only turn grounded via verifies, not an answer", async () => {
+  // FINDING 4 (final whole-branch review, predating this plan's classify-gate removal): a
+  // CORRECTION-only turn (a doubtful claim that is NOT also a question -- CORRECTION_RULE fires,
+  // not an answer) can still set `searched` if the model grounds while correcting it. `searched`
+  // alone does not mean "this turn answered a question", which is why turn.ts gates
+  // proposeOffer on `answersAQuestion` (`extracted.intent === "question" ||
+  // extracted.alsoWantsAnswer === true`) rather than on `searched` alone -- a prompt hardcoded to
+  // open with "The assistant just answered a question using knowledge that was NOT in the user's
+  // own notes" would be false on this branch, since nothing answered a question.
+  // `checkable_claim: true` and no `alsoWantsAnswer` makes `answersAQuestion` false here even
+  // though the turn grounds, which is the exact collision Finding 4 describes.
+  it("makes no offer on a correction-only turn that grounded, since it never answered a question", async () => {
     const { client } = dbs();
     let jsonCalls = 0;
     const scripted = createFakeAi({
@@ -1345,6 +1351,39 @@ describe("runTurn", () => {
       { userId: "u1", noteId: "n1", budgetUsd: 5 }));
     expect(events.some((e) => e.type === "offer")).toBe(false);
     expect(jsonCalls, "extraction only -- proposeOffer's classify call must not run").toBe(1);
+  });
+
+  // Spec §10, the offer half: "A degraded extraction produces no offer." The `asked` half is
+  // covered by "never asks when the extraction failed" below; this is `answersAQuestion`'s
+  // `extracted !== null` guard (turn.ts). Everything else the offer gate checks is satisfied on
+  // purpose -- the reply is question-shaped, complete, non-empty, and the turn grounds -- so the
+  // only thing standing between this turn and an offer is the degraded (null) extraction itself.
+  it("makes no offer when the extraction failed, even on a grounded, question-shaped reply", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { client } = dbs();
+      let jsonCalls = 0;
+      const broken = createFakeAi({
+        generateJson: async () => {
+          jsonCalls += 1;
+          throw new Error("classify exploded");
+        },
+        generateStream: async () => ({
+          chunks: (async function* () { yield { text: "Cá hồi giàu omega-3, bạn có muốn biết thêm không?" }; })(),
+          usage: () => ({ inputTokens: 20, outputTokens: 4, model: ANSWER_MODEL }),
+          grounding: () => ({
+            queries: ["omega 3"],
+            sources: [{ url: "https://e.com/a", title: "A" }],
+          }),
+        }),
+      });
+      const events = await collect(runTurn({ userDb: client, serviceDb: client, ai: broken },
+        { userId: "u1", noteId: "n1", budgetUsd: 5 }));
+      expect(events.some((e) => e.type === "offer")).toBe(false);
+      expect(jsonCalls, "extraction's own failed attempt only -- proposeOffer must not run").toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   /** Like `ai()`, but the reply is a question and the prompt it was built from is captured. */
@@ -1725,8 +1764,14 @@ describe("runTurn", () => {
       }),
       generateStream: async () => ({
         // Several chunks with a tick between them, so classification has somewhere to land.
+        // 8 * 10ms = 80ms of budget for the fake classify call above to settle before the last
+        // token arrives -- more margin than the original 4 * 5ms = 20ms gave under CI load,
+        // without meaningfully slowing the suite.
         chunks: (async function* () {
-          for (const t of ["a", "b", "c", "d"]) { await new Promise((r) => setTimeout(r, 5)); yield { text: t }; }
+          for (const t of ["a", "b", "c", "d", "e", "f", "g", "h"]) {
+            await new Promise((r) => setTimeout(r, 10));
+            yield { text: t };
+          }
         })(),
         usage: () => ({ inputTokens: 1, outputTokens: 1, model: ANSWER_MODEL }),
       }),

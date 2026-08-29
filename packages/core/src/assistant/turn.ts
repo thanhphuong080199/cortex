@@ -42,6 +42,15 @@ export type AssistantEvent =
  * it -- while making `degraded: true` rare instead of routine. Fewer degraded turns also means
  * fewer notes deferred to the 60-second sweep for enrichment that could have been instant. It is
  * an invented number and the stage spec §3 says so; it is not tuned against data.
+ *
+ * One path has no answer to be overtaken by: the over-budget circuit breaker (below, `if (await
+ * isOverBudget(...))`) awaits `classification` directly before yielding `declined`, with nothing
+ * else running concurrently. There, this deadline is not a ceiling on top of an answer's own
+ * duration -- it IS the turn's duration, and a client showing a "thinking" indicator can sit on it
+ * for up to the full 15s with nothing happening, where before this branch that path was bounded at
+ * 4s. Narrowing the deadline for this one path was ruled out (S2's guarantee that a declined turn
+ * still emits `attached` and any mood check-in first requires awaiting classification here); this
+ * is a known, accepted exposure, not an oversight.
  */
 export const EXTRACT_DEADLINE_MS = 15000;
 
@@ -197,7 +206,7 @@ export async function* runTurn(
   // streamed (below), so a slow or hung extraction costs the user their tags and nothing else.
   // Until 2026-08-29 the turn awaited it before choosing a prompt, and a timeout therefore
   // misrouted a real question into "note filed" -- twice.
-  const classifyStarted = Date.now();
+  const turnStarted = Date.now();
   // The REAL content hash, not a placeholder. extractNote stamps note_enrichment.extracted_hash
   // with whatever it is given; an empty string would never equal md5(content_text), so the sweep
   // would re-extract this note 60 seconds later and pay for the same call twice.
@@ -498,7 +507,7 @@ export async function* runTurn(
         userId: args.userId, kind: "chat", model: streamUsage.model,
         inputTokens: streamUsage.inputTokens, outputTokens: streamUsage.outputTokens,
         source: "assistant", noteId: args.noteId, requestId,
-        latencyMs: Date.now() - classifyStarted, contentChars: text.length,
+        latencyMs: Date.now() - turnStarted, contentChars: text.length,
       });
     } catch (err) {
       console.error(`[assistant] usage_ledger write failed: ${errorMessage(err)}`);
@@ -516,7 +525,7 @@ export async function* runTurn(
         inputTokens: 0, outputTokens: 0,
         costUsd: GROUNDING_USD_PER_QUERY,
         source: "assistant", noteId: args.noteId, requestId,
-        latencyMs: Date.now() - classifyStarted, contentChars: text.length,
+        latencyMs: Date.now() - turnStarted, contentChars: text.length,
       });
     } catch (err) {
       console.error(`[assistant] grounding usage_ledger write failed: ${errorMessage(err)}`);

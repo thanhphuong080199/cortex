@@ -21,9 +21,14 @@ export interface AiClient {
   generateJson<T>(args: { prompt: string; schema: Record<string, unknown> }): Promise<JsonResult<T>>;
   /**
    * `grounding` declares Gemini's built-in `google_search` tool for this call. Optional and
-   * defaulting to off: an implementation that never grounds should not have to say so, and the
-   * acknowledge path in turn.ts must never pass it (spec §2 -- searching the web to acknowledge
-   * a private sentence spends money and privacy for nothing).
+   * defaulting to off: an implementation that never grounds should not have to say so.
+   *
+   * Since 2026-08-29 (one-prompt-turn) `turn.ts` passes `grounding: true` on every call -- there
+   * is one prompt now, and no branch left to withhold the tool from. The scope that used to live
+   * in which call site invoked this now lives entirely in `GROUNDING_RULE` (prompts.ts): an
+   * instruction telling the model when a search is actually warranted, because a settled
+   * classification is no longer available before the prompt is built to gate the tool
+   * structurally.
    */
   generateStream(args: {
     prompt: string; model: string; signal?: AbortSignal; grounding?: boolean;

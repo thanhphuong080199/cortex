@@ -8,9 +8,13 @@ import { recordUsage } from "./budget.js";
 /**
  * The three kinds of turn. `chitchat` is stage C4: "hello", "haha ok", "1111" -- input with
  * nothing to file and no question in it. Before it existed, those were forced into one of the
- * other two, and both reply templates are wrong for them (prompts.ts's acknowledge branch
- * explicitly refuses to converse; the answer branch searches the corpus for an answer to
- * "what?").
+ * other two, and both reply templates were wrong for them (the old acknowledge prompt explicitly
+ * refused to converse; the old answer prompt searched the corpus for an answer to "what?"). Since
+ * 2026-08-29 (one-prompt-turn) there is a single prompt, `buildTurnPrompt` (prompts.ts), and
+ * `intent` no longer selects between prompts or models -- it is recorded as an annotation and
+ * read by turn.ts only to decide what the note is stamped as and whether to offer to save an
+ * answer. WEIGHT_RULE is what now carries the chitchat distinction the deleted acknowledge branch
+ * used to.
  *
  * Exported and reused in buildPrompt below so the schema and the prompt cannot name different
  * sets -- the same drift `mediaKind` already cost this file once.
@@ -360,7 +364,9 @@ export async function extractNote(
 
   // intent and complexity are DEFAULTED rather than trusted. `required` in a responseSchema is a
   // request, not a guarantee, and an absent intent must not throw away an otherwise good
-  // extraction: "statement" is the safe branch, because it never spends the reasoning model.
+  // extraction: "statement" is the safe branch, because it never misreads a plain capture as a
+  // question that needs an offer or a `chat`-source stamp -- not because of what model runs, since
+  // every intent reaches ANSWER_MODEL the same way now.
   return {
     tags: accepted.length,
     tagNames: accepted,

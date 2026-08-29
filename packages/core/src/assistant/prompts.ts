@@ -12,8 +12,9 @@ const LANGUAGE_RULE =
   "or their notes into another language.";
 
 /**
- * How a past note gets brought up. On BOTH prompts that read the user's own material, because
- * both produced the reported tone.
+ * How a past note gets brought up. Part of the one prompt that reads the user's own material
+ * (`buildTurnPrompt`) -- the deleted answer and acknowledge prompts both produced the reported
+ * tone below, which is why this rule has to hold regardless of what kind of turn this is.
  *
  * The observed replies -- "Đã lưu ghi chú của bạn vào mục không phân loại... nó hoàn toàn
  * trùng khớp với ghi chú trước đó của bạn [1]" and "Trong các ghi chú của bạn [1, 3] có nhắc
@@ -173,7 +174,7 @@ const NO_SECOND_QUESTION_RULE =
   "ask another question this turn -- take what they gave you and let the subject rest.";
 
 /**
- * The temporal anchor, on both prompts that read the user's own material.
+ * The temporal anchor, in the one prompt that reads the user's own material.
  *
  * Two facts and one rule, and the rule is the part that fixes the observed defect: the date
  * beside a note makes "mai" RESOLVABLE, but the model still resolves it against today unless
@@ -192,19 +193,20 @@ const temporalRule = (now: Date, timeZone: string) =>
   "về nó như việc sắp xảy ra. Note không có ngày thì đừng đoán ngày cho nó. Riêng note hoặc " +
   "câu hỏi ở cuối cùng — cái người dùng vừa viết — là của HÔM NAY.";
 
-// `timeZone` is optional here (not on the two answer/acknowledge builders) solely so
-// buildChitchatPrompt -- which has no clock at all -- can keep calling this with one argument.
-// Its own history renders with no dates, which is correct: small talk carries no temporal rule
-// to anchor them against.
-const renderHistory = (history: ThreadTurn[], timeZone?: string) =>
+// `timeZone` used to be optional solely so buildChitchatPrompt -- which had no clock at all --
+// could keep calling this with one argument. Deleted 2026-08-29 (one-prompt-turn):
+// `buildTurnPrompt` is the only caller left and always resolves a zone (resolveTimeZone defaults
+// to Asia/Ho_Chi_Minh), so nothing calls this with one argument anymore and the parameter is
+// required.
+const renderHistory = (history: ThreadTurn[], timeZone: string) =>
   history.length === 0
     ? ""
     : `\n\nEarlier in this conversation:\n${history
         .map((t) => {
-          const on = timeZone ? formatNoteDate(t.createdAt, timeZone) : null;
           // The date has been on every ThreadTurn since C1 and was dropped here. "Mai" said
           // three turns ago is anchored to the turn, not to now, exactly like a note's is.
-          return `${on ? `(${on}) ` : ""}${t.role === "user" ? "User" : "You"}: ${t.content}`;
+          const on = formatNoteDate(t.createdAt, timeZone);
+          return `(${on}) ${t.role === "user" ? "User" : "You"}: ${t.content}`;
         })
         .join("\n")}`;
 
@@ -214,8 +216,9 @@ const renderHistory = (history: ThreadTurn[], timeZone?: string) =>
 // into "no citations" makes the model assert "the user has no notes matching this" on a turn
 // where the server never actually got to look -- a false claim, not a hedge.
 //
-// The gap-filling disclaimer lives HERE, in the populated branch, and not in buildAnswerPrompt's
-// standing rule list. As a standing instruction it fired on every turn, including the majority
+// The gap-filling disclaimer lives HERE, in the populated branch, and not in buildTurnPrompt's
+// standing rule list (it lived on the deleted buildAnswerPrompt's standing list before this). As
+// a standing instruction it fired on every turn, including the majority
 // where retrieval returned nothing -- and with no citations there is nothing for outside material
 // to be confused with, so the user heard "Trong note của bạn không có, nhưng theo mình biết..."
 // on turn after turn for no information (reported 2026-08-22). The empty branch now says the

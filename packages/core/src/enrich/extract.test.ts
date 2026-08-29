@@ -737,8 +737,10 @@ describe("alsoWantsAnswer", () => {
     });
 
     // THE DEFAULT, AND WHY IT IS A COMPARISON. `required` in a responseSchema is a request, not
-    // a guarantee. `false` is the branch that keeps the turn on CLASSIFY_MODEL and off Google,
-    // so it is the only safe landing place for a value the model omitted or sent wrong.
+    // a guarantee. `false` is the safe landing place for a value the model omitted or sent wrong
+    // -- it means only "no offer of a save-as-note beyond what `intent` already implies", never a
+    // model or a prompt choice: RECORDED, NOT ACTED ON since 2026-08-29, every turn already
+    // reaches the same ANSWER_MODEL and the same prompt regardless of this flag (extract.ts).
     // `value.alsoWantsAnswer as boolean` compiles and lets the string "true" -- or "no" --
     // through into turn.ts, where every non-empty string is truthy.
     it("defaults a missing alsoWantsAnswer to false", async () => {
@@ -750,9 +752,11 @@ describe("alsoWantsAnswer", () => {
         .toBe(false);
     });
 
-    // A pure question does not need the flag: `intent: "question"` already routes to the answer
-    // prompt. Asserted so nobody later makes the flag REQUIRED for an answer and breaks the
-    // path that was always working.
+    // A pure question does not need the flag: `intent: "question"` already reaches the one
+    // prompt and answersAQuestion (turn.ts) on its own. RECORDED, NOT ACTED ON since 2026-08-29 --
+    // `alsoWantsAnswer` exists only for the "BOTH a statement and a question" case `intent` alone
+    // cannot express. Asserted so nobody later makes the flag REQUIRED for an answer and breaks
+    // the path that was always working.
     it("leaves a pure question's flag false without changing its routing", async () => {
       const out = await runExtract({ intent: "question" });
       expect(out.intent).toBe("question");
