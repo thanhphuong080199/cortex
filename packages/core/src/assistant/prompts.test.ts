@@ -1,6 +1,7 @@
+import { formatToday } from "@cortex/shared";
 import { describe, expect, it } from "vitest";
 import type { ThreadTurn } from "./context.js";
-import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
+import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt, buildTurnPrompt } from "./prompts.js";
 import type { Citation } from "./retrieve.js";
 
 // Module-level so every pre-existing call site below can pass the now-required `timeZone`/`now`
@@ -691,5 +692,149 @@ describe("Stage S2 follow-up rule", () => {
     expect(p).toMatch(/do not ask a follow-up/i);   // VERIFY_RULE is present
     expect(p).not.toMatch(/ONE short/);              // and the S2 rule is not
     expect(p).not.toContain("which film, series or book it was");
+  });
+});
+
+describe("buildTurnPrompt", () => {
+  const build = (over: Partial<Parameters<typeof buildTurnPrompt>[0]> = {}) =>
+    buildTurnPrompt({
+      text: "hôm nay tôi chạy bộ ở công viên",
+      citations: [], history: [], timeZone: TZ, now: NOW, justAsked: false, ...over,
+    });
+
+  // One assertion per rule. The stack is ten rules deep and the failure mode is a later edit
+  // dropping exactly one of them -- which no single "the prompt is non-empty" test can catch.
+  it("carries the language rule, both clauses", () => {
+    expect(build()).toMatch(/same language/i);
+    expect(build()).toMatch(/do not translate/i);
+  });
+
+  it("scales depth to the question instead of capping it at a sentence count", () => {
+    const p = build();
+    expect(p).toMatch(/as much as it actually needs/i);
+    expect(p).not.toMatch(/two or three sentences/i);
+  });
+
+  it("carries the format rule's explicit-request exception", () => {
+    // The half a length-loosening edit silently drops. Asserted separately for that reason.
+    expect(build()).toMatch(/liệt kê/);
+    expect(build()).toMatch(/Structure is the exception/i);
+  });
+
+  it("tells the model what today is, and to anchor relative time to each note's own date", () => {
+    const p = build();
+    expect(p).toContain(formatToday(NOW, TZ));
+    expect(p).toMatch(/KHÔNG phải từ hôm nay/);
+  });
+
+  it("localizes from the time zone rather than defaulting to the US", () => {
+    expect(build({ timeZone: "Europe/Berlin" })).toContain("Europe/Berlin");
+    expect(build()).toMatch(/Đừng mặc định họ đang ở Mỹ/);
+  });
+
+  it("forbids the database-match framing and requires a dated anchor", () => {
+    const p = build();
+    expect(p).toMatch(/Trong các ghi chú của bạn/);
+    expect(p).toMatch(/hôm 18\/8 bạn có nhắc/);
+    expect(p).toMatch(/Never use a bracketed number/i);
+  });
+
+  it("matches what it gives back to what it got", () => {
+    const p = build();
+    expect(p).toMatch(/haha ok/);
+    expect(p).toMatch(/A real question gets a real answer/i);
+  });
+
+  it("asks for one line of engagement on something recorded, and forbids an interview", () => {
+    const p = build();
+    expect(p).toMatch(/ONE brief, natural line/i);
+    expect(p).toMatch(/do not turn it into an interview/i);
+  });
+
+  // §8. The permission and the prohibition are asserted separately: the prohibition is the more
+  // important of the two and is the one an edit loosening the permission would take with it.
+  it("permits a one-sentence correction, scoped to claims about the world", () => {
+    const p = build();
+    expect(p).toMatch(/STATED as a fact about the world/);
+    expect(p).toMatch(/one short\s+sentence/i);
+    expect(p).toMatch(/never to their own life/i);
+    expect(p).toMatch(/never to something you\s+yourself said/i);
+  });
+
+  it("never lets silence read as confirmation", () => {
+    const p = build();
+    expect(p).toMatch(/đúng rồi/);
+    expect(p).toMatch(/Silence means you had no reason to doubt them/i);
+  });
+
+  // §7. This rule is the only control on grounding spend once the gate is gone.
+  it("scopes when the web may be searched, and names what must never trigger one", () => {
+    const p = build();
+    expect(p).toMatch(/genuinely\s+need to look up/i);
+    expect(p).toMatch(/hôm nay tôi chạy bộ ở công viên/);
+    expect(p).toMatch(/never for small talk/i);
+  });
+
+  it("never presents web content as the user's own thinking", () => {
+    expect(build()).toMatch(/Never present web content as the user's own thinking/i);
+  });
+
+  // §4. The S2 ceiling, and the only reason it survives the gate's removal.
+  it("suppresses a second question when one was just asked, and only then", () => {
+    expect(build({ justAsked: true })).toMatch(/Do not\s+ask another question this turn/i);
+    expect(build({ justAsked: false })).not.toMatch(/Do not\s+ask another question this turn/i);
+  });
+
+  // §5.1. The prompt cannot know the domain or the tags -- classification has not settled when it
+  // is built -- so it must not claim to. The `attached` receipt carries this instead.
+  it("never claims to have filed anything", () => {
+    const p = build();
+    expect(p).not.toMatch(/You filed it under/i);
+    expect(p).not.toMatch(/Mention what you attached/i);
+    expect(p).not.toMatch(/did not ask a question/i);
+  });
+
+  // renderCitations has three branches and they say three different things. One test each: the
+  // "failed" branch exists so the model never says "bạn không có note nào về chuyện này" on a
+  // turn where the search never ran, which is a false claim rather than a hedge.
+  it("does not narrate the absence when there are no notes", () => {
+    const p = build({ citations: [] });
+    expect(p).toMatch(/do not announce that their notes had nothing/i);
+    expect(p).not.toMatch(/could not be searched/i);
+  });
+
+  it("keeps the gap-filling disclaimer when notes were found", () => {
+    const p = build({ citations: [cite({ snippet: "chạy 5km" })] });
+    expect(p).toContain("chạy 5km");
+    expect(p).toMatch(/say plainly which part is not from/i);
+  });
+
+  it("says the search failed, distinct from finding nothing", () => {
+    const p = build({ citations: "failed" });
+    expect(p).toMatch(/could not be searched/i);
+    expect(p).not.toMatch(/no notes on this/i);
+  });
+
+  it("marks a saved answer as the assistant's own words and leaves the user's unmarked", () => {
+    const p = build({
+      citations: [cite({ snippet: "mine", authoredBy: "assistant" }), cite({ snippet: "theirs" })],
+    });
+    expect(p).toMatch(/mine \(câu trả lời của mình mà họ đã lưu\)/);
+    expect(p).toMatch(/- theirs$/m);
+  });
+
+  // NOTE: corrected from the task brief's literal `/\(12 thg 8\) .../` regex, which used the
+  // vi-VN short-month format daySeparatorLabel produces for UI day separators. buildTurnPrompt's
+  // Step 5 code reuses the existing, unmodified `renderHistory`, which dates every turn through
+  // `formatNoteDate` (dd-mm-yyyy, as citations already are) -- so the correct anchor for
+  // "2026-08-12T08:00:00Z" in Asia/Ho_Chi_Minh is "(12-08-2026)", confirmed directly against
+  // Intl.DateTimeFormat. See task-2-report.md for the divergence writeup.
+  it("dates each turn of the conversation", () => {
+    const p = build({ history: [turn("user", "mai tôi đi khám")] });
+    expect(p).toMatch(/\(12-08-2026\) User: mai tôi đi khám/);
+  });
+
+  it("puts the user's message last", () => {
+    expect(build({ text: "xin chào" }).trimEnd()).toMatch(/Their message: xin chào$/);
   });
 });
