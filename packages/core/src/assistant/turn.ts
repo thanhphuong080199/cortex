@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  ANSWER_MODEL, CLASSIFY_MODEL, GROUNDING_USD_PER_QUERY, resolveTimeZone, type WebCitation,
+  ANSWER_MODEL, GROUNDING_USD_PER_QUERY, resolveTimeZone, type WebCitation,
 } from "@cortex/shared";
 import type { AiClient, GroundingResult } from "../ai/client.js";
 import { isOverBudget, recordUsage } from "../enrich/budget.js";
@@ -13,7 +13,7 @@ import { NoteService } from "../notes/service.js";
 import { resolveCurrentSession, selectContext, type ThreadTurn } from "./context.js";
 import { detectEntityGap } from "./follow-up.js";
 import { proposeOffer } from "./offer.js";
-import { buildAcknowledgePrompt, buildAnswerPrompt, buildChitchatPrompt } from "./prompts.js";
+import { buildTurnPrompt } from "./prompts.js";
 import { retrieve, type Citation } from "./retrieve.js";
 
 export type AssistantEvent =
@@ -49,26 +49,6 @@ const withDeadline = <T>(p: Promise<T>, ms: number): Promise<T | null> => {
     timer = setTimeout(() => resolve(null), ms);
   });
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
-};
-
-/**
- * A deterministic backstop for the one case the classifier cannot cover: it never ran at all.
- * `wantsAnswer` below normally comes entirely from `extracted.intent`, which is right the rest
- * of the time -- a model call can weigh "is this really a question" far better than a regex can.
- * But when extraction THROWS or hits `EXTRACT_DEADLINE_MS` (a real, occasional event: it is one
- * Gemini call racing a 4-second clock), `extracted` is `null`, and `null?.intent === "question"`
- * is `false` -- so an unambiguous question silently fell into the acknowledge branch and got
- * filed as a note instead of answered. Reported 2026-08-24: "Cung điện ký ức là gì?" got back an
- * acknowledgement of a filed note. Only reached when `extracted` is `null` (see `wantsAnswer`
- * below) -- it never overrides a classification that actually ran.
- */
-const QUESTION_PHRASES = [
-  "là gì", "cái gì", "làm sao", "vì sao", "tại sao", "thế nào", "như thế nào",
-  "bao nhiêu", "bao lâu", "ở đâu", "khi nào", "ai là", "có phải", "phải không", "đúng không",
-];
-const looksLikeQuestion = (text: string): boolean => {
-  const normalized = text.trim().toLowerCase();
-  return normalized.endsWith("?") || QUESTION_PHRASES.some((p) => normalized.includes(p));
 };
 
 export async function* runTurn(
@@ -332,49 +312,24 @@ export async function* runTurn(
     return;
   }
 
-  // AN ORDERED CHAIN, not a set of independent booleans, and the order is the decision.
+  // NO ORDERED CHAIN, and its absence is the change. `wantsAnswer`, `isChitchat` and `verifies`
+  // used to select one of three prompts and one of two models from `extracted.intent`, with a
+  // deterministic keyword fallback for when classification never ran. That gate misrouted a real
+  // question into the acknowledge branch twice -- "Cung điện ký ức là gì?" (2026-08-24) and "Bơi
+  // lội có giúp phát triển cơ bắp không" (2026-08-29) -- both times because extraction timed out,
+  // and both times on a message the live classifier reads correctly every time it actually runs.
+  // One prompt and one model remove the branch rather than widening the fallback again.
   //
-  // `wantsAnswer` covers two shapes that behave identically from here on: a pure question, and
-  // a statement the classifier flagged as also asking something (design doc §1). The second is
-  // the eye-fatigue turn -- "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi mắt" -- which
-  // was classified `statement`, routed to buildAcknowledgePrompt, and had its question dropped
-  // by that prompt's "The user did not ask a question" rule.
-  //
-  // `intent` stays "statement" for that turn on purpose: it still drives tagging, domain and
-  // the filing tone correctly. Only the reply branch was ever wrong.
-  //
-  // Chitchat is checked SECOND and can never be reached by the flag: grounding "haha ok"
-  // against Google is the most wasteful thing this system can be told to do, and
-  // `alsoWantsAnswer` is a value a model produced, not trusted input.
-  //
-  // `extracted === null` (extraction threw or hit EXTRACT_DEADLINE_MS) falls back to
-  // `looksLikeQuestion` rather than straight to `false`. See that function's header -- without
-  // this branch, a classifier hiccup on an unambiguous question ("Cung điện ký ức là gì?") used
-  // to silently file it as a note instead of answering it.
-  const wantsAnswer = extracted
-    ? extracted.intent === "question"
-      || (extracted.intent === "statement" && extracted.alsoWantsAnswer === true)
-    : looksLikeQuestion(text);
+  // These two survive as ANNOTATION only. Neither picks a prompt or a model; they decide what the
+  // note is stamped as, which is a different question and one the classifier answers well.
+  const isPureQuestion = extracted?.intent === "question";
   const isChitchat = extracted?.intent === "chitchat";
-  // THE THIRD LINK, and its position in the chain is the decision (design doc §1.1). Read only
-  // when `wantsAnswer` is already false: a turn that asks a question gets ANSWERED, and the
-  // correction rides inside that answer rather than replacing it. Written as `!wantsAnswer &&`
-  // rather than as a separate `if` further down, because two booleans that can both be true and
-  // are read in different places is exactly how this collision was created.
-  const verifies = !wantsAnswer && !isChitchat && extracted?.checkableClaim === true;
 
-  // S2 §2/§4. THE FOURTH LINK in the same ordered chain, and derived ONCE: this value both puts
-  // the rule in the prompt and decides what gets recorded as asked, so the two can never describe
-  // different questions.
-  //
-  // Every conjunct is an exclusion the design names. `!wantsAnswer` -- they asked something, so
-  // answer it. `!isChitchat` -- small talk files nothing. `!verifies` -- VERIFY_RULE forbids
-  // follow-ups outright (prompts.ts), and correcting a false claim outranks curiosity.
-  // `extracted &&` -- a degraded or timed-out extraction knows of no domain and no gap.
-  //
-  // `pendingAsk === null` is the ceiling (§7): the turn after a question never asks another,
-  // whether this turn answered it or ignored it.
-  const gap = extracted && !wantsAnswer && !isChitchat && !verifies && pendingAsk === null
+  // S2 §2/§4. Now gates only the RECORDING of `asked`, never a prompt rule -- nothing instructs
+  // the model to ask, so there is nothing to exclude. `pendingAsk === null` survives because it is
+  // the ceiling on the recording: two chained asks would let a backfill walk backwards through the
+  // thread. `extracted &&` survives because a degraded extraction knows of no domain and no gap.
+  const gap = extracted && pendingAsk === null
     ? detectEntityGap(extracted.domain, extracted.domainMeta)
     : null;
 
@@ -382,15 +337,13 @@ export async function* runTurn(
   // since C1. An ordinary statement is the default branch and writes nothing: every plain
   // capture keeps the 'quick' the row was created with.
   //
-  // `intent === "question"`, NOT `wantsAnswer`, and the difference is a recorded thought. Both
-  // are true for a pure question, but `wantsAnswer` is ALSO true for a statement the classifier
-  // flagged as asking something -- the eye-strain turn, "Các loại thực phẩm nào tốt cho mắt, dạo
-  // này hơi mỏi mắt". That note carries a fact the user recorded, and 00039 makes 'chat'
-  // unrecallable, so stamping it here would delete the eye strain from their second brain as a
-  // side effect of the sentence also ending in a question mark. The dual-intent design already
-  // says `intent` stays "statement" for that turn on purpose and that only the reply branch was
-  // ever wrong; this line is the other place that had not been told.
-  const isPureQuestion = extracted?.intent === "question";
+  // `intent === "question"`, NOT a reply-routing flag -- and the difference is a recorded
+  // thought. A statement the classifier also flagged as asking something -- the eye-strain turn,
+  // "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi mắt" -- carries a fact the user recorded,
+  // and 00039 makes 'chat' unrecallable, so stamping it here would delete the eye strain from
+  // their second brain as a side effect of the sentence also ending in a question mark. `intent`
+  // stays "statement" for that turn on purpose: it still drives tagging, domain and the filing
+  // tone correctly, and only the reply used to be routed wrong.
   if (isPureQuestion || isChitchat) {
     await userDb.from("notes")
       .update({ source_type: isPureQuestion ? "chat" : "chitchat" })
@@ -400,26 +353,14 @@ export async function* runTurn(
   // of a single resolution is that they cannot start to.
   const timeZone = resolveTimeZone(args.timeZone);
   const now = new Date();
-  const prompt = wantsAnswer
-    // The FULL turn text, both shapes. "Các loại thực phẩm nào tốt cho mắt, dạo này hơi mỏi
-    // mắt" answers better with the eye strain still in it than with the question carved out,
-    // and carving it out would need a second model call to decide where the seam is.
-    ? buildAnswerPrompt({ question: text, citations: citationsForPrompt, history, timeZone, now })
-    : isChitchat
-      ? buildChitchatPrompt({ text, history })
-      : buildAcknowledgePrompt({
-          note: text, domain: extracted?.domain ?? null, tags: extracted?.tagNames ?? [],
-          related: citationsForPrompt, history, timeZone, now,
-          // The same boolean that put this turn on ANSWER_MODEL and enabled grounding. One
-          // derivation, three uses -- a second condition here could disagree with the model
-          // choice and produce a verification prompt running on flash-lite.
-          verify: verifies,
-          ...(gap !== null ? { askAbout: gap.wants } : {}),
-        });
-  // Two ways onto the reasoning model and no third. `verifies` is capped by the classifier's
-  // own threshold ("only when you have real reason to doubt"), so an ordinary capture is
-  // untouched -- see turn.test.ts's cheap-model assertion.
-  const model = wantsAnswer || verifies ? ANSWER_MODEL : CLASSIFY_MODEL;
+  const prompt = buildTurnPrompt({
+    text, citations: citationsForPrompt, history, timeZone, now,
+    // Read from chat_messages history at the top of this turn, NOT from the classification --
+    // which is what lets S2 §7's ceiling survive the gate's removal intact. See
+    // NO_SECOND_QUESTION_RULE in prompts.ts.
+    justAsked: pendingAsk !== null,
+  });
+  const model = ANSWER_MODEL;
 
   let answer = "";
   let incomplete = false;
@@ -433,16 +374,14 @@ export async function* runTurn(
   let streamError: string | null = null;
   let streamUsage: { inputTokens: number; outputTokens: number; model: string } | null = null;
   let grounding: GroundingResult | null = null;
-  // A verification checks against a second source rather than the model's own memory alone
-  // (C5 §9.3). Where grounding is unavailable it degrades to that memory, which the prompt
-  // does not need to know about.
-  const grounds = wantsAnswer || verifies;
-  mark(`model stream requested (${model}, grounding=${grounds})`);
+  // Unconditional. The cost of that decision, and the prompt rule that is now the only thing
+  // controlling it, are both in the stage spec §7 -- grounding is billed per query at roughly
+  // four times a turn's whole token cost, so GROUNDING_RULE is doing real work here.
+  mark(`model stream requested (${model}, grounding=true)`);
   try {
     const stream = await ai.generateStream({
       prompt, model, signal: args.signal,
-      // The whole enablement decision. Never unconditional: see the acknowledge-path test.
-      grounding: grounds,
+      grounding: true,
     });
     mark("model stream opened");
     try {
@@ -545,17 +484,14 @@ export async function* runTurn(
   // `incomplete` is checked too -- offering to save a fact out of an answer that was cut off
   // mid-sentence proposes a statement nobody, including this process, ever saw whole.
   //
-  // `wantsAnswer` too (Finding 4, final whole-branch review). `searched` alone is not "this turn
-  // answered a question" -- Task 9 widened `grounds` to `wantsAnswer || verifies`, so a
-  // `verifies`-only turn (a doubtful factual claim that was not also a question, corrected via
-  // buildAcknowledgePrompt's correction branch) also sets `searched` when the verification
-  // grounded. proposeOffer's prompt is hardcoded to open with "The assistant just answered a
-  // question using knowledge that was NOT in the user's own notes" -- which is simply false on
-  // that branch: nothing answered a question, the model filed a note with a one-line correction.
-  // Requiring `wantsAnswer` here, rather than rewording the prompt for two contexts, keeps the
-  // offer scoped to turns that actually answered -- the cost-ceiling intent Part B states
-  // throughout, not every turn that merely searched as a side effect of verification.
-  if (wantsAnswer && searched && !incomplete && answer !== "") {
+  // `answersAQuestion`, not `searched`. proposeOffer's prompt is hardcoded to "The assistant just
+  // answered a question", and Finding 4 of the whole-branch review recorded that `searched` alone
+  // is not that -- a turn can ground without having answered anything. This is the same derivation
+  // `wantsAnswer` was, read from the classification purely to gate the offer, never to pick a
+  // prompt. A degraded extraction produces no offer, which is the safe direction.
+  const answersAQuestion = extracted !== null
+    && (extracted.intent === "question" || extracted.alsoWantsAnswer === true);
+  if (answersAQuestion && searched && !incomplete && answer !== "") {
     const offer = await proposeOffer({ db: serviceDb, ai }, {
       userId: args.userId, question: text, answer,
       ...(webCitations[0]?.url !== undefined ? { sourceUrl: webCitations[0].url } : {}),
