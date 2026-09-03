@@ -67,7 +67,7 @@ jobs:
               - 'packages/shared/**'
               - 'supabase/migrations/**'
               - 'pnpm-lock.yaml'
-              - 'railway.json'
+              - 'apps/api/Dockerfile'
               - '.github/workflows/post-merge.yml'
             web:
               - 'apps/web/**'
@@ -120,20 +120,69 @@ jobs:
   # Migrations are NOT part of this pipeline. `supabase db push` stays a deliberate, manual step
   # (docs/deploy.md's "Is there CI/CD?" section) -- a bad migration must never apply itself just
   # because the code that needs it happened to pass E2E.
+  #
+  # Moved off Railway (trial expired 2026-08-31) onto Cloud Run in the same GCP project that
+  # holds the $300 credit (gen-lang-client-0466664043, ap-southeast/asia-southeast1 to stay next
+  # to the Supabase project in Singapore). Auth is Workload Identity Federation -- no static key
+  # in GitHub secrets -- scoped to this repo only (see the attribute-condition on the WIF
+  # provider). Only the four secrets below are real secrets; SUPABASE_URL and the budget/tier
+  # values are not (same reasoning as VERCEL_ORG_ID/PROJECT_ID below: identifiers, not credentials).
   deploy-api:
-    name: Deploy API (Railway)
+    name: Deploy API (Cloud Run)
     needs: [changes, e2e-web]
     if: needs.changes.outputs.api == 'true' && needs.e2e-web.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT_ID: gen-lang-client-0466664043
+      REGION: asia-southeast1
+      IMAGE: asia-southeast1-docker.pkg.dev/gen-lang-client-0466664043/cortex/cortex-api
     steps:
       - uses: actions/checkout@v4
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-      - name: Deploy
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/939227979983/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-deployer@gen-lang-client-0466664043.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker asia-southeast1-docker.pkg.dev --quiet
+      - name: Build image
+        run: docker build -f apps/api/Dockerfile -t "$IMAGE:${{ github.sha }}" .
+      - name: Push image
+        run: docker push "$IMAGE:${{ github.sha }}"
+      - name: Write env vars file
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service cortex-api --detach --yes
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          cat > /tmp/env-vars.yaml <<EOF
+          SUPABASE_URL: "https://wilssluxogpdrbgffmzc.supabase.co"
+          SUPABASE_ANON_KEY: "$SUPABASE_ANON_KEY"
+          SUPABASE_SERVICE_ROLE_KEY: "$SUPABASE_SERVICE_ROLE_KEY"
+          DATABASE_URL: "$DATABASE_URL"
+          GEMINI_API_KEY: "$GEMINI_API_KEY"
+          GEMINI_TIER: "paid"
+          ENRICH_MONTHLY_BUDGET_USD: "10"
+          ASSISTANT_MONTHLY_BUDGET_USD: "10"
+          EOF
+      - name: Deploy
+        run: |
+          gcloud run deploy cortex-api \
+            --image="$IMAGE:${{ github.sha }}" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=3001 \
+            --env-vars-file=/tmp/env-vars.yaml
+      - name: Clean up env file
+        if: always()
+        run: rm -f /tmp/env-vars.yaml
 
   deploy-web:
     name: Deploy Web (Vercel)

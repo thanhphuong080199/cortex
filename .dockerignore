@@ -6,7 +6,7 @@
 # package.json, node_modules and dist from the build stage. This file exists so that stays a
 # fact rather than a coincidence -- one `COPY --from=build /repo/apps/api` in a future
 # refactor would bake real credentials into a layer, and nothing else in the repo would
-# notice. Every one of these values is supplied by Railway at runtime; none belongs in an
+# notice. Every one of these values is supplied by the deploy target at runtime; none belongs in an
 # image.
 .env
 .env.*
